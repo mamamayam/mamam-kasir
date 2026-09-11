@@ -47,6 +47,14 @@ class _MenuManagementScreenState extends ConsumerState<MenuManagementScreen> {
     final state = ref.watch(menuManagementProvider);
     final controller = ref.read(menuManagementProvider.notifier);
 
+    ref.listen(menuManagementProvider, (previous, next) {
+      if (next.errorMessage != null && next.errorMessage != previous?.errorMessage) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(next.errorMessage!), backgroundColor: AppColors.danger),
+        );
+      }
+    });
+
     return Scaffold(
       backgroundColor: AppColors.background,
       body: SafeArea(
@@ -69,10 +77,56 @@ class _MenuManagementScreenState extends ConsumerState<MenuManagementScreen> {
               onToggleViewMode: controller.cycleViewMode,
             ),
             Expanded(
-              child: state.tab == MenuManagementTab.menu
-                  ? _MenuTabContent(state: state)
-                  : _VarianTabContent(state: state),
+              child: state.isLoading
+                  ? const Center(child: CircularProgressIndicator(color: AppColors.brand))
+                  : state.tab == MenuManagementTab.menu
+                      ? _MenuTabContent(
+                          state: state,
+                          onItemTap: (item) => AppNav.showModal(
+                            context,
+                            builder: (_) => AddMenuItemModal(editingItem: item),
+                          ),
+                          onItemLongPress: (item) => _showItemActions(context, item, controller),
+                        )
+                      : _VarianTabContent(state: state),
             ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showItemActions(BuildContext context, MenuItem item, MenuManagementController controller) {
+    AppNav.showModal(
+      context,
+      isScrollControlled: false,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: AppSpacing.sm),
+            Container(
+              width: 48,
+              height: 5,
+              decoration: BoxDecoration(color: AppColors.border, borderRadius: BorderRadius.circular(AppRadius.pill)),
+            ),
+            const SizedBox(height: AppSpacing.lg),
+            ListTile(
+              leading: Icon(
+                item.isActive ? Icons.pause_circle_outline_rounded : Icons.play_circle_outline_rounded,
+                color: AppColors.textPrimary,
+              ),
+              title: Text(item.isActive ? 'Nonaktifkan menu' : 'Aktifkan menu'),
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                if (item.isActive) {
+                  controller.deactivateMenuItem(item.id);
+                } else {
+                  controller.reactivateMenuItem(item.id);
+                }
+              },
+            ),
+            const SizedBox(height: AppSpacing.md),
           ],
         ),
       ),
@@ -166,7 +220,10 @@ class _SearchRow extends StatelessWidget {
 
 class _MenuTabContent extends StatelessWidget {
   final MenuManagementState state;
-  const _MenuTabContent({required this.state});
+  final ValueChanged<MenuItem> onItemTap;
+  final ValueChanged<MenuItem> onItemLongPress;
+
+  const _MenuTabContent({required this.state, required this.onItemTap, required this.onItemLongPress});
 
   @override
   Widget build(BuildContext context) {
@@ -193,7 +250,14 @@ class _MenuTabContent extends StatelessWidget {
               ),
               _ItemLayout(
                 viewMode: state.viewMode,
-                children: entry.value.map((item) => MenuItemCard(item: item, viewMode: state.viewMode)).toList(),
+                children: entry.value
+                    .map((item) => MenuItemCard(
+                          item: item,
+                          viewMode: state.viewMode,
+                          onTap: () => onItemTap(item),
+                          onLongPress: () => onItemLongPress(item),
+                        ))
+                    .toList(),
               ),
             ],
           ),

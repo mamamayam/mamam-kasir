@@ -1,0 +1,3707 @@
+From 909ea3b7ded0ca870f5fd22cb2186afea40a6f78 Mon Sep 17 00:00:00 2001
+From: Mamam Kasir Dev <dev@mamamayam.local>
+Date: Thu, 10 Sep 2026 08:31:24 +0000
+Subject: [PATCH] feat: full POS/Kasir checkout flow (menu grid -> variant ->
+ cart -> voucher/discount -> payment -> receipt)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Logic/flow ported from mamam-global's React reference (App.jsx calculation
+chain, usePosStore, CartDrawer, PaymentModal, ReceiptModal) per golden rule
+'legacy app is behavior/logic reference only' — UI rebuilt distinct for
+Flutter/Riverpod, using this app's own design tokens and stack-navigation
+pattern.
+
+Scope decisions (explicit user calls):
+- No loyalty points (per PRD, points no longer used)
+- Voucher IS included — explicit override of AGENTS.md's 'active
+  points/vouchers' forbidden-scope rule
+- No shift-must-be-open constraint yet (shift not built)
+- Courier cash-holding/delivery-money-to-kurir explicitly deferred
+
+DB schema (v2): variant groups gained is_required/max_selection, variant
+options gained extra_price, added customers/vouchers/transactions/
+transaction_items tables. Transactions are snapshots (never recomputed
+from live menu/settings later), per PRD.
+
+New POS feature module:
+- Domain: CartItem (+CartItemBuilder for variant-combo cart line dedup),
+  Customer, Voucher, OrderType/PaymentMethod/SplitPayment/OjolPlatform,
+  Transaction, CartState, CheckoutCalculator (subtotal -> voucher discount
+  -> manual discount -> tax -> service -> delivery -> total -> rounding,
+  same formula order as the reference app), PaymentModalState, quick-cash
+  suggestions
+- Application (Riverpod, the Zustand-store equivalent): PosRepository
+  (menu/customer/voucher reads, transaction writes), CartController,
+  PosCatalogController, PaymentModalController — each its own
+  StateNotifierProvider, payment kept separate from cart per the
+  reference app's rationale (typing an amount shouldn't rebuild the cart)
+- Presentation: VariantSelectionModal (required/max-selection rules,
+  extra price), CartDrawer (customer picker, order type incl. Ojol
+  auto-resets discounts/voucher, delivery fee, qty steppers, voucher +
+  manual discount, totals), CustomerPickerSheet, PaymentModal (single +
+  split payment, quick-cash chips, Ojol platform+order-number, change),
+  ReceiptModal (itemized digital struk), PosScreen (menu grid,
+  search+category filter, cart FAB)
+
+Wired: Dashboard's 'Kasir' quick action now pushes PosScreen (was a stub).
+
+Also: Menu Management's VariantGroup model extended in place (isRequired,
+maxSelection, options now VariantOption objects with extraPrice) since
+this is the same underlying data POS needed — repository, provider, and
+the three widgets that rendered plain-string options were updated to match.
+---
+ lib/core/data/app_database.dart               | 178 +++++-
+ .../presentation/dashboard_screen.dart        |   8 +-
+ .../application/menu_management_provider.dart |   2 +-
+ .../menu_management_repository.dart           |  10 +-
+ .../domain/menu_management_models.dart        |  28 +-
+ .../widgets/add_menu_item_modal.dart          |   2 +-
+ .../widgets/variant_group_card.dart           |  35 +-
+ .../pos/application/cart_provider.dart        | 147 +++++
+ .../application/payment_modal_provider.dart   |  66 ++
+ .../pos/application/pos_catalog_provider.dart |  69 +++
+ .../pos/application/pos_repository.dart       | 195 ++++++
+ lib/features/pos/domain/cart_item.dart        |  95 +++
+ lib/features/pos/domain/cart_state.dart       |  70 +++
+ .../pos/domain/checkout_calculator.dart       | 121 ++++
+ lib/features/pos/domain/customer.dart         |  13 +
+ lib/features/pos/domain/order_models.dart     |  73 +++
+ .../pos/domain/payment_modal_state.dart       |  55 ++
+ lib/features/pos/domain/quick_cash.dart       |  21 +
+ lib/features/pos/domain/transaction.dart      |  71 +++
+ lib/features/pos/domain/voucher.dart          |  26 +
+ lib/features/pos/presentation/pos_screen.dart | 282 +++++++++
+ .../pos/presentation/widgets/cart_drawer.dart | 570 ++++++++++++++++++
+ .../widgets/customer_picker_sheet.dart        | 136 +++++
+ .../presentation/widgets/payment_modal.dart   | 542 +++++++++++++++++
+ .../presentation/widgets/receipt_modal.dart   | 254 ++++++++
+ .../widgets/variant_selection_modal.dart      | 242 ++++++++
+ 26 files changed, 3282 insertions(+), 29 deletions(-)
+ create mode 100644 lib/features/pos/application/cart_provider.dart
+ create mode 100644 lib/features/pos/application/payment_modal_provider.dart
+ create mode 100644 lib/features/pos/application/pos_catalog_provider.dart
+ create mode 100644 lib/features/pos/application/pos_repository.dart
+ create mode 100644 lib/features/pos/domain/cart_item.dart
+ create mode 100644 lib/features/pos/domain/cart_state.dart
+ create mode 100644 lib/features/pos/domain/checkout_calculator.dart
+ create mode 100644 lib/features/pos/domain/customer.dart
+ create mode 100644 lib/features/pos/domain/order_models.dart
+ create mode 100644 lib/features/pos/domain/payment_modal_state.dart
+ create mode 100644 lib/features/pos/domain/quick_cash.dart
+ create mode 100644 lib/features/pos/domain/transaction.dart
+ create mode 100644 lib/features/pos/domain/voucher.dart
+ create mode 100644 lib/features/pos/presentation/pos_screen.dart
+ create mode 100644 lib/features/pos/presentation/widgets/cart_drawer.dart
+ create mode 100644 lib/features/pos/presentation/widgets/customer_picker_sheet.dart
+ create mode 100644 lib/features/pos/presentation/widgets/payment_modal.dart
+ create mode 100644 lib/features/pos/presentation/widgets/receipt_modal.dart
+ create mode 100644 lib/features/pos/presentation/widgets/variant_selection_modal.dart
+
+diff --git a/lib/core/data/app_database.dart b/lib/core/data/app_database.dart
+index 5a3fa65..185cffb 100644
+--- a/lib/core/data/app_database.dart
++++ b/lib/core/data/app_database.dart
+@@ -11,9 +11,9 @@ import 'package:sqflite_sqlcipher/sqflite.dart';
+ /// NOTE on encryption key: per AGENTS.md security rules, the SQLCipher
+ /// passphrase must live in the OS keystore/keychain via
+ /// flutter_secure_storage, not hardcoded. This vertical slice uses a
+-/// placeholder fixed key so Menu Management can be built and tested
+-/// end-to-end now; swapping in the real secure-storage-backed key when
+-/// the Auth/security foundation phase (docs/06 phase 3) lands is a
++/// placeholder fixed key so features can be built and tested end-to-end
++/// now; swapping in the real secure-storage-backed key when the
++/// Auth/security foundation phase (docs/06 phase 3) lands is a
+ /// single-line change in [_openDatabase] and does not affect any
+ /// repository or UI code above this layer.
+ class AppDatabase {
+@@ -21,7 +21,12 @@ class AppDatabase {
+   static final AppDatabase instance = AppDatabase._();
+ 
+   static const _dbName = 'mamam_kasir.db';
+-  static const _dbVersion = 1;
++  // v2: added variant group is_required/max_selection, variant option
++  // extra_price, and the customers/vouchers/transactions tables for the
++  // POS/checkout vertical slice. Still pre-release (no real user data
++  // anywhere yet), so this is a straight schema bump with a fresh
++  // onCreate rather than an onUpgrade migration path.
++  static const _dbVersion = 2;
+ 
+   // TODO(security-foundation): replace with a key generated once and
+   // stored via flutter_secure_storage, per AGENTS.md.
+@@ -79,6 +84,8 @@ class AppDatabase {
+       CREATE TABLE variant_groups (
+         id TEXT PRIMARY KEY,
+         name TEXT NOT NULL,
++        is_required INTEGER NOT NULL DEFAULT 0,
++        max_selection INTEGER NOT NULL DEFAULT 1,
+         is_active INTEGER NOT NULL DEFAULT 1,
+         created_at TEXT NOT NULL,
+         updated_at TEXT NOT NULL
+@@ -90,6 +97,7 @@ class AppDatabase {
+         id TEXT PRIMARY KEY,
+         variant_group_id TEXT NOT NULL,
+         name TEXT NOT NULL,
++        extra_price INTEGER NOT NULL DEFAULT 0,
+         sort_order INTEGER NOT NULL DEFAULT 0,
+         FOREIGN KEY (variant_group_id) REFERENCES variant_groups (id)
+       )
+@@ -107,18 +115,98 @@ class AppDatabase {
+       )
+     ''');
+ 
++    await db.execute('''
++      CREATE TABLE customers (
++        id TEXT PRIMARY KEY,
++        name TEXT NOT NULL,
++        phone TEXT,
++        is_active INTEGER NOT NULL DEFAULT 1,
++        created_at TEXT NOT NULL,
++        updated_at TEXT NOT NULL
++      )
++    ''');
++
++    // Voucher functionality — kept despite AGENTS.md listing
++    // "active points/vouchers" as forbidden scope; explicit user
++    // decision to include vouchers while still excluding loyalty points
++    // (see [[mamam-kasir-flutter]] notes for the override rationale).
++    await db.execute('''
++      CREATE TABLE vouchers (
++        id TEXT PRIMARY KEY,
++        code TEXT NOT NULL UNIQUE,
++        discount_type TEXT NOT NULL, -- 'percent' | 'fixed'
++        discount_value INTEGER NOT NULL,
++        min_purchase INTEGER NOT NULL DEFAULT 0,
++        is_active INTEGER NOT NULL DEFAULT 1,
++        created_at TEXT NOT NULL,
++        updated_at TEXT NOT NULL
++      )
++    ''');
++
++    // Completed/open transactions. Money and calculated amounts are
++    // captured as a snapshot at checkout time (per PRD: "Historical data
++    // survives master changes") — never recomputed later from current
++    // menu prices or settings.
++    await db.execute('''
++      CREATE TABLE transactions (
++        id TEXT PRIMARY KEY,
++        display_number TEXT NOT NULL,
++        status TEXT NOT NULL, -- 'open' | 'paid' | 'canceled'
++        order_type TEXT NOT NULL, -- 'Takeaway' | 'Dine-in' | 'Delivery' | 'Ojol'
++        customer_id TEXT,
++        customer_name TEXT,
++        ojol_platform TEXT,
++        ojol_order_number TEXT,
++        subtotal INTEGER NOT NULL,
++        voucher_id TEXT,
++        voucher_code TEXT,
++        voucher_discount INTEGER NOT NULL DEFAULT 0,
++        manual_discount_type TEXT, -- 'percent' | 'fixed'
++        manual_discount_value INTEGER,
++        manual_discount_amount INTEGER NOT NULL DEFAULT 0,
++        tax_amount INTEGER NOT NULL DEFAULT 0,
++        service_amount INTEGER NOT NULL DEFAULT 0,
++        delivery_fee INTEGER NOT NULL DEFAULT 0,
++        rounding_adjustment INTEGER NOT NULL DEFAULT 0,
++        total INTEGER NOT NULL,
++        payment_method TEXT, -- 'Tunai' | 'QRIS' | 'Transfer' | 'Ojol' | 'Split Payment'
++        amount_paid INTEGER,
++        change_amount INTEGER,
++        split_payments_json TEXT, -- JSON array, only when payment_method = 'Split Payment'
++        created_at TEXT NOT NULL,
++        paid_at TEXT
++      )
++    ''');
++
++    await db.execute('''
++      CREATE TABLE transaction_items (
++        id TEXT PRIMARY KEY,
++        transaction_id TEXT NOT NULL,
++        menu_item_id TEXT NOT NULL,
++        name TEXT NOT NULL,
++        variant_name TEXT,
++        variant_selected_json TEXT,
++        price INTEGER NOT NULL,
++        hpp INTEGER NOT NULL DEFAULT 0,
++        qty INTEGER NOT NULL,
++        note TEXT,
++        FOREIGN KEY (transaction_id) REFERENCES transactions (id)
++      )
++    ''');
++
+     await _seedDemoData(db);
+   }
+ 
+   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+-    // NOTE: no migrations yet — this is schema version 1. Future
+-    // migrations get added here as `if (oldVersion < N) { ... }` blocks
+-    // once the DB is in the hands of real users with existing data.
++    // NOTE: no real migrations yet — pre-release, straight recreate is
++    // handled by bumping _dbVersion and relying on onCreate for now.
++    // Future migrations get added here as `if (oldVersion < N) { ... }`
++    // blocks once the DB is in the hands of real users with existing
++    // data that must be preserved across upgrades.
+   }
+ 
+-  /// Seeds the same demo rows the in-memory provider used to hardcode,
+-  /// so the screen shows familiar data on first run instead of an empty
+-  /// state. Safe to remove once real menu data entry is a normal flow.
++  /// Seeds demo rows so screens show familiar data on first run instead
++  /// of an empty state. Safe to remove once real data entry is routine.
+   Future<void> _seedDemoData(Database db) async {
+     final now = DateTime.now().toIso8601String();
+ 
+@@ -159,29 +247,87 @@ class AppDatabase {
+     }
+ 
+     final variantGroups = {
+-      'vg-1': {'name': 'Level Pedas', 'options': ['Level 0', 'Level 1', 'Level 2', 'Level 3']},
+-      'vg-2': {'name': 'Pilihan Minuman', 'options': ['Es Teh Manis', 'Teh Tawar', 'Mineral Water']},
+-      'vg-3': {'name': 'Ekstra Topping', 'options': ['Keju', 'Saus Keju', 'Kremes']},
++      'vg-1': {
++        'name': 'Level Pedas',
++        'isRequired': 1,
++        'maxSelection': 1,
++        'options': [
++          {'name': 'Level 0', 'extraPrice': 0},
++          {'name': 'Level 1', 'extraPrice': 0},
++          {'name': 'Level 2', 'extraPrice': 0},
++          {'name': 'Level 3', 'extraPrice': 0},
++        ],
++      },
++      'vg-2': {
++        'name': 'Pilihan Minuman',
++        'isRequired': 0,
++        'maxSelection': 1,
++        'options': [
++          {'name': 'Es Teh Manis', 'extraPrice': 0},
++          {'name': 'Teh Tawar', 'extraPrice': 0},
++          {'name': 'Mineral Water', 'extraPrice': 2000},
++        ],
++      },
++      'vg-3': {
++        'name': 'Ekstra Topping',
++        'isRequired': 0,
++        'maxSelection': 3,
++        'options': [
++          {'name': 'Keju', 'extraPrice': 5000},
++          {'name': 'Saus Keju', 'extraPrice': 4000},
++          {'name': 'Kremes', 'extraPrice': 3000},
++        ],
++      },
+     };
+ 
+     for (final entry in variantGroups.entries) {
++      final data = entry.value;
+       await db.insert('variant_groups', {
+         'id': entry.key,
+-        'name': entry.value['name'],
++        'name': data['name'],
++        'is_required': data['isRequired'],
++        'max_selection': data['maxSelection'],
+         'is_active': 1,
+         'created_at': now,
+         'updated_at': now,
+       });
+ 
+-      final options = entry.value['options'] as List<String>;
++      final options = data['options'] as List<Map<String, Object>>;
+       for (var i = 0; i < options.length; i++) {
+         await db.insert('variant_options', {
+           'id': '${entry.key}-opt-$i',
+           'variant_group_id': entry.key,
+-          'name': options[i],
++          'name': options[i]['name'],
++          'extra_price': options[i]['extraPrice'],
+           'sort_order': i,
+         });
+       }
+     }
++
++    // Link "Level Pedas" to the two chicken dishes, matching the
++    // reference app's behavior of some menus having required variants.
++    await db.insert('menu_item_variant_groups', {'menu_item_id': 'menu-3', 'variant_group_id': 'vg-1'});
++    await db.insert('menu_item_variant_groups', {'menu_item_id': 'menu-4', 'variant_group_id': 'vg-1'});
++    await db.insert('menu_item_variant_groups', {'menu_item_id': 'menu-4', 'variant_group_id': 'vg-3'});
++
++    await db.insert('customers', {
++      'id': 'cust-1',
++      'name': 'Budi Santoso',
++      'phone': '081234567890',
++      'is_active': 1,
++      'created_at': now,
++      'updated_at': now,
++    });
++
++    await db.insert('vouchers', {
++      'id': 'vch-1',
++      'code': 'HEMAT10',
++      'discount_type': 'percent',
++      'discount_value': 10,
++      'min_purchase': 20000,
++      'is_active': 1,
++      'created_at': now,
++      'updated_at': now,
++    });
+   }
+ }
+diff --git a/lib/features/dashboard/presentation/dashboard_screen.dart b/lib/features/dashboard/presentation/dashboard_screen.dart
+index 95f926d..3f73dfd 100644
+--- a/lib/features/dashboard/presentation/dashboard_screen.dart
++++ b/lib/features/dashboard/presentation/dashboard_screen.dart
+@@ -1,11 +1,13 @@
+ import 'package:flutter/material.dart';
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
++import '../../../core/navigation/app_nav.dart';
+ import '../../../core/theme/app_colors.dart';
+ import '../../../core/theme/app_spacing.dart';
+ import '../../../core/utils/currency.dart';
+ import '../../menu_shell/presentation/menu_bottom_sheet.dart';
+ import '../../menu_shell/presentation/swipe_up_trigger.dart';
++import '../../pos/presentation/pos_screen.dart';
+ import '../application/dashboard_provider.dart';
+ import '../domain/dashboard_models.dart';
+ import 'widgets/hero_sales_card.dart';
+@@ -133,11 +135,9 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
+                           ),
+                           const SizedBox(height: AppSpacing.lg),
+                           QuickActionsRow(
+-                            onKasirTap: () {
+-                              // Route to Kasir/POS — out of scope for this shell pass.
+-                            },
++                            onKasirTap: () => AppNav.push(context, (_) => const PosScreen()),
+                             onRiwayatTap: () {
+-                              // Route to Riwayat — out of scope for this shell pass.
++                              // Route to Riwayat — out of scope for this pass.
+                             },
+                           ),
+                         ],
+diff --git a/lib/features/menu_management/application/menu_management_provider.dart b/lib/features/menu_management/application/menu_management_provider.dart
+index 81f8b60..54860d9 100644
+--- a/lib/features/menu_management/application/menu_management_provider.dart
++++ b/lib/features/menu_management/application/menu_management_provider.dart
+@@ -76,7 +76,7 @@ class MenuManagementState {
+     final query = searchQuery.toLowerCase();
+     return variantGroups.where((group) {
+       return group.name.toLowerCase().contains(query) ||
+-          group.options.any((opt) => opt.toLowerCase().contains(query));
++          group.options.any((opt) => opt.name.toLowerCase().contains(query));
+     }).toList();
+   }
+ }
+diff --git a/lib/features/menu_management/application/menu_management_repository.dart b/lib/features/menu_management/application/menu_management_repository.dart
+index 422314c..19bcac8 100644
+--- a/lib/features/menu_management/application/menu_management_repository.dart
++++ b/lib/features/menu_management/application/menu_management_repository.dart
+@@ -217,8 +217,16 @@ class MenuManagementRepository {
+       groups.add(VariantGroup(
+         id: row['id'] as String,
+         name: row['name'] as String,
++        isRequired: (row['is_required'] as int) == 1,
++        maxSelection: row['max_selection'] as int,
+         isActive: (row['is_active'] as int) == 1,
+-        options: optionRows.map((o) => o['name'] as String).toList(),
++        options: optionRows
++            .map((o) => VariantOption(
++                  id: o['id'] as String,
++                  name: o['name'] as String,
++                  extraPrice: o['extra_price'] as int,
++                ))
++            .toList(),
+       ));
+     }
+     return groups;
+diff --git a/lib/features/menu_management/domain/menu_management_models.dart b/lib/features/menu_management/domain/menu_management_models.dart
+index 89a393d..d50f96c 100644
+--- a/lib/features/menu_management/domain/menu_management_models.dart
++++ b/lib/features/menu_management/domain/menu_management_models.dart
+@@ -71,16 +71,40 @@ class MenuItem {
+   }
+ }
+ 
+-/// A variant group (e.g. "Level Pedas" -> ["Level 0", "Level 1", ...]).
++/// A single selectable option within a variant group (e.g. "Level 2",
++/// or "Keju" with an extra price).
++class VariantOption {
++  final String id;
++  final String name;
++  final int extraPrice;
++
++  const VariantOption({
++    required this.id,
++    required this.name,
++    required this.extraPrice,
++  });
++}
++
++/// A variant group (e.g. "Level Pedas" -> Level 0/1/2/3).
++///
++/// `isRequired` and `maxSelection` mirror the reference app's variant
++/// selection rules: a required group must have at least one option
++/// picked before the item can be added to cart; `maxSelection` caps how
++/// many options can be picked at once (1 = single-select/radio-like,
++/// >1 = multi-select up to that count).
+ class VariantGroup {
+   final String id;
+   final String name;
++  final bool isRequired;
++  final int maxSelection;
+   final bool isActive;
+-  final List<String> options;
++  final List<VariantOption> options;
+ 
+   const VariantGroup({
+     required this.id,
+     required this.name,
++    required this.isRequired,
++    required this.maxSelection,
+     required this.isActive,
+     required this.options,
+   });
+diff --git a/lib/features/menu_management/presentation/widgets/add_menu_item_modal.dart b/lib/features/menu_management/presentation/widgets/add_menu_item_modal.dart
+index 9ffdce9..a2452d4 100644
+--- a/lib/features/menu_management/presentation/widgets/add_menu_item_modal.dart
++++ b/lib/features/menu_management/presentation/widgets/add_menu_item_modal.dart
+@@ -440,7 +440,7 @@ class _VariantCheckboxTile extends StatelessWidget {
+                       Text(group.name, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+                       const SizedBox(height: 2),
+                       Text(
+-                        group.options.join(', '),
++                        group.options.map((o) => o.name).join(', '),
+                         style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: AppColors.textSecondary),
+                       ),
+                     ],
+diff --git a/lib/features/menu_management/presentation/widgets/variant_group_card.dart b/lib/features/menu_management/presentation/widgets/variant_group_card.dart
+index f2169d9..62c56ab 100644
+--- a/lib/features/menu_management/presentation/widgets/variant_group_card.dart
++++ b/lib/features/menu_management/presentation/widgets/variant_group_card.dart
+@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
+ 
+ import '../../../../core/theme/app_colors.dart';
+ import '../../../../core/theme/app_spacing.dart';
++import '../../../../core/utils/currency.dart';
+ import '../../domain/menu_management_models.dart';
+ 
+ class VariantGroupCard extends StatelessWidget {
+@@ -41,9 +42,30 @@ class VariantGroupCard extends StatelessWidget {
+           mainAxisAlignment: MainAxisAlignment.spaceBetween,
+           children: [
+             Expanded(
+-              child: Text(
+-                group.name,
+-                style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
++              child: Row(
++                children: [
++                  Flexible(
++                    child: Text(
++                      group.name,
++                      overflow: TextOverflow.ellipsis,
++                      style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
++                    ),
++                  ),
++                  if (group.isRequired) ...[
++                    const SizedBox(width: 6),
++                    Container(
++                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
++                      decoration: BoxDecoration(
++                        color: AppColors.danger.withValues(alpha: 0.08),
++                        borderRadius: BorderRadius.circular(AppRadius.sm),
++                      ),
++                      child: const Text(
++                        'WAJIB',
++                        style: TextStyle(fontSize: 9, fontWeight: FontWeight.w800, color: AppColors.danger, letterSpacing: 0.3),
++                      ),
++                    ),
++                  ],
++                ],
+               ),
+             ),
+             Container(
+@@ -59,6 +81,11 @@ class VariantGroupCard extends StatelessWidget {
+             ),
+           ],
+         ),
++        const SizedBox(height: 4),
++        Text(
++          'Maks. ${group.maxSelection} dipilih',
++          style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.w500, color: AppColors.textMuted),
++        ),
+         const SizedBox(height: AppSpacing.sm),
+         Wrap(
+           spacing: 6,
+@@ -72,7 +99,7 @@ class VariantGroupCard extends StatelessWidget {
+                       border: Border.all(color: AppColors.border),
+                     ),
+                     child: Text(
+-                      opt,
++                      opt.extraPrice > 0 ? '${opt.name} (+${formatRupiah(opt.extraPrice)})' : opt.name,
+                       style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.textSecondary),
+                     ),
+                   ))
+diff --git a/lib/features/pos/application/cart_provider.dart b/lib/features/pos/application/cart_provider.dart
+new file mode 100644
+index 0000000..52b6b7a
+--- /dev/null
++++ b/lib/features/pos/application/cart_provider.dart
+@@ -0,0 +1,147 @@
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../../menu_management/domain/menu_management_models.dart';
++import '../domain/cart_item.dart';
++import '../domain/cart_state.dart';
++import '../domain/checkout_calculator.dart';
++import '../domain/customer.dart';
++import '../domain/order_models.dart';
++import 'pos_repository.dart';
++
++final posRepositoryProvider = Provider<PosRepository>((ref) => PosRepository());
++
++/// NOTE: not persisted across app restarts yet (the reference app's
++/// draft survives via Zustand's `persist` + localStorage). Local
++/// persistence for the cart draft is a follow-up once this checkout
++/// flow itself is verified working — flagged here rather than silently
++/// left out.
++final cartProvider = StateNotifierProvider<CartController, CartState>((ref) {
++  return CartController(ref.watch(posRepositoryProvider));
++});
++
++class CartController extends StateNotifier<CartState> {
++  final PosRepository _repository;
++
++  CartController(this._repository) : super(CartState.empty);
++
++  // --- Cart item actions ---
++
++  void addToCart(MenuItem menu, Map<String, List<String>> selectedOptions, List<VariantGroup> variantGroups) {
++    final cartItemId = CartItemBuilder.buildCartItemId(menu.id, selectedOptions);
++    final existingIndex = state.cart.indexWhere((i) => i.cartItemId == cartItemId);
++
++    if (existingIndex != -1) {
++      final updated = [...state.cart];
++      updated[existingIndex] = updated[existingIndex].copyWith(qty: updated[existingIndex].qty + 1);
++      state = state.copyWith(cart: updated);
++      return;
++    }
++
++    final newItem = CartItemBuilder.build(
++      menu: menu,
++      selectedOptions: selectedOptions,
++      variantGroups: variantGroups,
++      existingQty: 0,
++    );
++    state = state.copyWith(cart: [...state.cart, newItem]);
++  }
++
++  void updateQty(String cartItemId, int delta) {
++    final updated = state.cart
++        .map((item) {
++          if (item.cartItemId != cartItemId) return item;
++          final newQty = item.qty + delta;
++          return newQty > 0 ? item.copyWith(qty: newQty) : null;
++        })
++        .whereType<CartItem>()
++        .toList();
++    state = state.copyWith(cart: updated);
++  }
++
++  void setQty(String cartItemId, int qty) {
++    if (qty <= 0) {
++      removeItem(cartItemId);
++      return;
++    }
++    final updated = state.cart.map((item) => item.cartItemId == cartItemId ? item.copyWith(qty: qty) : item).toList();
++    state = state.copyWith(cart: updated);
++  }
++
++  void updateNote(String cartItemId, String note) {
++    final updated = state.cart.map((item) => item.cartItemId == cartItemId ? item.copyWith(note: note) : item).toList();
++    state = state.copyWith(cart: updated);
++  }
++
++  void removeItem(String cartItemId) {
++    state = state.copyWith(cart: state.cart.where((i) => i.cartItemId != cartItemId).toList());
++  }
++
++  // --- Customer ---
++
++  void setCustomer(Customer customer) {
++    state = state.copyWith(customer: customer, guestName: '');
++  }
++
++  void setGuestName(String name) {
++    state = state.copyWith(guestName: name, clearCustomer: true);
++  }
++
++  void clearCustomer() {
++    state = state.copyWith(clearCustomer: true, guestName: '');
++  }
++
++  Future<Customer> createAndSetCustomer({required String name, String? phone}) async {
++    final customer = await _repository.createCustomer(name: name, phone: phone);
++    setCustomer(customer);
++    return customer;
++  }
++
++  // --- Order type & delivery ---
++
++  void setOrderType(OrderType type) {
++    if (type == OrderType.ojol) {
++      // Reset discounts/voucher on Ojol, matching the reference app —
++      // Ojol orders don't carry manual discounts or vouchers.
++      state = state.copyWith(
++        orderType: type,
++        deliveryFee: 0,
++        clearVoucher: true,
++        manualDiscount: ManualDiscount.none,
++      );
++      return;
++    }
++
++    state = state.copyWith(
++      orderType: type,
++      deliveryFee: type == OrderType.delivery ? state.deliveryFee : 0,
++    );
++  }
++
++  void setDeliveryFee(int fee) {
++    state = state.copyWith(deliveryFee: fee);
++  }
++
++  // --- Voucher & manual discount ---
++
++  Future<bool> applyVoucherCode(String code) async {
++    final voucher = await _repository.findVoucherByCode(code.toUpperCase());
++    if (voucher == null) return false;
++    if (CheckoutCalculator.subtotal(state) < voucher.minPurchase) return false;
++    state = state.copyWith(appliedVoucher: voucher);
++    return true;
++  }
++
++  void clearVoucher() {
++    state = state.copyWith(clearVoucher: true);
++  }
++
++  void setManualDiscount(ManualDiscount discount) {
++    state = state.copyWith(manualDiscount: discount);
++  }
++
++  // --- Reset ---
++
++  void resetDraft() {
++    state = CartState.empty;
++  }
++}
+diff --git a/lib/features/pos/application/payment_modal_provider.dart b/lib/features/pos/application/payment_modal_provider.dart
+new file mode 100644
+index 0000000..dc133d4
+--- /dev/null
++++ b/lib/features/pos/application/payment_modal_provider.dart
+@@ -0,0 +1,66 @@
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../domain/order_models.dart';
++import '../domain/payment_modal_state.dart';
++
++final paymentModalProvider = StateNotifierProvider.autoDispose<PaymentModalController, PaymentModalState>((ref) {
++  return PaymentModalController();
++});
++
++class PaymentModalController extends StateNotifier<PaymentModalState> {
++  PaymentModalController() : super(PaymentModalState.closed);
++
++  void open({required OrderType orderType}) {
++    state = PaymentModalState(
++      isOpen: true,
++      method: orderType == OrderType.ojol ? PaymentMethod.ojol : PaymentMethod.tunai,
++    );
++  }
++
++  void close() {
++    state = PaymentModalState.closed;
++  }
++
++  void setMethod(PaymentMethod method) {
++    state = state.copyWith(method: method, status: PaymentStatus.pending);
++  }
++
++  void setAmountPaidText(String text) {
++    state = state.copyWith(amountPaidText: text);
++  }
++
++  void setOjolPlatform(OjolPlatform platform) {
++    state = state.copyWith(ojolPlatform: platform);
++  }
++
++  void setOrderNumber(String number) {
++    state = state.copyWith(orderNumber: number);
++  }
++
++  void markCompleted() {
++    state = state.copyWith(status: PaymentStatus.completed);
++  }
++
++  void toggleSplitMode(bool enabled) {
++    state = state.copyWith(
++      isSplitMode: enabled,
++      splitPayments: enabled ? state.splitPayments : [],
++      amountPaidText: '',
++    );
++  }
++
++  void addSplitPayment() {
++    final amount = state.amountPaid;
++    if (amount <= 0) return;
++    state = state.copyWith(
++      splitPayments: [...state.splitPayments, SplitPaymentEntry(method: state.method, amount: amount)],
++      amountPaidText: '',
++      method: PaymentMethod.tunai,
++    );
++  }
++
++  void removeSplitPayment(int index) {
++    final updated = [...state.splitPayments]..removeAt(index);
++    state = state.copyWith(splitPayments: updated);
++  }
++}
+diff --git a/lib/features/pos/application/pos_catalog_provider.dart b/lib/features/pos/application/pos_catalog_provider.dart
+new file mode 100644
+index 0000000..cab2b99
+--- /dev/null
++++ b/lib/features/pos/application/pos_catalog_provider.dart
+@@ -0,0 +1,69 @@
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../../menu_management/domain/menu_management_models.dart';
++import '../domain/customer.dart';
++import 'cart_provider.dart';
++import 'pos_repository.dart';
++
++class PosCatalogState {
++  final List<MenuItem> menuItems;
++  final List<VariantGroup> variantGroups;
++  final List<Customer> customers;
++  final bool isLoading;
++  final String? errorMessage;
++
++  const PosCatalogState({
++    this.menuItems = const [],
++    this.variantGroups = const [],
++    this.customers = const [],
++    this.isLoading = true,
++    this.errorMessage,
++  });
++
++  PosCatalogState copyWith({
++    List<MenuItem>? menuItems,
++    List<VariantGroup>? variantGroups,
++    List<Customer>? customers,
++    bool? isLoading,
++    String? errorMessage,
++  }) {
++    return PosCatalogState(
++      menuItems: menuItems ?? this.menuItems,
++      variantGroups: variantGroups ?? this.variantGroups,
++      customers: customers ?? this.customers,
++      isLoading: isLoading ?? this.isLoading,
++      errorMessage: errorMessage,
++    );
++  }
++
++  List<String> get categoryNames => menuItems.map((m) => m.categoryName).toSet().toList();
++}
++
++final posCatalogProvider = StateNotifierProvider.autoDispose<PosCatalogController, PosCatalogState>((ref) {
++  return PosCatalogController(ref.watch(posRepositoryProvider));
++});
++
++class PosCatalogController extends StateNotifier<PosCatalogState> {
++  final PosRepository _repository;
++
++  PosCatalogController(this._repository) : super(const PosCatalogState()) {
++    load();
++  }
++
++  Future<void> load() async {
++    state = state.copyWith(isLoading: true, errorMessage: null);
++    try {
++      final menuItems = await _repository.getActiveMenuItems();
++      final variantGroups = await _repository.getVariantGroups();
++      final customers = await _repository.getActiveCustomers();
++      state = state.copyWith(
++        menuItems: menuItems,
++        variantGroups: variantGroups,
++        customers: customers,
++        isLoading: false,
++      );
++    } catch (e) {
++      state = state.copyWith(isLoading: false, errorMessage: 'Gagal memuat data: $e');
++    }
++  }
++}
+diff --git a/lib/features/pos/application/pos_repository.dart b/lib/features/pos/application/pos_repository.dart
+new file mode 100644
+index 0000000..1930c0c
+--- /dev/null
++++ b/lib/features/pos/application/pos_repository.dart
+@@ -0,0 +1,195 @@
++import 'dart:convert';
++
++import 'package:sqflite_sqlcipher/sqflite.dart';
++import 'package:uuid/uuid.dart';
++
++import '../../../core/data/app_database.dart';
++import '../../menu_management/application/menu_management_repository.dart';
++import '../../menu_management/domain/menu_management_models.dart';
++import '../domain/cart_item.dart';
++import '../domain/customer.dart';
++import '../domain/order_models.dart';
++import '../domain/transaction.dart';
++import '../domain/voucher.dart';
++
++class PosRepository {
++  final _uuid = const Uuid();
++  final MenuManagementRepository _menuRepository = MenuManagementRepository();
++
++  Future<Database> get _db => AppDatabase.instance.database;
++
++  // --- Menu / catalog (delegates to Menu Management's repository so
++  // there is one source of truth for menu/category/variant data) ---
++
++  Future<List<MenuItem>> getActiveMenuItems() async {
++    final items = await _menuRepository.getMenuItems();
++    return items.where((i) => i.isActive).toList();
++  }
++
++  Future<List<VariantGroup>> getVariantGroups() => _menuRepository.getVariantGroups();
++
++  // --- Customers ---
++
++  Future<List<Customer>> getActiveCustomers() async {
++    final db = await _db;
++    final rows = await db.query('customers', where: 'is_active = 1', orderBy: 'name ASC');
++    return rows
++        .map((r) => Customer(
++              id: r['id'] as String,
++              name: r['name'] as String,
++              phone: r['phone'] as String?,
++              isActive: true,
++            ))
++        .toList();
++  }
++
++  Future<Customer> createCustomer({required String name, String? phone}) async {
++    final db = await _db;
++    final now = DateTime.now().toIso8601String();
++    final id = _uuid.v4();
++    await db.insert('customers', {
++      'id': id,
++      'name': name,
++      'phone': phone,
++      'is_active': 1,
++      'created_at': now,
++      'updated_at': now,
++    });
++    return Customer(id: id, name: name, phone: phone, isActive: true);
++  }
++
++  // --- Vouchers ---
++
++  Future<Voucher?> findVoucherByCode(String code) async {
++    final db = await _db;
++    final rows = await db.query(
++      'vouchers',
++      where: 'code = ? AND is_active = 1',
++      whereArgs: [code],
++      limit: 1,
++    );
++    if (rows.isEmpty) return null;
++    final r = rows.first;
++    return Voucher(
++      id: r['id'] as String,
++      code: r['code'] as String,
++      discountType: (r['discount_type'] as String) == 'percent' ? VoucherDiscountType.percent : VoucherDiscountType.fixed,
++      discountValue: r['discount_value'] as int,
++      minPurchase: r['min_purchase'] as int,
++      isActive: true,
++    );
++  }
++
++  // --- Transactions ---
++
++  /// Persists a completed transaction and its line items. `id` and
++  /// `displayNumber` are generated here so the caller (checkout flow)
++  /// doesn't need its own ID scheme.
++  Future<Transaction> saveTransaction({
++    required TransactionStatus status,
++    required OrderType orderType,
++    String? customerId,
++    String? customerName,
++    OjolPlatform? ojolPlatform,
++    String? ojolOrderNumber,
++    required List<CartItem> items,
++    required int subtotal,
++    String? voucherId,
++    String? voucherCode,
++    required int voucherDiscount,
++    ManualDiscount? manualDiscount,
++    required int manualDiscountAmount,
++    required int taxAmount,
++    required int serviceAmount,
++    required int deliveryFee,
++    required int roundingAdjustment,
++    required int total,
++    String? paymentMethodLabel,
++    int? amountPaid,
++    int? changeAmount,
++    List<SplitPaymentEntry> splitPayments = const [],
++  }) async {
++    final db = await _db;
++    final now = DateTime.now();
++    final id = _uuid.v4();
++    // Short, human-readable presentation ID — not a durable identifier
++    // (the UUID is), matching the architecture doc's "Human-readable SB
++    // numbers are presentation IDs" note.
++    final displayNumber = 'ORD-${id.substring(0, 6).toUpperCase()}';
++
++    await db.insert('transactions', {
++      'id': id,
++      'display_number': displayNumber,
++      'status': status.name,
++      'order_type': orderType.label,
++      'customer_id': customerId,
++      'customer_name': customerName,
++      'ojol_platform': ojolPlatform?.label,
++      'ojol_order_number': ojolOrderNumber,
++      'subtotal': subtotal,
++      'voucher_id': voucherId,
++      'voucher_code': voucherCode,
++      'voucher_discount': voucherDiscount,
++      'manual_discount_type': manualDiscount?.type.name,
++      'manual_discount_value': manualDiscount?.value,
++      'manual_discount_amount': manualDiscountAmount,
++      'tax_amount': taxAmount,
++      'service_amount': serviceAmount,
++      'delivery_fee': deliveryFee,
++      'rounding_adjustment': roundingAdjustment,
++      'total': total,
++      'payment_method': paymentMethodLabel,
++      'amount_paid': amountPaid,
++      'change_amount': changeAmount,
++      'split_payments_json': splitPayments.isEmpty
++          ? null
++          : jsonEncode(splitPayments.map((p) => {'method': p.method.label, 'amount': p.amount}).toList()),
++      'created_at': now.toIso8601String(),
++      'paid_at': status == TransactionStatus.paid ? now.toIso8601String() : null,
++    });
++
++    for (final item in items) {
++      await db.insert('transaction_items', {
++        'id': _uuid.v4(),
++        'transaction_id': id,
++        'menu_item_id': item.menuItemId,
++        'name': item.name,
++        'variant_name': item.variantName,
++        'variant_selected_json': item.variantSelectedOptions.isEmpty ? null : jsonEncode(item.variantSelectedOptions),
++        'price': item.price,
++        'hpp': item.hpp,
++        'qty': item.qty,
++        'note': item.note.isEmpty ? null : item.note,
++      });
++    }
++
++    return Transaction(
++      id: id,
++      displayNumber: displayNumber,
++      status: status,
++      orderType: orderType,
++      customerId: customerId,
++      customerName: customerName,
++      ojolPlatform: ojolPlatform,
++      ojolOrderNumber: ojolOrderNumber,
++      items: items,
++      subtotal: subtotal,
++      voucherId: voucherId,
++      voucherCode: voucherCode,
++      voucherDiscount: voucherDiscount,
++      manualDiscount: manualDiscount,
++      manualDiscountAmount: manualDiscountAmount,
++      taxAmount: taxAmount,
++      serviceAmount: serviceAmount,
++      deliveryFee: deliveryFee,
++      roundingAdjustment: roundingAdjustment,
++      total: total,
++      paymentMethodLabel: paymentMethodLabel,
++      amountPaid: amountPaid,
++      changeAmount: changeAmount,
++      splitPayments: splitPayments,
++      createdAt: now,
++      paidAt: status == TransactionStatus.paid ? now : null,
++    );
++  }
++}
+diff --git a/lib/features/pos/domain/cart_item.dart b/lib/features/pos/domain/cart_item.dart
+new file mode 100644
+index 0000000..83a093a
+--- /dev/null
++++ b/lib/features/pos/domain/cart_item.dart
+@@ -0,0 +1,95 @@
++import '../../menu_management/domain/menu_management_models.dart';
++
++/// One line in the cart — a menu item with resolved variant selections.
++///
++/// `cartItemId` mirrors the reference app's approach: derived from
++/// `menuItemId` + sorted selected option ids, so adding the same menu
++/// item with the same variant combination again increments qty instead
++/// of creating a duplicate line, while a different variant combination
++/// becomes its own line.
++class CartItem {
++  final String cartItemId;
++  final String menuItemId;
++  final String name;
++  final String? variantName; // display string, e.g. "Level 2, Keju"
++  final Map<String, List<String>> variantSelectedOptions; // groupId -> optionIds
++  final int price; // base price + extra price from selected variants
++  final int hpp;
++  final int qty;
++  final String note;
++
++  const CartItem({
++    required this.cartItemId,
++    required this.menuItemId,
++    required this.name,
++    this.variantName,
++    this.variantSelectedOptions = const {},
++    required this.price,
++    required this.hpp,
++    required this.qty,
++    this.note = '',
++  });
++
++  int get lineTotal => price * qty;
++
++  CartItem copyWith({int? qty, String? note}) {
++    return CartItem(
++      cartItemId: cartItemId,
++      menuItemId: menuItemId,
++      name: name,
++      variantName: variantName,
++      variantSelectedOptions: variantSelectedOptions,
++      price: price,
++      hpp: hpp,
++      qty: qty ?? this.qty,
++      note: note ?? this.note,
++    );
++  }
++}
++
++/// Builds a [CartItem] from a [MenuItem] and the variant options selected
++/// for it, resolving extra price and a display name for the combination —
++/// same derivation the reference app's `addToCart` does.
++class CartItemBuilder {
++  static String buildCartItemId(String menuItemId, Map<String, List<String>> selectedOptions) {
++    final optionIds = selectedOptions.values.expand((ids) => ids).toList()..sort();
++    return optionIds.isEmpty ? menuItemId : '$menuItemId-${optionIds.join('-')}';
++  }
++
++  static CartItem build({
++    required MenuItem menu,
++    required Map<String, List<String>> selectedOptions,
++    required List<VariantGroup> variantGroups,
++    required int existingQty,
++  }) {
++    var extraPriceTotal = 0;
++    final variantNames = <String>[];
++
++    for (final entry in selectedOptions.entries) {
++      final group = variantGroups.where((g) => g.id == entry.key).firstOrNull;
++      if (group == null) continue;
++      for (final optionId in entry.value) {
++        final option = group.options.where((o) => o.id == optionId).firstOrNull;
++        if (option == null) continue;
++        extraPriceTotal += option.extraPrice;
++        variantNames.add(option.name);
++      }
++    }
++
++    return CartItem(
++      cartItemId: buildCartItemId(menu.id, selectedOptions),
++      menuItemId: menu.id,
++      name: menu.name,
++      variantName: variantNames.isEmpty ? null : variantNames.join(', '),
++      variantSelectedOptions: selectedOptions,
++      price: menu.price + extraPriceTotal,
++      hpp: menu.hpp ?? 0,
++      qty: existingQty + 1,
++      note: '',
++    );
++  }
++}
++
++extension _FirstOrNullExt<T> on Iterable<T> {
++  T? get firstOrNull => isEmpty ? null : first;
++}
+diff --git a/lib/features/pos/domain/cart_state.dart b/lib/features/pos/domain/cart_state.dart
+new file mode 100644
+index 0000000..8251cb7
+--- /dev/null
++++ b/lib/features/pos/domain/cart_state.dart
+@@ -0,0 +1,70 @@
++import 'cart_item.dart';
++import 'customer.dart';
++import 'order_models.dart';
++import 'voucher.dart';
++
++/// Store-wide settings affecting checkout math — tax/service/rounding.
++/// Kept minimal for this vertical slice; a real Settings screen would
++/// own and persist these later.
++class StoreCheckoutSettings {
++  final int taxRatePercent;
++  final int serviceChargePercent;
++  final RoundingMode roundingMode;
++
++  const StoreCheckoutSettings({
++    this.taxRatePercent = 0,
++    this.serviceChargePercent = 0,
++    this.roundingMode = RoundingMode.none,
++  });
++}
++
++enum RoundingMode { none, nearest500 }
++
++/// The full draft-transaction state — same shape as the reference app's
++/// persisted Zustand slice (cart, customer, order type, delivery,
++/// voucher, manual discount) plus the in-progress payment form.
++class CartState {
++  final List<CartItem> cart;
++  final Customer? customer;
++  final String guestName;
++  final OrderType orderType;
++  final int deliveryFee;
++  final String? deliveryCourierNote; // kept as a free note only — courier cash-holding logic deferred
++  final Voucher? appliedVoucher;
++  final ManualDiscount manualDiscount;
++
++  const CartState({
++    this.cart = const [],
++    this.customer,
++    this.guestName = '',
++    this.orderType = OrderType.takeaway,
++    this.deliveryFee = 0,
++    this.deliveryCourierNote,
++    this.appliedVoucher,
++    this.manualDiscount = ManualDiscount.none,
++  });
++
++  CartState copyWith({
++    List<CartItem>? cart,
++    Customer? customer,
++    bool clearCustomer = false,
++    String? guestName,
++    OrderType? orderType,
++    int? deliveryFee,
++    Voucher? appliedVoucher,
++    bool clearVoucher = false,
++    ManualDiscount? manualDiscount,
++  }) {
++    return CartState(
++      cart: cart ?? this.cart,
++      customer: clearCustomer ? null : (customer ?? this.customer),
++      guestName: guestName ?? this.guestName,
++      orderType: orderType ?? this.orderType,
++      deliveryFee: deliveryFee ?? this.deliveryFee,
++      appliedVoucher: clearVoucher ? null : (appliedVoucher ?? this.appliedVoucher),
++      manualDiscount: manualDiscount ?? this.manualDiscount,
++    );
++  }
++
++  static const empty = CartState();
++}
+diff --git a/lib/features/pos/domain/checkout_calculator.dart b/lib/features/pos/domain/checkout_calculator.dart
+new file mode 100644
+index 0000000..42429a4
+--- /dev/null
++++ b/lib/features/pos/domain/checkout_calculator.dart
+@@ -0,0 +1,121 @@
++import 'dart:math';
++
++import 'cart_state.dart';
++import 'order_models.dart';
++import 'voucher.dart';
++
++/// All derived checkout amounts for the current cart + settings. A
++/// direct port of the reference app's `getSubtotal`/`getDiscount`/
++/// `getTaxAmount`/`getServiceChargeAmount`/`getTotal`/`getRoundedTotal`/
++/// `getRoundingAdjustment` chain (App.jsx), same formula order:
++///
++///   taxableAmount = max(0, subtotal - voucherDiscount - manualDiscount)
++///   tax = taxableAmount * taxRate%
++///   service = taxableAmount * serviceRate%
++///   total = max(0, taxableAmount + tax + service + deliveryFee)
++///   roundedTotal = rounding applied to total
++///
++/// NOTE: loyalty points are intentionally absent (per PRD, points are no
++/// longer used) — the reference app's `getPointDiscount` step is
++/// dropped from this chain.
++class CheckoutTotals {
++  final int subtotal;
++  final int voucherDiscount;
++  final int manualDiscountAmount;
++  final int taxableAmount;
++  final int taxAmount;
++  final int serviceAmount;
++  final int deliveryFee;
++  final int total; // pre-rounding
++  final int roundedTotal;
++  final int roundingAdjustment;
++
++  const CheckoutTotals({
++    required this.subtotal,
++    required this.voucherDiscount,
++    required this.manualDiscountAmount,
++    required this.taxableAmount,
++    required this.taxAmount,
++    required this.serviceAmount,
++    required this.deliveryFee,
++    required this.total,
++    required this.roundedTotal,
++    required this.roundingAdjustment,
++  });
++}
++
++class CheckoutCalculator {
++  static int subtotal(CartState state) {
++    return state.cart.fold(0, (sum, item) => sum + item.lineTotal);
++  }
++
++  static int voucherDiscount(CartState state) {
++    final voucher = state.appliedVoucher;
++    if (voucher == null) return 0;
++    final sub = subtotal(state);
++    if (sub < voucher.minPurchase) return 0;
++    if (voucher.discountType == VoucherDiscountType.percent) {
++      return (sub * voucher.discountValue / 100).round();
++    }
++    return voucher.discountValue;
++  }
++
++  static int manualDiscountAmount(CartState state) {
++    final discount = state.manualDiscount;
++    if (discount.value <= 0) return 0;
++    if (discount.type == ManualDiscountType.percent) {
++      return (subtotal(state) * discount.value / 100).round();
++    }
++    return discount.value;
++  }
++
++  static int taxableAmount(CartState state) {
++    final sub = subtotal(state);
++    final taxable = sub - voucherDiscount(state) - manualDiscountAmount(state);
++    return max(0, taxable);
++  }
++
++  static int taxAmount(CartState state, StoreCheckoutSettings settings) {
++    return (taxableAmount(state) * settings.taxRatePercent / 100).round();
++  }
++
++  static int serviceAmount(CartState state, StoreCheckoutSettings settings) {
++    return (taxableAmount(state) * settings.serviceChargePercent / 100).round();
++  }
++
++  static int total(CartState state, StoreCheckoutSettings settings) {
++    final deliveryFee = state.orderType == OrderType.delivery ? state.deliveryFee : 0;
++    final t = taxableAmount(state) + taxAmount(state, settings) + serviceAmount(state, settings) + deliveryFee;
++    return max(0, t);
++  }
++
++  static int roundedTotal(CartState state, StoreCheckoutSettings settings) {
++    final t = total(state, settings);
++    switch (settings.roundingMode) {
++      case RoundingMode.nearest500:
++        return (t / 500).floor() * 500;
++      case RoundingMode.none:
++        return t;
++    }
++  }
++
++  static int roundingAdjustment(CartState state, StoreCheckoutSettings settings) {
++    return roundedTotal(state, settings) - total(state, settings);
++  }
++
++  static CheckoutTotals compute(CartState state, StoreCheckoutSettings settings) {
++    final deliveryFee = state.orderType == OrderType.delivery ? state.deliveryFee : 0;
++    return CheckoutTotals(
++      subtotal: subtotal(state),
++      voucherDiscount: voucherDiscount(state),
++      manualDiscountAmount: manualDiscountAmount(state),
++      taxableAmount: taxableAmount(state),
++      taxAmount: taxAmount(state, settings),
++      serviceAmount: serviceAmount(state, settings),
++      deliveryFee: deliveryFee,
++      total: total(state, settings),
++      roundedTotal: roundedTotal(state, settings),
++      roundingAdjustment: roundingAdjustment(state, settings),
++    );
++  }
++}
+diff --git a/lib/features/pos/domain/customer.dart b/lib/features/pos/domain/customer.dart
+new file mode 100644
+index 0000000..6d4d93f
+--- /dev/null
++++ b/lib/features/pos/domain/customer.dart
+@@ -0,0 +1,13 @@
++class Customer {
++  final String id;
++  final String name;
++  final String? phone;
++  final bool isActive;
++
++  const Customer({
++    required this.id,
++    required this.name,
++    this.phone,
++    required this.isActive,
++  });
++}
+diff --git a/lib/features/pos/domain/order_models.dart b/lib/features/pos/domain/order_models.dart
+new file mode 100644
+index 0000000..3c9c172
+--- /dev/null
++++ b/lib/features/pos/domain/order_models.dart
+@@ -0,0 +1,73 @@
++/// Order type — matches the reference app's four types exactly.
++enum OrderType { takeaway, dineIn, delivery, ojol }
++
++extension OrderTypeX on OrderType {
++  String get label {
++    switch (this) {
++      case OrderType.takeaway:
++        return 'Takeaway';
++      case OrderType.dineIn:
++        return 'Dine-in';
++      case OrderType.delivery:
++        return 'Delivery';
++      case OrderType.ojol:
++        return 'Ojol';
++    }
++  }
++}
++
++enum ManualDiscountType { percent, fixed }
++
++class ManualDiscount {
++  final ManualDiscountType type;
++  final int value;
++
++  const ManualDiscount({required this.type, required this.value});
++
++  static const none = ManualDiscount(type: ManualDiscountType.fixed, value: 0);
++}
++
++/// Payment method for a single (non-split) payment, or one leg of a
++/// split payment.
++enum PaymentMethod { tunai, qris, transfer, ojol }
++
++extension PaymentMethodX on PaymentMethod {
++  String get label {
++    switch (this) {
++      case PaymentMethod.tunai:
++        return 'Tunai';
++      case PaymentMethod.qris:
++        return 'QRIS';
++      case PaymentMethod.transfer:
++        return 'Transfer';
++      case PaymentMethod.ojol:
++        return 'Ojol';
++    }
++  }
++}
++
++/// One leg of a split payment (e.g. "paid 20000 in Tunai, then 15000 in
++/// QRIS").
++class SplitPaymentEntry {
++  final PaymentMethod method;
++  final int amount;
++
++  const SplitPaymentEntry({required this.method, required this.amount});
++}
++
++/// Ojol delivery-platform app — Shopeefood/Grabfood/Gofood, matching the
++/// reference app's options.
++enum OjolPlatform { shopeefood, grabfood, gofood }
++
++extension OjolPlatformX on OjolPlatform {
++  String get label {
++    switch (this) {
++      case OjolPlatform.shopeefood:
++        return 'Shopeefood';
++      case OjolPlatform.grabfood:
++        return 'Grabfood';
++      case OjolPlatform.gofood:
++        return 'Gofood';
++    }
++  }
++}
+diff --git a/lib/features/pos/domain/payment_modal_state.dart b/lib/features/pos/domain/payment_modal_state.dart
+new file mode 100644
+index 0000000..0cb3e2a
+--- /dev/null
++++ b/lib/features/pos/domain/payment_modal_state.dart
+@@ -0,0 +1,55 @@
++import 'order_models.dart';
++
++enum PaymentStatus { pending, completed }
++
++/// In-progress payment form state. Kept as its own provider (not part
++/// of [CartState]) — mirrors the reference app's rationale for putting
++/// this in a separate Zustand slice: typing an amount shouldn't
++/// rebuild every widget watching the cart.
++class PaymentModalState {
++  final bool isOpen;
++  final bool isSplitMode;
++  final List<SplitPaymentEntry> splitPayments;
++  final PaymentMethod method;
++  final String amountPaidText;
++  final PaymentStatus status;
++  final OjolPlatform? ojolPlatform;
++  final String orderNumber;
++
++  const PaymentModalState({
++    this.isOpen = false,
++    this.isSplitMode = false,
++    this.splitPayments = const [],
++    this.method = PaymentMethod.tunai,
++    this.amountPaidText = '',
++    this.status = PaymentStatus.pending,
++    this.ojolPlatform,
++    this.orderNumber = '',
++  });
++
++  int get amountPaid => int.tryParse(amountPaidText) ?? 0;
++
++  PaymentModalState copyWith({
++    bool? isOpen,
++    bool? isSplitMode,
++    List<SplitPaymentEntry>? splitPayments,
++    PaymentMethod? method,
++    String? amountPaidText,
++    PaymentStatus? status,
++    OjolPlatform? ojolPlatform,
++    String? orderNumber,
++  }) {
++    return PaymentModalState(
++      isOpen: isOpen ?? this.isOpen,
++      isSplitMode: isSplitMode ?? this.isSplitMode,
++      splitPayments: splitPayments ?? this.splitPayments,
++      method: method ?? this.method,
++      amountPaidText: amountPaidText ?? this.amountPaidText,
++      status: status ?? this.status,
++      ojolPlatform: ojolPlatform ?? this.ojolPlatform,
++      orderNumber: orderNumber ?? this.orderNumber,
++    );
++  }
++
++  static const closed = PaymentModalState();
++}
+diff --git a/lib/features/pos/domain/quick_cash.dart b/lib/features/pos/domain/quick_cash.dart
+new file mode 100644
+index 0000000..1341da6
+--- /dev/null
++++ b/lib/features/pos/domain/quick_cash.dart
+@@ -0,0 +1,21 @@
++/// Suggested quick-cash amounts for a given total — "exact amount", next
++/// round 10k, next round 50k, and a flat 100k — deduplicated and filtered
++/// to only amounts >= total. Direct port of the reference app's
++/// `quickCashOptions` derivation in PaymentModal.jsx.
++List<int> buildQuickCashOptions(int total) {
++  final candidates = <int>[
++    total,
++    ((total + 9999) ~/ 10000) * 10000,
++    ((total + 49999) ~/ 50000) * 50000,
++    100000,
++  ];
++
++  final seen = <int>{};
++  final result = <int>[];
++  for (final c in candidates) {
++    if (c >= total && seen.add(c)) {
++      result.add(c);
++    }
++  }
++  return result;
++}
+diff --git a/lib/features/pos/domain/transaction.dart b/lib/features/pos/domain/transaction.dart
+new file mode 100644
+index 0000000..d9c59b6
+--- /dev/null
++++ b/lib/features/pos/domain/transaction.dart
+@@ -0,0 +1,71 @@
++import 'cart_item.dart';
++import 'order_models.dart';
++
++enum TransactionStatus { open, paid, canceled }
++
++/// A completed (or still-open/unpaid) transaction. This is a snapshot —
++/// per PRD ("Historical data survives master changes"), nothing here is
++/// recomputed later from current menu prices, settings, or vouchers.
++class Transaction {
++  final String id;
++  final String displayNumber;
++  final TransactionStatus status;
++  final OrderType orderType;
++  final String? customerId;
++  final String? customerName;
++  final OjolPlatform? ojolPlatform;
++  final String? ojolOrderNumber;
++  final List<CartItem> items;
++
++  final int subtotal;
++  final String? voucherId;
++  final String? voucherCode;
++  final int voucherDiscount;
++  final ManualDiscount? manualDiscount;
++  final int manualDiscountAmount;
++  final int taxAmount;
++  final int serviceAmount;
++  final int deliveryFee;
++  final int roundingAdjustment;
++  final int total;
++
++  final String? paymentMethodLabel; // 'Tunai' | 'QRIS' | 'Transfer' | 'Ojol' | 'Split Payment'
++  final int? amountPaid;
++  final int? changeAmount;
++  final List<SplitPaymentEntry> splitPayments;
++
++  final DateTime createdAt;
++  final DateTime? paidAt;
++
++  const Transaction({
++    required this.id,
++    required this.displayNumber,
++    required this.status,
++    required this.orderType,
++    this.customerId,
++    this.customerName,
++    this.ojolPlatform,
++    this.ojolOrderNumber,
++    required this.items,
++    required this.subtotal,
++    this.voucherId,
++    this.voucherCode,
++    required this.voucherDiscount,
++    this.manualDiscount,
++    required this.manualDiscountAmount,
++    required this.taxAmount,
++    required this.serviceAmount,
++    required this.deliveryFee,
++    required this.roundingAdjustment,
++    required this.total,
++    this.paymentMethodLabel,
++    this.amountPaid,
++    this.changeAmount,
++    this.splitPayments = const [],
++    required this.createdAt,
++    this.paidAt,
++  });
++
++  int get hppTotal => items.fold(0, (sum, item) => sum + (item.hpp * item.qty));
++  int get totalQty => items.fold(0, (sum, item) => sum + item.qty);
++}
+diff --git a/lib/features/pos/domain/voucher.dart b/lib/features/pos/domain/voucher.dart
+new file mode 100644
+index 0000000..516287c
+--- /dev/null
++++ b/lib/features/pos/domain/voucher.dart
+@@ -0,0 +1,26 @@
++/// Code-based discount voucher.
++///
++/// NOTE: included per explicit user decision overriding AGENTS.md's
++/// "active points/vouchers" forbidden-scope rule — see
++/// [[mamam-kasir-flutter]] memory notes for the rationale. Loyalty
++/// points themselves are NOT implemented (per PRD, points are no
++/// longer used).
++class Voucher {
++  final String id;
++  final String code;
++  final VoucherDiscountType discountType;
++  final int discountValue; // percent (0-100) or fixed Rupiah, per discountType
++  final int minPurchase;
++  final bool isActive;
++
++  const Voucher({
++    required this.id,
++    required this.code,
++    required this.discountType,
++    required this.discountValue,
++    required this.minPurchase,
++    required this.isActive,
++  });
++}
++
++enum VoucherDiscountType { percent, fixed }
+diff --git a/lib/features/pos/presentation/pos_screen.dart b/lib/features/pos/presentation/pos_screen.dart
+new file mode 100644
+index 0000000..595368f
+--- /dev/null
++++ b/lib/features/pos/presentation/pos_screen.dart
+@@ -0,0 +1,282 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../../../core/theme/app_colors.dart';
++import '../../../core/theme/app_spacing.dart';
++import '../../../core/utils/currency.dart';
++import '../../menu_management/domain/menu_management_models.dart';
++import '../application/cart_provider.dart';
++import '../application/pos_catalog_provider.dart';
++import 'widgets/cart_drawer.dart';
++import 'widgets/variant_selection_modal.dart';
++
++/// Kasir (POS) screen. Reached via [AppNav.push] from the dashboard's
++/// "Kasir" quick action — a "going deeper" destination per the app's
++/// stack-navigation model.
++class PosScreen extends ConsumerStatefulWidget {
++  const PosScreen({super.key});
++
++  @override
++  ConsumerState<PosScreen> createState() => _PosScreenState();
++}
++
++class _PosScreenState extends ConsumerState<PosScreen> {
++  final _searchController = TextEditingController();
++  String _searchQuery = '';
++  String? _selectedCategory; // null = "Semua"
++
++  @override
++  void dispose() {
++    _searchController.dispose();
++    super.dispose();
++  }
++
++  Future<void> _handleMenuTap(MenuItem menu, PosCatalogState catalog) async {
++    final cartController = ref.read(cartProvider.notifier);
++
++    if (menu.variantGroupIds.isEmpty) {
++      cartController.addToCart(menu, const {}, catalog.variantGroups);
++      return;
++    }
++
++    final selected = await showModalBottomSheet<Map<String, List<String>>>(
++      context: context,
++      isScrollControlled: true,
++      backgroundColor: Colors.transparent,
++      builder: (_) => VariantSelectionModal(menu: menu, allGroups: catalog.variantGroups),
++    );
++
++    if (selected != null) {
++      cartController.addToCart(menu, selected, catalog.variantGroups);
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final catalog = ref.watch(posCatalogProvider);
++    final cartState = ref.watch(cartProvider);
++    final cartCount = cartState.cart.fold<int>(0, (sum, item) => sum + item.qty);
++
++    final filteredItems = catalog.menuItems.where((item) {
++      final matchesSearch = _searchQuery.isEmpty || item.name.toLowerCase().contains(_searchQuery.toLowerCase());
++      final matchesCategory = _selectedCategory == null || item.categoryName == _selectedCategory;
++      return matchesSearch && matchesCategory;
++    }).toList();
++
++    return Scaffold(
++      backgroundColor: AppColors.background,
++      body: SafeArea(
++        child: Stack(
++          children: [
++            Column(
++              children: [
++                const _Header(),
++                Padding(
++                  padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
++                  child: TextField(
++                    controller: _searchController,
++                    onChanged: (v) => setState(() => _searchQuery = v),
++                    decoration: InputDecoration(
++                      hintText: 'Cari menu...',
++                      hintStyle: const TextStyle(fontSize: 13.5, color: AppColors.textMuted, fontWeight: FontWeight.w500),
++                      prefixIcon: const Icon(Icons.search_rounded, size: 19, color: AppColors.textMuted),
++                      filled: true,
++                      fillColor: AppColors.surface,
++                      isDense: true,
++                      contentPadding: const EdgeInsets.symmetric(vertical: 13),
++                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.lg), borderSide: const BorderSide(color: AppColors.border)),
++                    ),
++                  ),
++                ),
++                if (!catalog.isLoading)
++                  SizedBox(
++                    height: 40,
++                    child: ListView(
++                      scrollDirection: Axis.horizontal,
++                      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
++                      children: [
++                        _CategoryChip(label: 'Semua', selected: _selectedCategory == null, onTap: () => setState(() => _selectedCategory = null)),
++                        const SizedBox(width: AppSpacing.sm),
++                        ...catalog.categoryNames.map((cat) => Padding(
++                              padding: const EdgeInsets.only(right: AppSpacing.sm),
++                              child: _CategoryChip(label: cat, selected: _selectedCategory == cat, onTap: () => setState(() => _selectedCategory = cat)),
++                            )),
++                      ],
++                    ),
++                  ),
++                const SizedBox(height: AppSpacing.sm),
++                Expanded(
++                  child: catalog.isLoading
++                      ? const Center(child: CircularProgressIndicator(color: AppColors.brand))
++                      : filteredItems.isEmpty
++                          ? const Center(child: Text('Menu tidak ditemukan.', style: TextStyle(fontSize: 13, color: AppColors.textMuted)))
++                          : GridView.builder(
++                              padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, 110),
++                              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
++                                crossAxisCount: 2,
++                                mainAxisSpacing: AppSpacing.md,
++                                crossAxisSpacing: AppSpacing.md,
++                                childAspectRatio: 0.85,
++                              ),
++                              itemCount: filteredItems.length,
++                              itemBuilder: (context, index) {
++                                final item = filteredItems[index];
++                                return _MenuGridCard(item: item, onTap: () => _handleMenuTap(item, catalog));
++                              },
++                            ),
++                ),
++              ],
++            ),
++            if (cartCount > 0)
++              Positioned(
++                left: AppSpacing.lg,
++                right: AppSpacing.lg,
++                bottom: AppSpacing.md,
++                child: _CartFab(
++                  itemCount: cartCount,
++                  total: cartState.cart.fold(0, (sum, item) => sum + item.lineTotal),
++                  onTap: () => showModalBottomSheet(
++                    context: context,
++                    isScrollControlled: true,
++                    backgroundColor: Colors.transparent,
++                    builder: (_) => const CartDrawer(),
++                  ),
++                ),
++              ),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++class _Header extends StatelessWidget {
++  const _Header();
++
++  @override
++  Widget build(BuildContext context) {
++    return Container(
++      padding: const EdgeInsets.fromLTRB(AppSpacing.sm, AppSpacing.sm, AppSpacing.lg, AppSpacing.sm),
++      decoration: const BoxDecoration(color: AppColors.background, border: Border(bottom: BorderSide(color: AppColors.border))),
++      child: Row(
++        children: [
++          Builder(
++            builder: (context) => IconButton(
++              onPressed: () => Navigator.of(context).pop(),
++              icon: const Icon(Icons.arrow_back_rounded, color: AppColors.textPrimary),
++            ),
++          ),
++          const Text('Kasir', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
++        ],
++      ),
++    );
++  }
++}
++
++class _CategoryChip extends StatelessWidget {
++  final String label;
++  final bool selected;
++  final VoidCallback onTap;
++  const _CategoryChip({required this.label, required this.selected, required this.onTap});
++
++  @override
++  Widget build(BuildContext context) {
++    return InkWell(
++      onTap: onTap,
++      borderRadius: BorderRadius.circular(AppRadius.pill),
++      child: Container(
++        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
++        decoration: BoxDecoration(
++          color: selected ? AppColors.brand : AppColors.surface,
++          borderRadius: BorderRadius.circular(AppRadius.pill),
++          border: Border.all(color: selected ? AppColors.brand : AppColors.border),
++        ),
++        child: Text(
++          label,
++          style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: selected ? Colors.white : AppColors.textSecondary),
++        ),
++      ),
++    );
++  }
++}
++
++class _MenuGridCard extends StatelessWidget {
++  final MenuItem item;
++  final VoidCallback onTap;
++  const _MenuGridCard({required this.item, required this.onTap});
++
++  @override
++  Widget build(BuildContext context) {
++    return Material(
++      color: AppColors.surface,
++      borderRadius: BorderRadius.circular(AppRadius.lg),
++      child: InkWell(
++        onTap: onTap,
++        borderRadius: BorderRadius.circular(AppRadius.lg),
++        child: Container(
++          padding: const EdgeInsets.all(AppSpacing.sm),
++          decoration: BoxDecoration(borderRadius: BorderRadius.circular(AppRadius.lg), border: Border.all(color: AppColors.border)),
++          child: Column(
++            crossAxisAlignment: CrossAxisAlignment.stretch,
++            children: [
++              Expanded(
++                child: Container(
++                  decoration: BoxDecoration(color: AppColors.background, borderRadius: BorderRadius.circular(AppRadius.md)),
++                  child: const Icon(Icons.restaurant_rounded, size: 28, color: AppColors.textMuted),
++                ),
++              ),
++              const SizedBox(height: AppSpacing.sm),
++              Text(
++                item.name,
++                maxLines: 2,
++                overflow: TextOverflow.ellipsis,
++                style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800, color: AppColors.textPrimary, height: 1.2),
++              ),
++              const SizedBox(height: 4),
++              Text(formatRupiah(item.price), style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.brand)),
++            ],
++          ),
++        ),
++      ),
++    );
++  }
++}
++
++class _CartFab extends StatelessWidget {
++  final int itemCount;
++  final int total;
++  final VoidCallback onTap;
++  const _CartFab({required this.itemCount, required this.total, required this.onTap});
++
++  @override
++  Widget build(BuildContext context) {
++    return Material(
++      color: AppColors.brand,
++      borderRadius: BorderRadius.circular(AppRadius.lg),
++      child: InkWell(
++        onTap: onTap,
++        borderRadius: BorderRadius.circular(AppRadius.lg),
++        child: Container(
++          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.md),
++          decoration: BoxDecoration(
++            borderRadius: BorderRadius.circular(AppRadius.lg),
++            boxShadow: [BoxShadow(color: AppColors.brand.withValues(alpha: 0.3), blurRadius: 16, offset: const Offset(0, 6))],
++          ),
++          child: Row(
++            children: [
++              Container(
++                padding: const EdgeInsets.all(6),
++                decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.2), borderRadius: BorderRadius.circular(AppRadius.sm)),
++                child: Text('$itemCount', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: Colors.white)),
++              ),
++              const SizedBox(width: AppSpacing.sm),
++              const Text('Lihat Keranjang', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: Colors.white)),
++              const Spacer(),
++              Text(formatRupiah(total), style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: Colors.white)),
++            ],
++          ),
++        ),
++      ),
++    );
++  }
++}
+diff --git a/lib/features/pos/presentation/widgets/cart_drawer.dart b/lib/features/pos/presentation/widgets/cart_drawer.dart
+new file mode 100644
+index 0000000..f48d1ab
+--- /dev/null
++++ b/lib/features/pos/presentation/widgets/cart_drawer.dart
+@@ -0,0 +1,570 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../../../../core/theme/app_colors.dart';
++import '../../../../core/theme/app_spacing.dart';
++import '../../../../core/utils/currency.dart';
++import '../../application/cart_provider.dart';
++import '../../application/pos_catalog_provider.dart';
++import '../../domain/cart_item.dart';
++import '../../domain/cart_state.dart';
++import '../../domain/checkout_calculator.dart';
++import '../../domain/customer.dart';
++import '../../domain/order_models.dart';
++import 'customer_picker_sheet.dart';
++import 'payment_modal.dart';
++
++/// Cart drawer — shown as a modal (bottom-up) from the Kasir screen.
++/// Customer/order-type/delivery/voucher/discount editing, item list with
++/// qty controls, and the entry point into [PaymentModal].
++class CartDrawer extends ConsumerWidget {
++  const CartDrawer({super.key});
++
++  @override
++  Widget build(BuildContext context, WidgetRef ref) {
++    final cartState = ref.watch(cartProvider);
++    final cartController = ref.read(cartProvider.notifier);
++    const settings = StoreCheckoutSettings(); // placeholder default until Settings feature lands
++    final totals = CheckoutCalculator.compute(cartState, settings);
++    final isOjol = cartState.orderType == OrderType.ojol;
++
++    return DraggableScrollableSheet(
++      initialChildSize: 0.9,
++      minChildSize: 0.5,
++      maxChildSize: 0.95,
++      builder: (context, scrollController) {
++        return Container(
++          decoration: const BoxDecoration(
++            color: AppColors.background,
++            borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
++          ),
++          child: Column(
++            children: [
++              Container(
++                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: AppSpacing.sm),
++                decoration: const BoxDecoration(
++                  color: AppColors.surface,
++                  borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
++                  border: Border(bottom: BorderSide(color: AppColors.border)),
++                ),
++                child: Row(
++                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
++                  children: [
++                    IconButton(
++                      onPressed: () => Navigator.of(context).pop(),
++                      icon: const Icon(Icons.close_rounded, color: AppColors.textPrimary),
++                    ),
++                    const Text('Keranjang', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
++                    const SizedBox(width: 48),
++                  ],
++                ),
++              ),
++              if (cartState.cart.isEmpty)
++                const Expanded(
++                  child: Center(
++                    child: Text('Keranjang kosong', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.textMuted)),
++                  ),
++                )
++              else
++                Expanded(
++                  child: ListView(
++                    controller: scrollController,
++                    padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.lg, AppSpacing.lg, AppSpacing.xxl),
++                    children: [
++                      _CustomerSection(cartState: cartState),
++                      const SizedBox(height: AppSpacing.lg),
++                      _OrderTypeSection(cartState: cartState, controller: cartController),
++                      if (cartState.orderType == OrderType.delivery) ...[
++                        const SizedBox(height: AppSpacing.lg),
++                        _DeliveryFeeField(cartState: cartState, controller: cartController),
++                      ],
++                      const SizedBox(height: AppSpacing.lg),
++                      _CartItemsList(items: cartState.cart, controller: cartController),
++                      if (!isOjol) ...[
++                        const SizedBox(height: AppSpacing.lg),
++                        _VoucherAndDiscountSection(cartState: cartState, controller: cartController),
++                      ],
++                      const SizedBox(height: AppSpacing.lg),
++                      _TotalsSummary(totals: totals),
++                    ],
++                  ),
++                ),
++              _BottomBar(
++                total: totals.roundedTotal,
++                enabled: cartState.cart.isNotEmpty,
++                onCheckout: () {
++                  Navigator.of(context).pop();
++                  showModalBottomSheet(
++                    context: context,
++                    isScrollControlled: true,
++                    backgroundColor: Colors.transparent,
++                    builder: (_) => const PaymentModal(),
++                  );
++                },
++              ),
++            ],
++          ),
++        );
++      },
++    );
++  }
++}
++
++class _CustomerSection extends ConsumerWidget {
++  final CartState cartState;
++  const _CustomerSection({required this.cartState});
++
++  @override
++  Widget build(BuildContext context, WidgetRef ref) {
++    final label = cartState.customer?.name ?? (cartState.guestName.isNotEmpty ? cartState.guestName : 'Pelanggan Umum');
++
++    return _SectionCard(
++      child: InkWell(
++        onTap: () async {
++          final customers = ref.read(posCatalogProvider).customers;
++          final result = await showModalBottomSheet<Customer>(
++            context: context,
++            isScrollControlled: true,
++            backgroundColor: Colors.transparent,
++            builder: (_) => CustomerPickerSheet(customers: customers),
++          );
++          if (result != null) {
++            ref.read(cartProvider.notifier).setCustomer(result);
++          }
++        },
++        borderRadius: BorderRadius.circular(AppRadius.lg),
++        child: Row(
++          children: [
++            Container(
++              width: 36,
++              height: 36,
++              decoration: BoxDecoration(color: AppColors.brand.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(AppRadius.sm)),
++              child: const Icon(Icons.person_rounded, size: 18, color: AppColors.brand),
++            ),
++            const SizedBox(width: AppSpacing.sm),
++            Expanded(
++              child: Text(label, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
++            ),
++            const Icon(Icons.chevron_right_rounded, color: AppColors.textMuted),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++class _OrderTypeSection extends StatelessWidget {
++  final CartState cartState;
++  final CartController controller;
++  const _OrderTypeSection({required this.cartState, required this.controller});
++
++  @override
++  Widget build(BuildContext context) {
++    return Wrap(
++      spacing: AppSpacing.sm,
++      runSpacing: AppSpacing.sm,
++      children: OrderType.values.map((type) {
++        final selected = cartState.orderType == type;
++        return ChoiceChip(
++          label: Text(type.label),
++          selected: selected,
++          onSelected: (_) => controller.setOrderType(type),
++          selectedColor: AppColors.brand,
++          labelStyle: TextStyle(
++            fontSize: 12.5,
++            fontWeight: FontWeight.w700,
++            color: selected ? Colors.white : AppColors.textSecondary,
++          ),
++          backgroundColor: AppColors.surface,
++          side: BorderSide(color: selected ? AppColors.brand : AppColors.border),
++          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.pill)),
++        );
++      }).toList(),
++    );
++  }
++}
++
++class _DeliveryFeeField extends StatelessWidget {
++  final CartState cartState;
++  final CartController controller;
++  const _DeliveryFeeField({required this.cartState, required this.controller});
++
++  @override
++  Widget build(BuildContext context) {
++    return _SectionCard(
++      child: Row(
++        children: [
++          const Icon(Icons.moped_rounded, size: 18, color: AppColors.textSecondary),
++          const SizedBox(width: AppSpacing.sm),
++          const Text('Ongkir', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
++          const Spacer(),
++          SizedBox(
++            width: 120,
++            child: TextField(
++              textAlign: TextAlign.right,
++              keyboardType: TextInputType.number,
++              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary),
++              decoration: const InputDecoration(prefixText: 'Rp ', border: InputBorder.none, isDense: true),
++              onChanged: (v) => controller.setDeliveryFee(int.tryParse(v) ?? 0),
++            ),
++          ),
++        ],
++      ),
++    );
++  }
++}
++
++class _CartItemsList extends StatelessWidget {
++  final List<CartItem> items;
++  final CartController controller;
++  const _CartItemsList({required this.items, required this.controller});
++
++  @override
++  Widget build(BuildContext context) {
++    return Column(
++      children: items.map((item) => _CartItemTile(item: item, controller: controller)).toList(),
++    );
++  }
++}
++
++class _CartItemTile extends StatelessWidget {
++  final CartItem item;
++  final CartController controller;
++  const _CartItemTile({required this.item, required this.controller});
++
++  @override
++  Widget build(BuildContext context) {
++    return Padding(
++      padding: const EdgeInsets.only(bottom: AppSpacing.sm),
++      child: _SectionCard(
++        child: Row(
++          crossAxisAlignment: CrossAxisAlignment.start,
++          children: [
++            Expanded(
++              child: Column(
++                crossAxisAlignment: CrossAxisAlignment.start,
++                children: [
++                  Text(item.name, style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
++                  if (item.variantName != null) ...[
++                    const SizedBox(height: 2),
++                    Text(item.variantName!, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: AppColors.textSecondary)),
++                  ],
++                  const SizedBox(height: 4),
++                  Text(formatRupiah(item.price), style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textMuted)),
++                ],
++              ),
++            ),
++            _QtyStepper(
++              qty: item.qty,
++              onDecrement: () => controller.updateQty(item.cartItemId, -1),
++              onIncrement: () => controller.updateQty(item.cartItemId, 1),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++class _QtyStepper extends StatelessWidget {
++  final int qty;
++  final VoidCallback onDecrement;
++  final VoidCallback onIncrement;
++  const _QtyStepper({required this.qty, required this.onDecrement, required this.onIncrement});
++
++  @override
++  Widget build(BuildContext context) {
++    return Row(
++      mainAxisSize: MainAxisSize.min,
++      children: [
++        _StepperButton(icon: Icons.remove_rounded, onTap: onDecrement),
++        SizedBox(
++          width: 28,
++          child: Text('$qty', textAlign: TextAlign.center, style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w800)),
++        ),
++        _StepperButton(icon: Icons.add_rounded, onTap: onIncrement),
++      ],
++    );
++  }
++}
++
++class _StepperButton extends StatelessWidget {
++  final IconData icon;
++  final VoidCallback onTap;
++  const _StepperButton({required this.icon, required this.onTap});
++
++  @override
++  Widget build(BuildContext context) {
++    return Material(
++      color: AppColors.background,
++      shape: const CircleBorder(),
++      child: InkWell(
++        onTap: onTap,
++        customBorder: const CircleBorder(),
++        child: SizedBox(width: 28, height: 28, child: Icon(icon, size: 15, color: AppColors.textPrimary)),
++      ),
++    );
++  }
++}
++
++class _VoucherAndDiscountSection extends StatefulWidget {
++  final CartState cartState;
++  final CartController controller;
++  const _VoucherAndDiscountSection({required this.cartState, required this.controller});
++
++  @override
++  State<_VoucherAndDiscountSection> createState() => _VoucherAndDiscountSectionState();
++}
++
++class _VoucherAndDiscountSectionState extends State<_VoucherAndDiscountSection> {
++  final _voucherController = TextEditingController();
++  final _manualDiscountController = TextEditingController();
++  bool _voucherError = false;
++  ManualDiscountType _manualType = ManualDiscountType.fixed;
++
++  @override
++  void initState() {
++    super.initState();
++    _manualType = widget.cartState.manualDiscount.type;
++    if (widget.cartState.manualDiscount.value > 0) {
++      _manualDiscountController.text = widget.cartState.manualDiscount.value.toString();
++    }
++  }
++
++  @override
++  void dispose() {
++    _voucherController.dispose();
++    _manualDiscountController.dispose();
++    super.dispose();
++  }
++
++  Future<void> _applyVoucher() async {
++    final code = _voucherController.text.trim();
++    if (code.isEmpty) return;
++    final success = await widget.controller.applyVoucherCode(code);
++    setState(() => _voucherError = !success);
++    if (success) _voucherController.clear();
++  }
++
++  void _applyManualDiscount() {
++    final value = int.tryParse(_manualDiscountController.text.trim()) ?? 0;
++    widget.controller.setManualDiscount(ManualDiscount(type: _manualType, value: value));
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final voucher = widget.cartState.appliedVoucher;
++
++    return _SectionCard(
++      child: Column(
++        crossAxisAlignment: CrossAxisAlignment.start,
++        children: [
++          const Text('Voucher', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.textSecondary)),
++          const SizedBox(height: AppSpacing.sm),
++          if (voucher != null)
++            Row(
++              children: [
++                Expanded(
++                  child: Text(voucher.code, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: AppColors.brand)),
++                ),
++                TextButton(
++                  onPressed: widget.controller.clearVoucher,
++                  child: const Text('Hapus', style: TextStyle(fontSize: 12, color: AppColors.danger)),
++                ),
++              ],
++            )
++          else
++            Row(
++              children: [
++                Expanded(
++                  child: TextField(
++                    controller: _voucherController,
++                    textCapitalization: TextCapitalization.characters,
++                    style: const TextStyle(fontSize: 13),
++                    decoration: InputDecoration(
++                      hintText: 'Kode voucher',
++                      isDense: true,
++                      errorText: _voucherError ? 'Voucher tidak valid' : null,
++                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.sm)),
++                    ),
++                  ),
++                ),
++                const SizedBox(width: AppSpacing.sm),
++                TextButton(onPressed: _applyVoucher, child: const Text('Pakai')),
++              ],
++            ),
++          const SizedBox(height: AppSpacing.lg),
++          const Text('Diskon Manual', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.textSecondary)),
++          const SizedBox(height: AppSpacing.sm),
++          Row(
++            children: [
++              _DiscountTypeToggle(
++                type: _manualType,
++                onChanged: (t) {
++                  setState(() => _manualType = t);
++                  _applyManualDiscount();
++                },
++              ),
++              const SizedBox(width: AppSpacing.sm),
++              Expanded(
++                child: TextField(
++                  controller: _manualDiscountController,
++                  keyboardType: TextInputType.number,
++                  style: const TextStyle(fontSize: 13),
++                  onChanged: (_) => _applyManualDiscount(),
++                  decoration: InputDecoration(
++                    hintText: _manualType == ManualDiscountType.percent ? '0%' : 'Rp 0',
++                    isDense: true,
++                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.sm)),
++                  ),
++                ),
++              ),
++            ],
++          ),
++        ],
++      ),
++    );
++  }
++}
++
++class _DiscountTypeToggle extends StatelessWidget {
++  final ManualDiscountType type;
++  final ValueChanged<ManualDiscountType> onChanged;
++  const _DiscountTypeToggle({required this.type, required this.onChanged});
++
++  @override
++  Widget build(BuildContext context) {
++    return Container(
++      decoration: BoxDecoration(border: Border.all(color: AppColors.border), borderRadius: BorderRadius.circular(AppRadius.sm)),
++      child: Row(
++        mainAxisSize: MainAxisSize.min,
++        children: [
++          _ToggleOption(label: '%', selected: type == ManualDiscountType.percent, onTap: () => onChanged(ManualDiscountType.percent)),
++          _ToggleOption(label: 'Rp', selected: type == ManualDiscountType.fixed, onTap: () => onChanged(ManualDiscountType.fixed)),
++        ],
++      ),
++    );
++  }
++}
++
++class _ToggleOption extends StatelessWidget {
++  final String label;
++  final bool selected;
++  final VoidCallback onTap;
++  const _ToggleOption({required this.label, required this.selected, required this.onTap});
++
++  @override
++  Widget build(BuildContext context) {
++    return InkWell(
++      onTap: onTap,
++      child: Container(
++        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
++        color: selected ? AppColors.brand : Colors.transparent,
++        child: Text(
++          label,
++          style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: selected ? Colors.white : AppColors.textSecondary),
++        ),
++      ),
++    );
++  }
++}
++
++class _TotalsSummary extends StatelessWidget {
++  final CheckoutTotals totals;
++  const _TotalsSummary({required this.totals});
++
++  @override
++  Widget build(BuildContext context) {
++    return _SectionCard(
++      child: Column(
++        children: [
++          _TotalRow(label: 'Subtotal', value: totals.subtotal),
++          if (totals.voucherDiscount > 0) _TotalRow(label: 'Diskon Voucher', value: -totals.voucherDiscount),
++          if (totals.manualDiscountAmount > 0) _TotalRow(label: 'Diskon Manual', value: -totals.manualDiscountAmount),
++          if (totals.taxAmount > 0) _TotalRow(label: 'Pajak', value: totals.taxAmount),
++          if (totals.serviceAmount > 0) _TotalRow(label: 'Service', value: totals.serviceAmount),
++          if (totals.deliveryFee > 0) _TotalRow(label: 'Ongkir', value: totals.deliveryFee),
++          const Divider(height: 20),
++          _TotalRow(label: 'TOTAL', value: totals.roundedTotal, isBold: true),
++        ],
++      ),
++    );
++  }
++}
++
++class _TotalRow extends StatelessWidget {
++  final String label;
++  final int value;
++  final bool isBold;
++  const _TotalRow({required this.label, required this.value, this.isBold = false});
++
++  @override
++  Widget build(BuildContext context) {
++    return Padding(
++      padding: const EdgeInsets.symmetric(vertical: 3),
++      child: Row(
++        mainAxisAlignment: MainAxisAlignment.spaceBetween,
++        children: [
++          Text(label, style: TextStyle(fontSize: isBold ? 14 : 12.5, fontWeight: isBold ? FontWeight.w800 : FontWeight.w500, color: isBold ? AppColors.textPrimary : AppColors.textSecondary)),
++          Text(
++            '${value < 0 ? '-' : ''}${formatRupiah(value.abs())}',
++            style: TextStyle(fontSize: isBold ? 16 : 12.5, fontWeight: isBold ? FontWeight.w800 : FontWeight.w600, color: isBold ? AppColors.brand : AppColors.textPrimary),
++          ),
++        ],
++      ),
++    );
++  }
++}
++
++class _BottomBar extends StatelessWidget {
++  final int total;
++  final bool enabled;
++  final VoidCallback onCheckout;
++  const _BottomBar({required this.total, required this.enabled, required this.onCheckout});
++
++  @override
++  Widget build(BuildContext context) {
++    return Container(
++      padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.md, AppSpacing.xl, AppSpacing.xl),
++      decoration: BoxDecoration(
++        color: AppColors.surface,
++        border: const Border(top: BorderSide(color: AppColors.border)),
++        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 16, offset: const Offset(0, -4))],
++      ),
++      child: SizedBox(
++        width: double.infinity,
++        child: ElevatedButton(
++          onPressed: enabled ? onCheckout : null,
++          style: ElevatedButton.styleFrom(
++            backgroundColor: AppColors.brand,
++            foregroundColor: Colors.white,
++            disabledBackgroundColor: AppColors.border,
++            padding: const EdgeInsets.symmetric(vertical: 15),
++            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
++            elevation: 0,
++          ),
++          child: Text('Bayar • ${formatRupiah(total)}', style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
++        ),
++      ),
++    );
++  }
++}
++
++class _SectionCard extends StatelessWidget {
++  final Widget child;
++  const _SectionCard({required this.child});
++
++  @override
++  Widget build(BuildContext context) {
++    return Container(
++      width: double.infinity,
++      padding: const EdgeInsets.all(AppSpacing.md),
++      decoration: BoxDecoration(
++        color: AppColors.surface,
++        borderRadius: BorderRadius.circular(AppRadius.lg),
++        border: Border.all(color: AppColors.border),
++      ),
++      child: child,
++    );
++  }
++}
+diff --git a/lib/features/pos/presentation/widgets/customer_picker_sheet.dart b/lib/features/pos/presentation/widgets/customer_picker_sheet.dart
+new file mode 100644
+index 0000000..898a2a6
+--- /dev/null
++++ b/lib/features/pos/presentation/widgets/customer_picker_sheet.dart
+@@ -0,0 +1,136 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../../../../core/theme/app_colors.dart';
++import '../../../../core/theme/app_spacing.dart';
++import '../../application/cart_provider.dart';
++import '../../domain/customer.dart';
++
++class CustomerPickerSheet extends ConsumerStatefulWidget {
++  final List<Customer> customers;
++  const CustomerPickerSheet({super.key, required this.customers});
++
++  @override
++  ConsumerState<CustomerPickerSheet> createState() => _CustomerPickerSheetState();
++}
++
++class _CustomerPickerSheetState extends ConsumerState<CustomerPickerSheet> {
++  final _searchController = TextEditingController();
++  final _newNameController = TextEditingController();
++  bool _isAddingNew = false;
++
++  @override
++  void dispose() {
++    _searchController.dispose();
++    _newNameController.dispose();
++    super.dispose();
++  }
++
++  List<Customer> get _filtered {
++    final query = _searchController.text.toLowerCase();
++    if (query.isEmpty) return widget.customers;
++    return widget.customers.where((c) => c.name.toLowerCase().contains(query)).toList();
++  }
++
++  Future<void> _createCustomer() async {
++    final name = _newNameController.text.trim();
++    if (name.isEmpty) return;
++    final customer = await ref.read(cartProvider.notifier).createAndSetCustomer(name: name);
++    if (!mounted) return;
++    Navigator.of(context).pop(customer);
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    return DraggableScrollableSheet(
++      initialChildSize: 0.6,
++      minChildSize: 0.4,
++      maxChildSize: 0.9,
++      builder: (context, scrollController) {
++        return Container(
++          decoration: const BoxDecoration(
++            color: AppColors.background,
++            borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
++          ),
++          child: Column(
++            children: [
++              Container(
++                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: AppSpacing.sm),
++                decoration: const BoxDecoration(
++                  color: AppColors.surface,
++                  borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
++                  border: Border(bottom: BorderSide(color: AppColors.border)),
++                ),
++                child: Row(
++                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
++                  children: [
++                    IconButton(onPressed: () => Navigator.of(context).pop(), icon: const Icon(Icons.close_rounded, color: AppColors.textPrimary)),
++                    const Text('Pilih Pelanggan', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
++                    const SizedBox(width: 48),
++                  ],
++                ),
++              ),
++              Padding(
++                padding: const EdgeInsets.all(AppSpacing.lg),
++                child: _isAddingNew
++                    ? Row(
++                        children: [
++                          Expanded(
++                            child: TextField(
++                              controller: _newNameController,
++                              autofocus: true,
++                              decoration: InputDecoration(
++                                hintText: 'Nama pelanggan baru',
++                                isDense: true,
++                                border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.sm)),
++                              ),
++                            ),
++                          ),
++                          const SizedBox(width: AppSpacing.sm),
++                          TextButton(onPressed: _createCustomer, child: const Text('Simpan')),
++                        ],
++                      )
++                    : TextField(
++                        controller: _searchController,
++                        onChanged: (_) => setState(() {}),
++                        decoration: InputDecoration(
++                          hintText: 'Cari pelanggan...',
++                          prefixIcon: const Icon(Icons.search_rounded, size: 19),
++                          isDense: true,
++                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.sm)),
++                        ),
++                      ),
++              ),
++              Expanded(
++                child: ListView(
++                  controller: scrollController,
++                  padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
++                  children: [
++                    ListTile(
++                      leading: const Icon(Icons.person_outline_rounded, color: AppColors.textMuted),
++                      title: const Text('Pelanggan Umum', style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600)),
++                      onTap: () => Navigator.of(context).pop(),
++                    ),
++                    if (!_isAddingNew)
++                      ListTile(
++                        leading: const Icon(Icons.person_add_rounded, color: AppColors.brand),
++                        title: const Text('Tambah Pelanggan Baru', style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w700, color: AppColors.brand)),
++                        onTap: () => setState(() => _isAddingNew = true),
++                      ),
++                    const Divider(),
++                    ..._filtered.map((c) => ListTile(
++                          leading: const Icon(Icons.person_rounded, color: AppColors.textSecondary),
++                          title: Text(c.name, style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600)),
++                          subtitle: c.phone != null ? Text(c.phone!, style: const TextStyle(fontSize: 11.5)) : null,
++                          onTap: () => Navigator.of(context).pop(c),
++                        )),
++                  ],
++                ),
++              ),
++            ],
++          ),
++        );
++      },
++    );
++  }
++}
+diff --git a/lib/features/pos/presentation/widgets/payment_modal.dart b/lib/features/pos/presentation/widgets/payment_modal.dart
+new file mode 100644
+index 0000000..f18a587
+--- /dev/null
++++ b/lib/features/pos/presentation/widgets/payment_modal.dart
+@@ -0,0 +1,542 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../../../../core/theme/app_colors.dart';
++import '../../../../core/theme/app_spacing.dart';
++import '../../../../core/utils/currency.dart';
++import '../../application/cart_provider.dart';
++import '../../application/payment_modal_provider.dart';
++import '../../domain/cart_state.dart';
++import '../../domain/checkout_calculator.dart';
++import '../../domain/order_models.dart';
++import '../../domain/payment_modal_state.dart';
++import '../../domain/quick_cash.dart';
++import '../../domain/transaction.dart';
++import 'receipt_modal.dart';
++
++/// Payment modal — shown as a modal (bottom-up) from [CartDrawer]'s
++/// "Bayar" button. Handles single payment, split payment, Ojol
++/// platform+order-number capture, and finalizes the transaction.
++class PaymentModal extends ConsumerStatefulWidget {
++  const PaymentModal({super.key});
++
++  @override
++  ConsumerState<PaymentModal> createState() => _PaymentModalState();
++}
++
++class _PaymentModalState extends ConsumerState<PaymentModal> {
++  bool _isSaving = false;
++
++  @override
++  void initState() {
++    super.initState();
++    final cartState = ref.read(cartProvider);
++    Future.microtask(() => ref.read(paymentModalProvider.notifier).open(orderType: cartState.orderType));
++  }
++
++  Future<void> _finalizePayment({
++    required CartState cartState,
++    required CheckoutTotals totals,
++    required PaymentModalState paymentState,
++  }) async {
++    setState(() => _isSaving = true);
++
++    final isSplit = paymentState.isSplitMode && paymentState.splitPayments.isNotEmpty;
++    final totalPaid = isSplit
++        ? paymentState.splitPayments.fold<int>(0, (sum, p) => sum + p.amount)
++        : paymentState.amountPaid;
++    final change = totalPaid > totals.roundedTotal ? totalPaid - totals.roundedTotal : 0;
++
++    final repository = ref.read(posRepositoryProvider);
++    final transaction = await repository.saveTransaction(
++      status: TransactionStatus.paid,
++      orderType: cartState.orderType,
++      customerId: cartState.customer?.id,
++      customerName: cartState.customer?.name ?? (cartState.guestName.isNotEmpty ? cartState.guestName : null),
++      ojolPlatform: cartState.orderType == OrderType.ojol ? paymentState.ojolPlatform : null,
++      ojolOrderNumber: cartState.orderType == OrderType.ojol ? paymentState.orderNumber : null,
++      items: cartState.cart,
++      subtotal: totals.subtotal,
++      voucherId: cartState.appliedVoucher?.id,
++      voucherCode: cartState.appliedVoucher?.code,
++      voucherDiscount: totals.voucherDiscount,
++      manualDiscount: cartState.manualDiscount,
++      manualDiscountAmount: totals.manualDiscountAmount,
++      taxAmount: totals.taxAmount,
++      serviceAmount: totals.serviceAmount,
++      deliveryFee: totals.deliveryFee,
++      roundingAdjustment: totals.roundingAdjustment,
++      total: totals.roundedTotal,
++      paymentMethodLabel: isSplit ? 'Split Payment' : paymentState.method.label,
++      amountPaid: totalPaid,
++      changeAmount: change,
++      splitPayments: isSplit ? paymentState.splitPayments : const [],
++    );
++
++    if (!mounted) return;
++
++    ref.read(cartProvider.notifier).resetDraft();
++    ref.read(paymentModalProvider.notifier).close();
++
++    Navigator.of(context).pop();
++    showModalBottomSheet(
++      context: context,
++      isScrollControlled: true,
++      backgroundColor: Colors.transparent,
++      builder: (_) => ReceiptModal(transaction: transaction, changeAmount: change),
++    );
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final cartState = ref.watch(cartProvider);
++    const settings = StoreCheckoutSettings();
++    final totals = CheckoutCalculator.compute(cartState, settings);
++    final paymentState = ref.watch(paymentModalProvider);
++    final paymentController = ref.read(paymentModalProvider.notifier);
++    final isOjol = cartState.orderType == OrderType.ojol;
++
++    final paidSoFar = paymentState.isSplitMode
++        ? paymentState.splitPayments.fold<int>(0, (sum, p) => sum + p.amount)
++        : paymentState.amountPaid;
++    final remaining = totals.roundedTotal - paidSoFar;
++    final change = paidSoFar > totals.roundedTotal ? paidSoFar - totals.roundedTotal : 0;
++
++    final canConfirm = isOjol
++        ? true
++        : paymentState.isSplitMode
++            ? remaining <= 0 && paymentState.splitPayments.isNotEmpty
++            : paidSoFar >= totals.roundedTotal;
++
++    return DraggableScrollableSheet(
++      initialChildSize: 0.85,
++      minChildSize: 0.5,
++      maxChildSize: 0.95,
++      builder: (context, scrollController) {
++        return Container(
++          decoration: const BoxDecoration(
++            color: AppColors.background,
++            borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
++          ),
++          child: Column(
++            children: [
++              Container(
++                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: AppSpacing.sm),
++                decoration: const BoxDecoration(
++                  color: AppColors.surface,
++                  borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
++                  border: Border(bottom: BorderSide(color: AppColors.border)),
++                ),
++                child: Row(
++                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
++                  children: [
++                    IconButton(
++                      onPressed: () {
++                        paymentController.close();
++                        Navigator.of(context).pop();
++                      },
++                      icon: const Icon(Icons.close_rounded, color: AppColors.textPrimary),
++                    ),
++                    const Text('Pembayaran', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
++                    const SizedBox(width: 48),
++                  ],
++                ),
++              ),
++              Expanded(
++                child: ListView(
++                  controller: scrollController,
++                  padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.lg, AppSpacing.xl, 120),
++                  children: [
++                    _TotalDueCard(total: totals.roundedTotal),
++                    const SizedBox(height: AppSpacing.xl),
++                    if (isOjol)
++                      _OjolSection(paymentState: paymentState, controller: paymentController)
++                    else ...[
++                      _SplitModeToggle(paymentState: paymentState, controller: paymentController),
++                      const SizedBox(height: AppSpacing.lg),
++                      if (paymentState.isSplitMode)
++                        _SplitPaymentSection(
++                          paymentState: paymentState,
++                          controller: paymentController,
++                          remaining: remaining,
++                        )
++                      else
++                        _SinglePaymentSection(
++                          paymentState: paymentState,
++                          controller: paymentController,
++                          total: totals.roundedTotal,
++                        ),
++                      const SizedBox(height: AppSpacing.lg),
++                      if (change > 0) _ChangeCard(amount: change),
++                    ],
++                  ],
++                ),
++              ),
++              Container(
++                padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.md, AppSpacing.xl, AppSpacing.xl),
++                decoration: BoxDecoration(
++                  color: AppColors.surface,
++                  border: const Border(top: BorderSide(color: AppColors.border)),
++                  boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 16, offset: const Offset(0, -4))],
++                ),
++                child: SizedBox(
++                  width: double.infinity,
++                  child: ElevatedButton(
++                    onPressed: (!canConfirm || _isSaving)
++                        ? null
++                        : () => _finalizePayment(cartState: cartState, totals: totals, paymentState: paymentState),
++                    style: ElevatedButton.styleFrom(
++                      backgroundColor: AppColors.brand,
++                      foregroundColor: Colors.white,
++                      disabledBackgroundColor: AppColors.border,
++                      padding: const EdgeInsets.symmetric(vertical: 15),
++                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
++                      elevation: 0,
++                    ),
++                    child: _isSaving
++                        ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2.4, color: Colors.white))
++                        : const Text('Konfirmasi Pembayaran', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
++                  ),
++                ),
++              ),
++            ],
++          ),
++        );
++      },
++    );
++  }
++}
++
++class _TotalDueCard extends StatelessWidget {
++  final int total;
++  const _TotalDueCard({required this.total});
++
++  @override
++  Widget build(BuildContext context) {
++    return Container(
++      width: double.infinity,
++      padding: const EdgeInsets.all(AppSpacing.lg),
++      decoration: BoxDecoration(
++        gradient: const LinearGradient(colors: AppColors.heroGradient, begin: Alignment.topLeft, end: Alignment.bottomRight),
++        borderRadius: BorderRadius.circular(AppRadius.xl),
++      ),
++      child: Column(
++        crossAxisAlignment: CrossAxisAlignment.start,
++        children: [
++          Text('TOTAL TAGIHAN', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 1, color: Colors.white.withValues(alpha: 0.55))),
++          const SizedBox(height: 6),
++          Text(formatRupiah(total), style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w800, color: Colors.white)),
++        ],
++      ),
++    );
++  }
++}
++
++class _MethodSelector extends StatelessWidget {
++  final PaymentMethod selected;
++  final ValueChanged<PaymentMethod> onChanged;
++  const _MethodSelector({required this.selected, required this.onChanged});
++
++  static const _methods = [PaymentMethod.tunai, PaymentMethod.qris, PaymentMethod.transfer];
++
++  @override
++  Widget build(BuildContext context) {
++    return Row(
++      children: _methods.map((m) {
++        final isSelected = selected == m;
++        return Expanded(
++          child: Padding(
++            padding: const EdgeInsets.only(right: AppSpacing.sm),
++            child: InkWell(
++              onTap: () => onChanged(m),
++              borderRadius: BorderRadius.circular(AppRadius.md),
++              child: Container(
++                padding: const EdgeInsets.symmetric(vertical: 12),
++                decoration: BoxDecoration(
++                  color: isSelected ? AppColors.brand : AppColors.surface,
++                  borderRadius: BorderRadius.circular(AppRadius.md),
++                  border: Border.all(color: isSelected ? AppColors.brand : AppColors.border),
++                ),
++                child: Text(
++                  m.label,
++                  textAlign: TextAlign.center,
++                  style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: isSelected ? Colors.white : AppColors.textPrimary),
++                ),
++              ),
++            ),
++          ),
++        );
++      }).toList(),
++    );
++  }
++}
++
++class _SinglePaymentSection extends StatefulWidget {
++  final PaymentModalState paymentState;
++  final PaymentModalController controller;
++  final int total;
++  const _SinglePaymentSection({required this.paymentState, required this.controller, required this.total});
++
++  @override
++  State<_SinglePaymentSection> createState() => _SinglePaymentSectionState();
++}
++
++class _SinglePaymentSectionState extends State<_SinglePaymentSection> {
++  late final TextEditingController _amountController;
++
++  @override
++  void initState() {
++    super.initState();
++    _amountController = TextEditingController(text: widget.paymentState.amountPaidText);
++  }
++
++  @override
++  void didUpdateWidget(covariant _SinglePaymentSection oldWidget) {
++    super.didUpdateWidget(oldWidget);
++    if (widget.paymentState.amountPaidText != _amountController.text) {
++      _amountController.text = widget.paymentState.amountPaidText;
++      _amountController.selection = TextSelection.collapsed(offset: _amountController.text.length);
++    }
++  }
++
++  @override
++  void dispose() {
++    _amountController.dispose();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final quickOptions = buildQuickCashOptions(widget.total);
++
++    return Column(
++      crossAxisAlignment: CrossAxisAlignment.start,
++      children: [
++        const Text('Metode Pembayaran', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.textSecondary)),
++        const SizedBox(height: AppSpacing.sm),
++        _MethodSelector(selected: widget.paymentState.method, onChanged: widget.controller.setMethod),
++        const SizedBox(height: AppSpacing.lg),
++        const Text('Jumlah Dibayar', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.textSecondary)),
++        const SizedBox(height: AppSpacing.sm),
++        TextField(
++          controller: _amountController,
++          keyboardType: TextInputType.number,
++          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
++          decoration: InputDecoration(
++            prefixText: 'Rp ',
++            border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
++          ),
++          onChanged: widget.controller.setAmountPaidText,
++        ),
++        if (widget.paymentState.method == PaymentMethod.tunai) ...[
++          const SizedBox(height: AppSpacing.sm),
++          Wrap(
++            spacing: AppSpacing.sm,
++            runSpacing: AppSpacing.sm,
++            children: quickOptions
++                .map((amount) => OutlinedButton(
++                      onPressed: () => widget.controller.setAmountPaidText(amount.toString()),
++                      style: OutlinedButton.styleFrom(
++                        side: const BorderSide(color: AppColors.border),
++                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.pill)),
++                      ),
++                      child: Text(formatRupiah(amount), style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
++                    ))
++                .toList(),
++          ),
++        ],
++      ],
++    );
++  }
++}
++
++class _SplitModeToggle extends StatelessWidget {
++  final PaymentModalState paymentState;
++  final PaymentModalController controller;
++  const _SplitModeToggle({required this.paymentState, required this.controller});
++
++  @override
++  Widget build(BuildContext context) {
++    return Row(
++      children: [
++        const Expanded(
++          child: Text('Split Payment', style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
++        ),
++        Switch(
++          value: paymentState.isSplitMode,
++          onChanged: controller.toggleSplitMode,
++          activeColor: AppColors.brand,
++        ),
++      ],
++    );
++  }
++}
++
++class _SplitPaymentSection extends StatefulWidget {
++  final PaymentModalState paymentState;
++  final PaymentModalController controller;
++  final int remaining;
++  const _SplitPaymentSection({required this.paymentState, required this.controller, required this.remaining});
++
++  @override
++  State<_SplitPaymentSection> createState() => _SplitPaymentSectionState();
++}
++
++class _SplitPaymentSectionState extends State<_SplitPaymentSection> {
++  late final TextEditingController _amountController;
++
++  @override
++  void initState() {
++    super.initState();
++    _amountController = TextEditingController(text: widget.paymentState.amountPaidText);
++  }
++
++  @override
++  void didUpdateWidget(covariant _SplitPaymentSection oldWidget) {
++    super.didUpdateWidget(oldWidget);
++    if (widget.paymentState.amountPaidText != _amountController.text) {
++      _amountController.text = widget.paymentState.amountPaidText;
++    }
++  }
++
++  @override
++  void dispose() {
++    _amountController.dispose();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    return Column(
++      crossAxisAlignment: CrossAxisAlignment.start,
++      children: [
++        if (widget.paymentState.splitPayments.isNotEmpty) ...[
++          ...widget.paymentState.splitPayments.asMap().entries.map((entry) {
++            final index = entry.key;
++            final payment = entry.value;
++            return Padding(
++              padding: const EdgeInsets.only(bottom: AppSpacing.sm),
++              child: Container(
++                padding: const EdgeInsets.all(AppSpacing.md),
++                decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.md), border: Border.all(color: AppColors.border)),
++                child: Row(
++                  children: [
++                    Expanded(child: Text(payment.method.label, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700))),
++                    Text(formatRupiah(payment.amount), style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700)),
++                    IconButton(
++                      icon: const Icon(Icons.close_rounded, size: 16, color: AppColors.danger),
++                      onPressed: () => widget.controller.removeSplitPayment(index),
++                    ),
++                  ],
++                ),
++              ),
++            );
++          }),
++          const SizedBox(height: AppSpacing.sm),
++        ],
++        if (widget.remaining > 0) ...[
++          Text('Sisa: ${formatRupiah(widget.remaining)}', style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: AppColors.danger)),
++          const SizedBox(height: AppSpacing.sm),
++          _MethodSelector(selected: widget.paymentState.method, onChanged: widget.controller.setMethod),
++          const SizedBox(height: AppSpacing.sm),
++          Row(
++            children: [
++              Expanded(
++                child: TextField(
++                  controller: _amountController,
++                  keyboardType: TextInputType.number,
++                  style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
++                  decoration: InputDecoration(prefixText: 'Rp ', isDense: true, border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.sm))),
++                  onChanged: widget.controller.setAmountPaidText,
++                ),
++              ),
++              const SizedBox(width: AppSpacing.sm),
++              TextButton(onPressed: widget.controller.addSplitPayment, child: const Text('Tambah')),
++            ],
++          ),
++        ],
++      ],
++    );
++  }
++}
++
++class _OjolSection extends StatefulWidget {
++  final PaymentModalState paymentState;
++  final PaymentModalController controller;
++  const _OjolSection({required this.paymentState, required this.controller});
++
++  @override
++  State<_OjolSection> createState() => _OjolSectionState();
++}
++
++class _OjolSectionState extends State<_OjolSection> {
++  late final TextEditingController _orderNumberController;
++
++  @override
++  void initState() {
++    super.initState();
++    _orderNumberController = TextEditingController(text: widget.paymentState.orderNumber);
++  }
++
++  @override
++  void dispose() {
++    _orderNumberController.dispose();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    return Column(
++      crossAxisAlignment: CrossAxisAlignment.start,
++      children: [
++        const Text('Platform', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.textSecondary)),
++        const SizedBox(height: AppSpacing.sm),
++        Wrap(
++          spacing: AppSpacing.sm,
++          children: OjolPlatform.values.map((p) {
++            final selected = widget.paymentState.ojolPlatform == p;
++            return ChoiceChip(
++              label: Text(p.label),
++              selected: selected,
++              onSelected: (_) => widget.controller.setOjolPlatform(p),
++              selectedColor: AppColors.brand,
++              labelStyle: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: selected ? Colors.white : AppColors.textSecondary),
++              backgroundColor: AppColors.surface,
++              side: BorderSide(color: selected ? AppColors.brand : AppColors.border),
++            );
++          }).toList(),
++        ),
++        const SizedBox(height: AppSpacing.lg),
++        const Text('Nomor Pesanan', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.textSecondary)),
++        const SizedBox(height: AppSpacing.sm),
++        TextField(
++          controller: _orderNumberController,
++          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
++          decoration: InputDecoration(hintText: 'Contoh: SF-12345', border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md))),
++          onChanged: widget.controller.setOrderNumber,
++        ),
++      ],
++    );
++  }
++}
++
++class _ChangeCard extends StatelessWidget {
++  final int amount;
++  const _ChangeCard({required this.amount});
++
++  @override
++  Widget build(BuildContext context) {
++    return Container(
++      width: double.infinity,
++      padding: const EdgeInsets.all(AppSpacing.md),
++      decoration: BoxDecoration(color: AppColors.success.withValues(alpha: 0.08), borderRadius: BorderRadius.circular(AppRadius.md), border: Border.all(color: AppColors.success.withValues(alpha: 0.25))),
++      child: Row(
++        mainAxisAlignment: MainAxisAlignment.spaceBetween,
++        children: [
++          const Text('Kembalian', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.success)),
++          Text(formatRupiah(amount), style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: AppColors.success)),
++        ],
++      ),
++    );
++  }
++}
+diff --git a/lib/features/pos/presentation/widgets/receipt_modal.dart b/lib/features/pos/presentation/widgets/receipt_modal.dart
+new file mode 100644
+index 0000000..c4bd72c
+--- /dev/null
++++ b/lib/features/pos/presentation/widgets/receipt_modal.dart
+@@ -0,0 +1,254 @@
++import 'package:flutter/material.dart';
++import 'package:intl/intl.dart';
++
++import '../../../../core/theme/app_colors.dart';
++import '../../../../core/theme/app_spacing.dart';
++import '../../../../core/utils/currency.dart';
++import '../../domain/transaction.dart';
++
++/// Digital receipt, shown after a successful checkout. Physical
++/// (Bluetooth ESC/POS) printing is a separate, later feature — this is
++/// the on-screen struk only.
++class ReceiptModal extends StatelessWidget {
++  final Transaction transaction;
++  final int changeAmount;
++
++  const ReceiptModal({super.key, required this.transaction, required this.changeAmount});
++
++  @override
++  Widget build(BuildContext context) {
++    return DraggableScrollableSheet(
++      initialChildSize: 0.85,
++      minChildSize: 0.5,
++      maxChildSize: 0.95,
++      builder: (context, scrollController) {
++        return Container(
++          decoration: const BoxDecoration(
++            color: AppColors.background,
++            borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
++          ),
++          child: Column(
++            children: [
++              Container(
++                padding: const EdgeInsets.symmetric(vertical: AppSpacing.sm),
++                decoration: const BoxDecoration(
++                  color: AppColors.surface,
++                  borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
++                  border: Border(bottom: BorderSide(color: AppColors.border)),
++                ),
++                child: Center(
++                  child: Container(width: 48, height: 5, decoration: BoxDecoration(color: AppColors.border, borderRadius: BorderRadius.circular(AppRadius.pill))),
++                ),
++              ),
++              Expanded(
++                child: ListView(
++                  controller: scrollController,
++                  padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.xl, AppSpacing.xl, AppSpacing.xxl),
++                  children: [
++                    _SuccessHeader(transaction: transaction),
++                    const SizedBox(height: AppSpacing.xl),
++                    _ReceiptCard(transaction: transaction, changeAmount: changeAmount),
++                  ],
++                ),
++              ),
++              Container(
++                padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.md, AppSpacing.xl, AppSpacing.xl),
++                decoration: BoxDecoration(
++                  color: AppColors.surface,
++                  border: const Border(top: BorderSide(color: AppColors.border)),
++                  boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 16, offset: const Offset(0, -4))],
++                ),
++                child: SizedBox(
++                  width: double.infinity,
++                  child: ElevatedButton(
++                    onPressed: () => Navigator.of(context).pop(),
++                    style: ElevatedButton.styleFrom(
++                      backgroundColor: AppColors.brand,
++                      foregroundColor: Colors.white,
++                      padding: const EdgeInsets.symmetric(vertical: 15),
++                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
++                      elevation: 0,
++                    ),
++                    child: const Text('Selesai', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
++                  ),
++                ),
++              ),
++            ],
++          ),
++        );
++      },
++    );
++  }
++}
++
++class _SuccessHeader extends StatelessWidget {
++  final Transaction transaction;
++  const _SuccessHeader({required this.transaction});
++
++  @override
++  Widget build(BuildContext context) {
++    return Column(
++      children: [
++        Container(
++          width: 64,
++          height: 64,
++          decoration: BoxDecoration(color: AppColors.success.withValues(alpha: 0.1), shape: BoxShape.circle),
++          child: const Icon(Icons.check_rounded, size: 32, color: AppColors.success),
++        ),
++        const SizedBox(height: AppSpacing.md),
++        const Text('Pembayaran Berhasil', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
++        const SizedBox(height: 4),
++        Text(transaction.displayNumber, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textMuted)),
++      ],
++    );
++  }
++}
++
++class _ReceiptCard extends StatelessWidget {
++  final Transaction transaction;
++  final int changeAmount;
++  const _ReceiptCard({required this.transaction, required this.changeAmount});
++
++  @override
++  Widget build(BuildContext context) {
++    return Container(
++      padding: const EdgeInsets.all(AppSpacing.lg),
++      decoration: BoxDecoration(
++        color: AppColors.surface,
++        borderRadius: BorderRadius.circular(AppRadius.xl),
++        border: Border.all(color: AppColors.border),
++      ),
++      child: Column(
++        crossAxisAlignment: CrossAxisAlignment.start,
++        children: [
++          Center(
++            child: Column(
++              children: [
++                const Text('Mamam Kasir', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
++                const SizedBox(height: 4),
++                Text(
++                  DateFormat('d MMM yyyy, HH:mm', 'id_ID').format(transaction.createdAt),
++                  style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: AppColors.textMuted),
++                ),
++              ],
++            ),
++          ),
++          const SizedBox(height: AppSpacing.md),
++          _DashedDivider(),
++          const SizedBox(height: AppSpacing.md),
++          _InfoRow(label: 'Tipe Pesanan', value: transaction.orderType.label),
++          if (transaction.customerName != null) _InfoRow(label: 'Pelanggan', value: transaction.customerName!),
++          if (transaction.ojolPlatform != null) _InfoRow(label: 'Platform', value: transaction.ojolPlatform!.label),
++          if (transaction.ojolOrderNumber != null && transaction.ojolOrderNumber!.isNotEmpty)
++            _InfoRow(label: 'No. Pesanan', value: transaction.ojolOrderNumber!),
++          const SizedBox(height: AppSpacing.md),
++          _DashedDivider(),
++          const SizedBox(height: AppSpacing.md),
++          ...transaction.items.map((item) => Padding(
++                padding: const EdgeInsets.only(bottom: AppSpacing.sm),
++                child: Row(
++                  crossAxisAlignment: CrossAxisAlignment.start,
++                  children: [
++                    Expanded(
++                      child: Column(
++                        crossAxisAlignment: CrossAxisAlignment.start,
++                        children: [
++                          Text('${item.qty}x ${item.name}', style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
++                          if (item.variantName != null)
++                            Text(item.variantName!, style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.w500, color: AppColors.textMuted)),
++                        ],
++                      ),
++                    ),
++                    Text(formatRupiah(item.lineTotal), style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
++                  ],
++                ),
++              )),
++          const SizedBox(height: AppSpacing.sm),
++          _DashedDivider(),
++          const SizedBox(height: AppSpacing.sm),
++          _AmountRow(label: 'Subtotal', value: transaction.subtotal),
++          if (transaction.voucherDiscount > 0) _AmountRow(label: 'Diskon Voucher (${transaction.voucherCode})', value: -transaction.voucherDiscount),
++          if (transaction.manualDiscountAmount > 0) _AmountRow(label: 'Diskon Manual', value: -transaction.manualDiscountAmount),
++          if (transaction.taxAmount > 0) _AmountRow(label: 'Pajak', value: transaction.taxAmount),
++          if (transaction.serviceAmount > 0) _AmountRow(label: 'Service', value: transaction.serviceAmount),
++          if (transaction.deliveryFee > 0) _AmountRow(label: 'Ongkir', value: transaction.deliveryFee),
++          const SizedBox(height: AppSpacing.sm),
++          _DashedDivider(),
++          const SizedBox(height: AppSpacing.sm),
++          _AmountRow(label: 'TOTAL', value: transaction.total, isBold: true),
++          if (transaction.paymentMethodLabel != null) ...[
++            const SizedBox(height: AppSpacing.sm),
++            _InfoRow(label: 'Metode', value: transaction.paymentMethodLabel!),
++          ],
++          if (transaction.amountPaid != null && transaction.paymentMethodLabel != 'Ojol')
++            _AmountRow(label: 'Dibayar', value: transaction.amountPaid!),
++          if (changeAmount > 0) _AmountRow(label: 'Kembalian', value: changeAmount),
++        ],
++      ),
++    );
++  }
++}
++
++class _DashedDivider extends StatelessWidget {
++  @override
++  Widget build(BuildContext context) {
++    return SizedBox(
++      height: 1,
++      child: LayoutBuilder(
++        builder: (context, constraints) {
++          final dashCount = (constraints.maxWidth / 8).floor();
++          return Row(
++            children: List.generate(
++              dashCount,
++              (index) => Expanded(child: Container(height: 1, color: index.isEven ? AppColors.border : Colors.transparent)),
++            ),
++          );
++        },
++      ),
++    );
++  }
++}
++
++class _InfoRow extends StatelessWidget {
++  final String label;
++  final String value;
++  const _InfoRow({required this.label, required this.value});
++
++  @override
++  Widget build(BuildContext context) {
++    return Padding(
++      padding: const EdgeInsets.symmetric(vertical: 2),
++      child: Row(
++        mainAxisAlignment: MainAxisAlignment.spaceBetween,
++        children: [
++          Text(label, style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w500, color: AppColors.textMuted)),
++          Text(value, style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
++        ],
++      ),
++    );
++  }
++}
++
++class _AmountRow extends StatelessWidget {
++  final String label;
++  final int value;
++  final bool isBold;
++  const _AmountRow({required this.label, required this.value, this.isBold = false});
++
++  @override
++  Widget build(BuildContext context) {
++    return Padding(
++      padding: const EdgeInsets.symmetric(vertical: 2),
++      child: Row(
++        mainAxisAlignment: MainAxisAlignment.spaceBetween,
++        children: [
++          Text(label, style: TextStyle(fontSize: isBold ? 13.5 : 12, fontWeight: isBold ? FontWeight.w800 : FontWeight.w500, color: isBold ? AppColors.textPrimary : AppColors.textSecondary)),
++          Text(
++            '${value < 0 ? '-' : ''}${formatRupiah(value.abs())}',
++            style: TextStyle(fontSize: isBold ? 15 : 12, fontWeight: isBold ? FontWeight.w800 : FontWeight.w600, color: isBold ? AppColors.brand : AppColors.textPrimary),
++          ),
++        ],
++      ),
++    );
++  }
++}
+diff --git a/lib/features/pos/presentation/widgets/variant_selection_modal.dart b/lib/features/pos/presentation/widgets/variant_selection_modal.dart
+new file mode 100644
+index 0000000..6a08e0f
+--- /dev/null
++++ b/lib/features/pos/presentation/widgets/variant_selection_modal.dart
+@@ -0,0 +1,242 @@
++import 'package:flutter/material.dart';
++
++import '../../../../core/theme/app_colors.dart';
++import '../../../../core/theme/app_spacing.dart';
++import '../../../../core/utils/currency.dart';
++import '../../../menu_management/domain/menu_management_models.dart';
++
++/// Shown as a modal (bottom-up) when a tapped menu item has one or more
++/// linked variant groups. Returns the selected options map (groupId ->
++/// list of optionIds) via [Navigator.pop], or null if dismissed without
++/// completing a required selection.
++class VariantSelectionModal extends StatefulWidget {
++  final MenuItem menu;
++  final List<VariantGroup> allGroups;
++
++  const VariantSelectionModal({super.key, required this.menu, required this.allGroups});
++
++  @override
++  State<VariantSelectionModal> createState() => _VariantSelectionModalState();
++}
++
++class _VariantSelectionModalState extends State<VariantSelectionModal> {
++  final Map<String, List<String>> _selected = {};
++
++  List<VariantGroup> get _relevantGroups =>
++      widget.allGroups.where((g) => widget.menu.variantGroupIds.contains(g.id) && g.isActive).toList();
++
++  void _toggleOption(VariantGroup group, String optionId) {
++    setState(() {
++      final current = List<String>.from(_selected[group.id] ?? []);
++      if (current.contains(optionId)) {
++        current.remove(optionId);
++      } else {
++        if (group.maxSelection <= 1) {
++          current
++            ..clear()
++            ..add(optionId);
++        } else if (current.length < group.maxSelection) {
++          current.add(optionId);
++        }
++      }
++      _selected[group.id] = current;
++    });
++  }
++
++  int get _extraPriceTotal {
++    var total = 0;
++    for (final group in _relevantGroups) {
++      final selectedIds = _selected[group.id] ?? [];
++      for (final option in group.options) {
++        if (selectedIds.contains(option.id)) total += option.extraPrice;
++      }
++    }
++    return total;
++  }
++
++  bool get _canConfirm {
++    for (final group in _relevantGroups) {
++      if (group.isRequired && (_selected[group.id]?.isEmpty ?? true)) return false;
++    }
++    return true;
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final groups = _relevantGroups;
++
++    return DraggableScrollableSheet(
++      initialChildSize: 0.75,
++      minChildSize: 0.4,
++      maxChildSize: 0.92,
++      builder: (context, scrollController) {
++        return Container(
++          decoration: const BoxDecoration(
++            color: AppColors.background,
++            borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
++          ),
++          child: Stack(
++            children: [
++              Column(
++                children: [
++                  Container(
++                    padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: AppSpacing.sm),
++                    decoration: const BoxDecoration(
++                      color: AppColors.surface,
++                      borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
++                      border: Border(bottom: BorderSide(color: AppColors.border)),
++                    ),
++                    child: Row(
++                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
++                      children: [
++                        IconButton(
++                          onPressed: () => Navigator.of(context).pop(),
++                          icon: const Icon(Icons.close_rounded, color: AppColors.textPrimary),
++                        ),
++                        Expanded(
++                          child: Text(
++                            widget.menu.name,
++                            textAlign: TextAlign.center,
++                            maxLines: 1,
++                            overflow: TextOverflow.ellipsis,
++                            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
++                          ),
++                        ),
++                        const SizedBox(width: 48),
++                      ],
++                    ),
++                  ),
++                  Expanded(
++                    child: ListView(
++                      controller: scrollController,
++                      padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.lg, AppSpacing.xl, 100),
++                      children: groups.map((group) => _VariantGroupSection(
++                            group: group,
++                            selectedIds: _selected[group.id] ?? [],
++                            onToggle: (optionId) => _toggleOption(group, optionId),
++                          )).toList(),
++                    ),
++                  ),
++                ],
++              ),
++              Positioned(
++                left: 0,
++                right: 0,
++                bottom: 0,
++                child: Container(
++                  padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.md, AppSpacing.xl, AppSpacing.xl),
++                  decoration: BoxDecoration(
++                    color: AppColors.surface,
++                    border: const Border(top: BorderSide(color: AppColors.border)),
++                    boxShadow: [
++                      BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 16, offset: const Offset(0, -4)),
++                    ],
++                  ),
++                  child: SizedBox(
++                    width: double.infinity,
++                    child: ElevatedButton(
++                      onPressed: _canConfirm ? () => Navigator.of(context).pop(_selected) : null,
++                      style: ElevatedButton.styleFrom(
++                        backgroundColor: AppColors.brand,
++                        foregroundColor: Colors.white,
++                        disabledBackgroundColor: AppColors.border,
++                        padding: const EdgeInsets.symmetric(vertical: 15),
++                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
++                        elevation: 0,
++                      ),
++                      child: Text(
++                        'Tambah • ${formatRupiah(widget.menu.price + _extraPriceTotal)}',
++                        style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800),
++                      ),
++                    ),
++                  ),
++                ),
++              ),
++            ],
++          ),
++        );
++      },
++    );
++  }
++}
++
++class _VariantGroupSection extends StatelessWidget {
++  final VariantGroup group;
++  final List<String> selectedIds;
++  final ValueChanged<String> onToggle;
++
++  const _VariantGroupSection({required this.group, required this.selectedIds, required this.onToggle});
++
++  @override
++  Widget build(BuildContext context) {
++    final isSingleSelect = group.maxSelection <= 1;
++
++    return Padding(
++      padding: const EdgeInsets.only(bottom: AppSpacing.xl),
++      child: Column(
++        crossAxisAlignment: CrossAxisAlignment.start,
++        children: [
++          Row(
++            children: [
++              Text(group.name, style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
++              const SizedBox(width: 6),
++              if (group.isRequired)
++                Container(
++                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
++                  decoration: BoxDecoration(color: AppColors.danger.withValues(alpha: 0.08), borderRadius: BorderRadius.circular(6)),
++                  child: const Text('WAJIB', style: TextStyle(fontSize: 9, fontWeight: FontWeight.w800, color: AppColors.danger)),
++                ),
++            ],
++          ),
++          const SizedBox(height: 2),
++          Text(
++            isSingleSelect ? 'Pilih 1' : 'Pilih maks. ${group.maxSelection}',
++            style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w500, color: AppColors.textMuted),
++          ),
++          const SizedBox(height: AppSpacing.sm),
++          ...group.options.map((option) {
++            final selected = selectedIds.contains(option.id);
++            return Padding(
++              padding: const EdgeInsets.only(bottom: AppSpacing.sm),
++              child: Material(
++                color: AppColors.surface,
++                borderRadius: BorderRadius.circular(AppRadius.md),
++                child: InkWell(
++                  onTap: () => onToggle(option.id),
++                  borderRadius: BorderRadius.circular(AppRadius.md),
++                  child: Container(
++                    padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.md),
++                    decoration: BoxDecoration(
++                      borderRadius: BorderRadius.circular(AppRadius.md),
++                      border: Border.all(color: selected ? AppColors.brand : AppColors.border, width: selected ? 1.5 : 1),
++                    ),
++                    child: Row(
++                      children: [
++                        Icon(
++                          selected
++                              ? (isSingleSelect ? Icons.radio_button_checked_rounded : Icons.check_box_rounded)
++                              : (isSingleSelect ? Icons.radio_button_off_rounded : Icons.check_box_outline_blank_rounded),
++                          size: 20,
++                          color: selected ? AppColors.brand : AppColors.textMuted,
++                        ),
++                        const SizedBox(width: AppSpacing.sm),
++                        Expanded(
++                          child: Text(option.name, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
++                        ),
++                        if (option.extraPrice > 0)
++                          Text(
++                            '+${formatRupiah(option.extraPrice)}',
++                            style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: AppColors.textSecondary),
++                          ),
++                      ],
++                    ),
++                  ),
++                ),
++              ),
++            );
++          }),
++        ],
++      ),
++    );
++  }
++}
+-- 
+2.43.0
+

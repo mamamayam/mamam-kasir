@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/theme/app_spacing.dart';
+import '../../../../core/utils/currency.dart';
 import '../../domain/menu_management_models.dart';
 
 class VariantGroupCard extends StatelessWidget {
@@ -41,9 +42,30 @@ class VariantGroupCard extends StatelessWidget {
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
             Expanded(
-              child: Text(
-                group.name,
-                style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
+              child: Row(
+                children: [
+                  Flexible(
+                    child: Text(
+                      group.name,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
+                    ),
+                  ),
+                  if (group.isRequired) ...[
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: AppColors.danger.withValues(alpha: 0.08),
+                        borderRadius: BorderRadius.circular(AppRadius.sm),
+                      ),
+                      child: const Text(
+                        'WAJIB',
+                        style: TextStyle(fontSize: 9, fontWeight: FontWeight.w800, color: AppColors.danger, letterSpacing: 0.3),
+                      ),
+                    ),
+                  ],
+                ],
               ),
             ),
             Container(
@@ -59,6 +81,11 @@ class VariantGroupCard extends StatelessWidget {
             ),
           ],
         ),
+        const SizedBox(height: 4),
+        Text(
+          'Maks. ${group.maxSelection} dipilih',
+          style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.w500, color: AppColors.textMuted),
+        ),
         const SizedBox(height: AppSpacing.sm),
         Wrap(
           spacing: 6,
@@ -72,7 +99,7 @@ class VariantGroupCard extends StatelessWidget {
                       border: Border.all(color: AppColors.border),
                     ),
                     child: Text(
-                      opt,
+                      opt.extraPrice > 0 ? '${opt.name} (+${formatRupiah(opt.extraPrice)})' : opt.name,
                       style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.textSecondary),
                     ),
                   ))

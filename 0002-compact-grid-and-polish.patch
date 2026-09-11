@@ -1,0 +1,149 @@
+From 5d9a16d21cc7e9a4dc4723a7c1d4b608656eb41f Mon Sep 17 00:00:00 2001
+From: Mamam Kasir Dev <dev@mamamayam.local>
+Date: Wed, 9 Sep 2026 05:05:48 +0000
+Subject: [PATCH] style: compact 3x3 grid, fix placeholder header alignment,
+ add soft shadows to dashboard cards
+
+---
+ lib/core/widgets/placeholder_screen.dart        |  4 ----
+ .../presentation/widgets/metrics_grid.dart      | 17 ++++++++++++++---
+ .../presentation/widgets/quick_actions_row.dart |  4 ++++
+ .../presentation/widgets/sales_trend_chart.dart |  3 +++
+ .../presentation/menu_bottom_sheet.dart         | 16 ++++++++--------
+ 5 files changed, 29 insertions(+), 15 deletions(-)
+
+diff --git a/lib/core/widgets/placeholder_screen.dart b/lib/core/widgets/placeholder_screen.dart
+index 43dbcd3..8b28e1e 100644
+--- a/lib/core/widgets/placeholder_screen.dart
++++ b/lib/core/widgets/placeholder_screen.dart
+@@ -40,10 +40,6 @@ class PlaceholderScreen extends StatelessWidget {
+                     onPressed: () => Navigator.of(context).pop(),
+                     icon: const Icon(Icons.arrow_back_rounded, color: AppColors.textPrimary),
+                   ),
+-                  Text(
+-                    title,
+-                    style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
+-                  ),
+                 ],
+               ),
+             ),
+diff --git a/lib/features/dashboard/presentation/widgets/metrics_grid.dart b/lib/features/dashboard/presentation/widgets/metrics_grid.dart
+index 89b8188..a38ef2c 100644
+--- a/lib/features/dashboard/presentation/widgets/metrics_grid.dart
++++ b/lib/features/dashboard/presentation/widgets/metrics_grid.dart
+@@ -71,6 +71,9 @@ class _MetricCard extends StatelessWidget {
+         color: AppColors.surface,
+         borderRadius: BorderRadius.circular(AppRadius.lg),
+         border: Border.all(color: AppColors.border),
++        boxShadow: [
++          BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 10, offset: const Offset(0, 3)),
++        ],
+       ),
+       child: Column(
+         crossAxisAlignment: CrossAxisAlignment.start,
+@@ -78,8 +81,16 @@ class _MetricCard extends StatelessWidget {
+         children: [
+           Row(
+             children: [
+-              Icon(icon, size: 15, color: iconColor),
+-              const SizedBox(width: 6),
++              Container(
++                width: 24,
++                height: 24,
++                decoration: BoxDecoration(
++                  color: iconColor.withValues(alpha: 0.1),
++                  borderRadius: BorderRadius.circular(7),
++                ),
++                child: Icon(icon, size: 13, color: iconColor),
++              ),
++              const SizedBox(width: 7),
+               Expanded(
+                 child: Text(
+                   label,
+@@ -90,7 +101,7 @@ class _MetricCard extends StatelessWidget {
+               ),
+             ],
+           ),
+-          const SizedBox(height: 8),
++          const SizedBox(height: 9),
+           Text(
+             value,
+             maxLines: 1,
+diff --git a/lib/features/dashboard/presentation/widgets/quick_actions_row.dart b/lib/features/dashboard/presentation/widgets/quick_actions_row.dart
+index 4831f54..e9ed4c4 100644
+--- a/lib/features/dashboard/presentation/widgets/quick_actions_row.dart
++++ b/lib/features/dashboard/presentation/widgets/quick_actions_row.dart
+@@ -63,8 +63,12 @@ class _QuickAction extends StatelessWidget {
+         child: Container(
+           padding: const EdgeInsets.all(AppSpacing.md),
+           decoration: BoxDecoration(
++            color: AppColors.surface,
+             borderRadius: BorderRadius.circular(AppRadius.lg),
+             border: Border.all(color: AppColors.border),
++            boxShadow: [
++              BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 10, offset: const Offset(0, 3)),
++            ],
+           ),
+           child: Column(
+             crossAxisAlignment: CrossAxisAlignment.start,
+diff --git a/lib/features/dashboard/presentation/widgets/sales_trend_chart.dart b/lib/features/dashboard/presentation/widgets/sales_trend_chart.dart
+index f715848..9323201 100644
+--- a/lib/features/dashboard/presentation/widgets/sales_trend_chart.dart
++++ b/lib/features/dashboard/presentation/widgets/sales_trend_chart.dart
+@@ -29,6 +29,9 @@ class SalesTrendChart extends StatelessWidget {
+         color: AppColors.surface,
+         borderRadius: BorderRadius.circular(AppRadius.xl),
+         border: Border.all(color: AppColors.border),
++        boxShadow: [
++          BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 10, offset: const Offset(0, 3)),
++        ],
+       ),
+       child: Column(
+         crossAxisAlignment: CrossAxisAlignment.start,
+diff --git a/lib/features/menu_shell/presentation/menu_bottom_sheet.dart b/lib/features/menu_shell/presentation/menu_bottom_sheet.dart
+index e1ec31a..cc12bbd 100644
+--- a/lib/features/menu_shell/presentation/menu_bottom_sheet.dart
++++ b/lib/features/menu_shell/presentation/menu_bottom_sheet.dart
+@@ -92,9 +92,9 @@ class MenuBottomSheetContent extends StatelessWidget {
+                       crossAxisCount: 3,
+                       shrinkWrap: true,
+                       physics: const NeverScrollableScrollPhysics(),
+-                      mainAxisSpacing: AppSpacing.lg,
+-                      crossAxisSpacing: AppSpacing.md,
+-                      childAspectRatio: 0.82,
++                      mainAxisSpacing: AppSpacing.md,
++                      crossAxisSpacing: AppSpacing.sm,
++                      childAspectRatio: 0.92,
+                       children: items.map((item) => _MenuGridTile(item: item)).toList(),
+                     ),
+                   ],
+@@ -121,21 +121,21 @@ class _MenuGridTile extends StatelessWidget {
+         mainAxisSize: MainAxisSize.min,
+         children: [
+           Container(
+-            width: 60,
+-            height: 60,
++            width: 52,
++            height: 52,
+             decoration: BoxDecoration(
+               color: item.color,
+               borderRadius: BorderRadius.circular(AppRadius.md),
+             ),
+-            child: Icon(item.icon, size: 24, color: Colors.white),
++            child: Icon(item.icon, size: 21, color: Colors.white),
+           ),
+-          const SizedBox(height: AppSpacing.sm),
++          const SizedBox(height: 7),
+           Text(
+             item.label,
+             textAlign: TextAlign.center,
+             maxLines: 1,
+             overflow: TextOverflow.ellipsis,
+-            style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: AppColors.textPrimary),
++            style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: AppColors.textPrimary),
+           ),
+         ],
+       ),
+-- 
+2.43.0
+

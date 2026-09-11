@@ -1,0 +1,73 @@
+From 8883a0faf9a018e717ec2ed75887b88ddbed838c Mon Sep 17 00:00:00 2001
+From: Mamam Kasir Dev <dev@mamamayam.local>
+Date: Thu, 10 Sep 2026 21:35:26 +0000
+Subject: [PATCH] fix: prefix Transaction/TransactionStatus in
+ pos_repository.dart to resolve ambiguous import with sqflite_common's
+ Transaction class
+
+sqflite_sqlcipher re-exports sqflite_common, which has its own Transaction
+class (for SQL transactions). Our domain Transaction model name collided
+with it directly in pos_repository.dart (the only file that imports both).
+Imported our model as 'txn' and prefixed all usages.
+
+The knock-on 'label getter not defined' errors in receipt_modal.dart were
+a side effect of the Transaction ambiguity failing the whole compile, not
+a real problem with the OrderType/OjolPlatform label extensions.
+---
+ lib/features/pos/application/pos_repository.dart | 12 ++++++------
+ 1 file changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/lib/features/pos/application/pos_repository.dart b/lib/features/pos/application/pos_repository.dart
+index 1930c0c..f950aca 100644
+--- a/lib/features/pos/application/pos_repository.dart
++++ b/lib/features/pos/application/pos_repository.dart
+@@ -9,7 +9,7 @@ import '../../menu_management/domain/menu_management_models.dart';
+ import '../domain/cart_item.dart';
+ import '../domain/customer.dart';
+ import '../domain/order_models.dart';
+-import '../domain/transaction.dart';
++import '../domain/transaction.dart' as txn;
+ import '../domain/voucher.dart';
+ 
+ class PosRepository {
+@@ -85,8 +85,8 @@ class PosRepository {
+   /// Persists a completed transaction and its line items. `id` and
+   /// `displayNumber` are generated here so the caller (checkout flow)
+   /// doesn't need its own ID scheme.
+-  Future<Transaction> saveTransaction({
+-    required TransactionStatus status,
++  Future<txn.Transaction> saveTransaction({
++    required txn.TransactionStatus status,
+     required OrderType orderType,
+     String? customerId,
+     String? customerName,
+@@ -145,7 +145,7 @@ class PosRepository {
+           ? null
+           : jsonEncode(splitPayments.map((p) => {'method': p.method.label, 'amount': p.amount}).toList()),
+       'created_at': now.toIso8601String(),
+-      'paid_at': status == TransactionStatus.paid ? now.toIso8601String() : null,
++      'paid_at': status == txn.TransactionStatus.paid ? now.toIso8601String() : null,
+     });
+ 
+     for (final item in items) {
+@@ -163,7 +163,7 @@ class PosRepository {
+       });
+     }
+ 
+-    return Transaction(
++    return txn.Transaction(
+       id: id,
+       displayNumber: displayNumber,
+       status: status,
+@@ -189,7 +189,7 @@ class PosRepository {
+       changeAmount: changeAmount,
+       splitPayments: splitPayments,
+       createdAt: now,
+-      paidAt: status == TransactionStatus.paid ? now : null,
++      paidAt: status == txn.TransactionStatus.paid ? now : null,
+     );
+   }
+ }
+-- 
+2.43.0
+

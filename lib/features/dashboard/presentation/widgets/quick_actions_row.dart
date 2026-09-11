@@ -18,7 +18,6 @@ class QuickActionsRow extends StatelessWidget {
             icon: Icons.shopping_cart_rounded,
             iconColor: AppColors.brand,
             title: 'Kasir',
-            subtitle: 'Buka transaksi baru',
             onTap: onKasirTap,
           ),
         ),
@@ -28,7 +27,6 @@ class QuickActionsRow extends StatelessWidget {
             icon: Icons.history_rounded,
             iconColor: AppColors.info,
             title: 'Riwayat',
-            subtitle: 'Transaksi hari ini',
             onTap: onRiwayatTap,
           ),
         ),
@@ -41,14 +39,12 @@ class _QuickAction extends StatelessWidget {
   final IconData icon;
   final Color iconColor;
   final String title;
-  final String subtitle;
   final VoidCallback onTap;
 
   const _QuickAction({
     required this.icon,
     required this.iconColor,
     required this.title,
-    required this.subtitle,
     required this.onTap,
   });
 
@@ -61,13 +57,18 @@ class _QuickAction extends StatelessWidget {
         onTap: onTap,
         borderRadius: BorderRadius.circular(AppRadius.lg),
         child: Container(
-          padding: const EdgeInsets.all(AppSpacing.md),
+          padding: const EdgeInsets.symmetric(vertical: AppSpacing.lg, horizontal: AppSpacing.md),
           decoration: BoxDecoration(
+            color: AppColors.surface,
             borderRadius: BorderRadius.circular(AppRadius.lg),
             border: Border.all(color: AppColors.border),
+            boxShadow: [
+              BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 10, offset: const Offset(0, 3)),
+            ],
           ),
           child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               Container(
                 width: 40,
@@ -77,8 +78,6 @@ class _QuickAction extends StatelessWidget {
               ),
               const SizedBox(height: AppSpacing.sm),
               Text(title, style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
-              const SizedBox(height: 2),
-              Text(subtitle, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: AppColors.textSecondary)),
             ],
           ),
         ),

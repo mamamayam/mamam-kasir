@@ -1,0 +1,1361 @@
+From 9c220280e0ce53efb670e16454bfaa0891f598e1 Mon Sep 17 00:00:00 2001
+From: Mamam Kasir Dev <dev@mamamayam.local>
+Date: Fri, 11 Sep 2026 02:58:09 +0000
+Subject: [PATCH] feat: Riwayat Transaksi & Detail (transaction history +
+ cancel flow)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Wires up the dashboard's 'Riwayat' quick action, previously a stub.
+Transactions already persisted to DB from checkout — this reads them back.
+
+Scope decided from PRD, not the React reference app (reference's
+recycle-bin/hard-delete/bulk-select pattern explicitly rejected):
+- 'Batalkan Transaksi' (cancel, not delete) — canceled stays in history
+  shown red/struck-through, excluded from omzet in the payment breakdown,
+  no refund transaction created, cannot cancel/edit again once canceled
+- Transaction hard-delete is NOT implemented — PRD explicitly leaves
+  deletion permission/retention UNSPECIFIED
+- Cancel has no role-gating yet (Auth/Permissions module doesn't exist);
+  open to anyone for now, role restrictions land once Auth is built
+
+DB (v3): added transactions.canceled_at / cancel_reason columns.
+
+New history feature module:
+- Domain: HistoryDateFilter (Hari Ini/Kemarin/Hari Sebelumnya/Custom per
+  PRD's explicit list, plus Bulan Ini/Semua as practical additions under
+  PRD's 'plus relevant filters' allowance), HistorySortKey,
+  PaymentMethodBreakdown
+- Application: HistoryRepository (reads transactions+items back into
+  domain models, handles cancel — no delete method exists at all),
+  HistoryController/HistoryState with search + date/order-type/
+  payment-method filtering, sort, and a payment-method revenue breakdown
+  computed independently of the payment-method filter itself
+- Presentation: HistoryScreen (search, date filter tabs, order-type
+  filter row, payment breakdown card, sortable list), TransactionCard
+  (canceled transactions shown red/struck-through), TransactionDetailScreen
+  (full itemized detail + Batalkan action with reason capture), plus
+  DateFilterTabs/PaymentBreakdownCard/SortSheet widgets
+
+Same Transaction/sqflite_common naming clash as pos_repository.dart
+applies here too — history_repository.dart imports our Transaction model
+as 'txn' from the start, so no follow-up fix needed for this one.
+---
+ lib/core/data/app_database.dart               |  16 +-
+ .../presentation/dashboard_screen.dart        |   5 +-
+ .../history/application/history_provider.dart | 199 +++++++++++++
+ .../application/history_repository.dart       | 116 ++++++++
+ .../history/domain/history_models.dart        |  55 ++++
+ .../history/presentation/history_screen.dart  | 232 +++++++++++++++
+ .../transaction_detail_screen.dart            | 266 ++++++++++++++++++
+ .../widgets/date_filter_tabs.dart             |  53 ++++
+ .../widgets/payment_breakdown_card.dart       | 104 +++++++
+ .../presentation/widgets/sort_sheet.dart      |  37 +++
+ .../widgets/transaction_card.dart             |  92 ++++++
+ lib/features/pos/domain/transaction.dart      |   6 +
+ 12 files changed, 1171 insertions(+), 10 deletions(-)
+ create mode 100644 lib/features/history/application/history_provider.dart
+ create mode 100644 lib/features/history/application/history_repository.dart
+ create mode 100644 lib/features/history/domain/history_models.dart
+ create mode 100644 lib/features/history/presentation/history_screen.dart
+ create mode 100644 lib/features/history/presentation/transaction_detail_screen.dart
+ create mode 100644 lib/features/history/presentation/widgets/date_filter_tabs.dart
+ create mode 100644 lib/features/history/presentation/widgets/payment_breakdown_card.dart
+ create mode 100644 lib/features/history/presentation/widgets/sort_sheet.dart
+ create mode 100644 lib/features/history/presentation/widgets/transaction_card.dart
+
+diff --git a/lib/core/data/app_database.dart b/lib/core/data/app_database.dart
+index 185cffb..a1e5e80 100644
+--- a/lib/core/data/app_database.dart
++++ b/lib/core/data/app_database.dart
+@@ -21,12 +21,12 @@ class AppDatabase {
+   static final AppDatabase instance = AppDatabase._();
+ 
+   static const _dbName = 'mamam_kasir.db';
+-  // v2: added variant group is_required/max_selection, variant option
+-  // extra_price, and the customers/vouchers/transactions tables for the
+-  // POS/checkout vertical slice. Still pre-release (no real user data
+-  // anywhere yet), so this is a straight schema bump with a fresh
+-  // onCreate rather than an onUpgrade migration path.
+-  static const _dbVersion = 2;
++  // v3: added transactions.canceled_at / cancel_reason for the "Batalkan
++  // Transaksi" (cancel, not delete) flow — PRD explicitly rejects hard
++  // delete for transactions (retention/permission is UNSPECIFIED there).
++  // Still pre-release, straight recreate via onCreate rather than a real
++  // migration — same rationale as the v1->v2 bump.
++  static const _dbVersion = 3;
+ 
+   // TODO(security-foundation): replace with a key generated once and
+   // stored via flutter_secure_storage, per AGENTS.md.
+@@ -174,7 +174,9 @@ class AppDatabase {
+         change_amount INTEGER,
+         split_payments_json TEXT, -- JSON array, only when payment_method = 'Split Payment'
+         created_at TEXT NOT NULL,
+-        paid_at TEXT
++        paid_at TEXT,
++        canceled_at TEXT,
++        cancel_reason TEXT
+       )
+     ''');
+ 
+diff --git a/lib/features/dashboard/presentation/dashboard_screen.dart b/lib/features/dashboard/presentation/dashboard_screen.dart
+index 3f73dfd..61de929 100644
+--- a/lib/features/dashboard/presentation/dashboard_screen.dart
++++ b/lib/features/dashboard/presentation/dashboard_screen.dart
+@@ -7,6 +7,7 @@ import '../../../core/theme/app_spacing.dart';
+ import '../../../core/utils/currency.dart';
+ import '../../menu_shell/presentation/menu_bottom_sheet.dart';
+ import '../../menu_shell/presentation/swipe_up_trigger.dart';
++import '../../history/presentation/history_screen.dart';
+ import '../../pos/presentation/pos_screen.dart';
+ import '../application/dashboard_provider.dart';
+ import '../domain/dashboard_models.dart';
+@@ -136,9 +137,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
+                           const SizedBox(height: AppSpacing.lg),
+                           QuickActionsRow(
+                             onKasirTap: () => AppNav.push(context, (_) => const PosScreen()),
+-                            onRiwayatTap: () {
+-                              // Route to Riwayat — out of scope for this pass.
+-                            },
++                            onRiwayatTap: () => AppNav.push(context, (_) => const HistoryScreen()),
+                           ),
+                         ],
+                       ),
+diff --git a/lib/features/history/application/history_provider.dart b/lib/features/history/application/history_provider.dart
+new file mode 100644
+index 0000000..87838f7
+--- /dev/null
++++ b/lib/features/history/application/history_provider.dart
+@@ -0,0 +1,199 @@
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../../pos/domain/order_models.dart';
++import '../../pos/domain/transaction.dart';
++import '../domain/history_models.dart';
++import 'history_repository.dart';
++
++final historyRepositoryProvider = Provider<HistoryRepository>((ref) => HistoryRepository());
++
++class HistoryState {
++  final List<Transaction> transactions;
++  final bool isLoading;
++  final String? errorMessage;
++
++  final String searchQuery;
++  final HistoryDateFilter dateFilter;
++  final DateTime? customStartDate;
++  final DateTime? customEndDate;
++  final OrderType? orderTypeFilter; // null = semua
++  final String? paymentMethodFilter; // null = semua
++  final HistorySortKey sortKey;
++
++  const HistoryState({
++    this.transactions = const [],
++    this.isLoading = true,
++    this.errorMessage,
++    this.searchQuery = '',
++    this.dateFilter = HistoryDateFilter.hariIni,
++    this.customStartDate,
++    this.customEndDate,
++    this.orderTypeFilter,
++    this.paymentMethodFilter,
++    this.sortKey = HistorySortKey.dateDesc,
++  });
++
++  HistoryState copyWith({
++    List<Transaction>? transactions,
++    bool? isLoading,
++    String? errorMessage,
++    String? searchQuery,
++    HistoryDateFilter? dateFilter,
++    DateTime? customStartDate,
++    DateTime? customEndDate,
++    OrderType? orderTypeFilter,
++    bool clearOrderTypeFilter = false,
++    String? paymentMethodFilter,
++    bool clearPaymentMethodFilter = false,
++    HistorySortKey? sortKey,
++  }) {
++    return HistoryState(
++      transactions: transactions ?? this.transactions,
++      isLoading: isLoading ?? this.isLoading,
++      errorMessage: errorMessage,
++      searchQuery: searchQuery ?? this.searchQuery,
++      dateFilter: dateFilter ?? this.dateFilter,
++      customStartDate: customStartDate ?? this.customStartDate,
++      customEndDate: customEndDate ?? this.customEndDate,
++      orderTypeFilter: clearOrderTypeFilter ? null : (orderTypeFilter ?? this.orderTypeFilter),
++      paymentMethodFilter: clearPaymentMethodFilter ? null : (paymentMethodFilter ?? this.paymentMethodFilter),
++      sortKey: sortKey ?? this.sortKey,
++    );
++  }
++
++  bool _withinDateRange(DateTime date) {
++    final now = DateTime.now();
++    final startOfToday = DateTime(now.year, now.month, now.day);
++
++    switch (dateFilter) {
++      case HistoryDateFilter.semua:
++        return true;
++      case HistoryDateFilter.hariIni:
++        final endOfToday = startOfToday.add(const Duration(days: 1));
++        return (date.isAfter(startOfToday) || date.isAtSameMomentAs(startOfToday)) && date.isBefore(endOfToday);
++      case HistoryDateFilter.kemarin:
++        final startOfYesterday = startOfToday.subtract(const Duration(days: 1));
++        return date.isAfter(startOfYesterday) && date.isBefore(startOfToday);
++      case HistoryDateFilter.hariSebelumnya:
++        final sevenDaysAgo = startOfToday.subtract(const Duration(days: 7));
++        return date.isAfter(sevenDaysAgo);
++      case HistoryDateFilter.bulanIni:
++        return date.year == now.year && date.month == now.month;
++      case HistoryDateFilter.custom:
++        if (customStartDate == null) return true;
++        final start = DateTime(customStartDate!.year, customStartDate!.month, customStartDate!.day);
++        final endBase = customEndDate ?? customStartDate!;
++        final end = DateTime(endBase.year, endBase.month, endBase.day, 23, 59, 59);
++        return (date.isAfter(start) || date.isAtSameMomentAs(start)) && date.isBefore(end);
++    }
++  }
++
++  bool _matchesSearch(Transaction t) {
++    if (searchQuery.isEmpty) return true;
++    final q = searchQuery.toLowerCase();
++    return t.id.toLowerCase().contains(q) ||
++        t.displayNumber.toLowerCase().contains(q) ||
++        (t.customerName?.toLowerCase().contains(q) ?? false) ||
++        t.total.toString().contains(q);
++  }
++
++  /// Filtered by everything except the payment-method filter — used for
++  /// the payment breakdown card, which should always show the full
++  /// composition within the active date/search/order-type filter (same
++  /// rationale as the reference app, kept because it's a sound UX
++  /// pattern independent of which parts of that app are or aren't
++  /// PRD-sanctioned).
++  List<Transaction> get _filteredForBreakdown {
++    return transactions.where((t) {
++      return _matchesSearch(t) && _withinDateRange(t.createdAt) && (orderTypeFilter == null || t.orderType == orderTypeFilter);
++    }).toList();
++  }
++
++  List<Transaction> get filteredTransactions {
++    final base = _filteredForBreakdown.where((t) {
++      return paymentMethodFilter == null || t.paymentMethodLabel == paymentMethodFilter;
++    }).toList();
++
++    base.sort((a, b) {
++      switch (sortKey) {
++        case HistorySortKey.dateDesc:
++          return b.createdAt.compareTo(a.createdAt);
++        case HistorySortKey.dateAsc:
++          return a.createdAt.compareTo(b.createdAt);
++        case HistorySortKey.totalDesc:
++          return b.total.compareTo(a.total);
++        case HistorySortKey.totalAsc:
++          return a.total.compareTo(b.total);
++      }
++    });
++    return base;
++  }
++
++  List<PaymentMethodBreakdown> get paymentBreakdown {
++    final totals = <String, PaymentMethodBreakdown>{};
++    for (final t in _filteredForBreakdown) {
++      if (t.isCanceled) continue; // canceled excluded from omzet, per PRD
++      final key = t.paymentMethodLabel ?? 'Lainnya';
++      final existing = totals[key];
++      totals[key] = PaymentMethodBreakdown(
++        method: key,
++        total: (existing?.total ?? 0) + t.total,
++        count: (existing?.count ?? 0) + 1,
++      );
++    }
++    final list = totals.values.toList()..sort((a, b) => b.total.compareTo(a.total));
++    return list;
++  }
++
++  List<String> get availablePaymentMethods =>
++      transactions.map((t) => t.paymentMethodLabel).whereType<String>().toSet().toList();
++}
++
++final historyProvider = StateNotifierProvider.autoDispose<HistoryController, HistoryState>((ref) {
++  return HistoryController(ref.watch(historyRepositoryProvider));
++});
++
++class HistoryController extends StateNotifier<HistoryState> {
++  final HistoryRepository _repository;
++
++  HistoryController(this._repository) : super(const HistoryState()) {
++    load();
++  }
++
++  Future<void> load() async {
++    state = state.copyWith(isLoading: true, errorMessage: null);
++    try {
++      final transactions = await _repository.getTransactions();
++      state = state.copyWith(transactions: transactions, isLoading: false);
++    } catch (e) {
++      state = state.copyWith(isLoading: false, errorMessage: 'Gagal memuat riwayat: $e');
++    }
++  }
++
++  void setSearchQuery(String query) => state = state.copyWith(searchQuery: query);
++
++  void setDateFilter(HistoryDateFilter filter) => state = state.copyWith(dateFilter: filter);
++
++  void setCustomDateRange(DateTime? start, DateTime? end) {
++    state = state.copyWith(dateFilter: HistoryDateFilter.custom, customStartDate: start, customEndDate: end);
++  }
++
++  void setOrderTypeFilter(OrderType? type) {
++    state = type == null ? state.copyWith(clearOrderTypeFilter: true) : state.copyWith(orderTypeFilter: type);
++  }
++
++  void setPaymentMethodFilter(String? method) {
++    state = method == null ? state.copyWith(clearPaymentMethodFilter: true) : state.copyWith(paymentMethodFilter: method);
++  }
++
++  void setSortKey(HistorySortKey key) => state = state.copyWith(sortKey: key);
++
++  Future<void> cancelTransaction(String transactionId, {String? reason}) async {
++    try {
++      await _repository.cancelTransaction(transactionId, reason: reason);
++      await load();
++    } catch (e) {
++      state = state.copyWith(errorMessage: 'Gagal membatalkan transaksi: $e');
++    }
++  }
++}
+diff --git a/lib/features/history/application/history_repository.dart b/lib/features/history/application/history_repository.dart
+new file mode 100644
+index 0000000..13bdeaf
+--- /dev/null
++++ b/lib/features/history/application/history_repository.dart
+@@ -0,0 +1,116 @@
++import 'dart:convert';
++
++import 'package:sqflite_sqlcipher/sqflite.dart';
++
++import '../../../core/data/app_database.dart';
++import '../../pos/domain/cart_item.dart';
++import '../../pos/domain/order_models.dart';
++import '../../pos/domain/transaction.dart' as txn;
++
++/// Reads transaction history and handles "Batalkan Transaksi" (cancel).
++/// Per PRD, transactions are never hard-deleted — retention/deletion
++/// permission is explicitly UNSPECIFIED there, so no delete method
++/// exists here at all, not even a disabled one.
++class HistoryRepository {
++  Future<Database> get _db => AppDatabase.instance.database;
++
++  Future<List<txn.Transaction>> getTransactions() async {
++    final db = await _db;
++    final rows = await db.query('transactions', orderBy: 'created_at DESC');
++
++    final transactions = <txn.Transaction>[];
++    for (final row in rows) {
++      final itemRows = await db.query('transaction_items', where: 'transaction_id = ?', whereArgs: [row['id']]);
++      transactions.add(_transactionFromRow(row, itemRows));
++    }
++    return transactions;
++  }
++
++  txn.Transaction _transactionFromRow(Map<String, Object?> row, List<Map<String, Object?>> itemRows) {
++    final items = itemRows.map((r) {
++      final variantJson = r['variant_selected_json'] as String?;
++      return CartItem(
++        cartItemId: r['id'] as String,
++        menuItemId: r['menu_item_id'] as String,
++        name: r['name'] as String,
++        variantName: r['variant_name'] as String?,
++        variantSelectedOptions: variantJson == null
++            ? const {}
++            : (jsonDecode(variantJson) as Map<String, dynamic>).map((k, v) => MapEntry(k, List<String>.from(v as List))),
++        price: r['price'] as int,
++        hpp: r['hpp'] as int,
++        qty: r['qty'] as int,
++        note: (r['note'] as String?) ?? '',
++      );
++    }).toList();
++
++    final splitJson = row['split_payments_json'] as String?;
++    final splitPayments = splitJson == null
++        ? <SplitPaymentEntry>[]
++        : (jsonDecode(splitJson) as List)
++            .map((e) => SplitPaymentEntry(
++                  method: PaymentMethod.values.firstWhere((m) => m.label == e['method'], orElse: () => PaymentMethod.tunai),
++                  amount: e['amount'] as int,
++                ))
++            .toList();
++
++    final manualDiscountType = row['manual_discount_type'] as String?;
++
++    return txn.Transaction(
++      id: row['id'] as String,
++      displayNumber: row['display_number'] as String,
++      status: txn.TransactionStatus.values.firstWhere((s) => s.name == row['status'], orElse: () => txn.TransactionStatus.paid),
++      orderType: OrderType.values.firstWhere((t) => t.label == row['order_type'], orElse: () => OrderType.takeaway),
++      customerId: row['customer_id'] as String?,
++      customerName: row['customer_name'] as String?,
++      ojolPlatform: row['ojol_platform'] == null
++          ? null
++          : OjolPlatform.values.firstWhere((p) => p.label == row['ojol_platform'], orElse: () => OjolPlatform.gofood),
++      ojolOrderNumber: row['ojol_order_number'] as String?,
++      items: items,
++      subtotal: row['subtotal'] as int,
++      voucherId: row['voucher_id'] as String?,
++      voucherCode: row['voucher_code'] as String?,
++      voucherDiscount: row['voucher_discount'] as int,
++      manualDiscount: manualDiscountType == null
++          ? null
++          : ManualDiscount(
++              type: manualDiscountType == 'percent' ? ManualDiscountType.percent : ManualDiscountType.fixed,
++              value: row['manual_discount_value'] as int? ?? 0,
++            ),
++      manualDiscountAmount: row['manual_discount_amount'] as int,
++      taxAmount: row['tax_amount'] as int,
++      serviceAmount: row['service_amount'] as int,
++      deliveryFee: row['delivery_fee'] as int,
++      roundingAdjustment: row['rounding_adjustment'] as int,
++      total: row['total'] as int,
++      paymentMethodLabel: row['payment_method'] as String?,
++      amountPaid: row['amount_paid'] as int?,
++      changeAmount: row['change_amount'] as int?,
++      splitPayments: splitPayments,
++      createdAt: DateTime.parse(row['created_at'] as String),
++      paidAt: row['paid_at'] == null ? null : DateTime.parse(row['paid_at'] as String),
++      canceledAt: row['canceled_at'] == null ? null : DateTime.parse(row['canceled_at'] as String),
++      cancelReason: row['cancel_reason'] as String?,
++    );
++  }
++
++  /// "Batalkan Transaksi" per PRD: canceled transactions remain in
++  /// history (shown red by the UI), are excluded from omzet
++  /// calculations, and cannot be canceled or edited again once
++  /// canceled. No refund transaction is created — this only flips
++  /// status/canceled_at/cancel_reason on the existing row.
++  Future<void> cancelTransaction(String transactionId, {String? reason}) async {
++    final db = await _db;
++    await db.update(
++      'transactions',
++      {
++        'status': txn.TransactionStatus.canceled.name,
++        'canceled_at': DateTime.now().toIso8601String(),
++        'cancel_reason': reason,
++      },
++      where: 'id = ? AND status != ?',
++      whereArgs: [transactionId, txn.TransactionStatus.canceled.name],
++    );
++  }
++}
+diff --git a/lib/features/history/domain/history_models.dart b/lib/features/history/domain/history_models.dart
+new file mode 100644
+index 0000000..2429572
+--- /dev/null
++++ b/lib/features/history/domain/history_models.dart
+@@ -0,0 +1,55 @@
++/// Date range filters for Riwayat. Per PRD: "Hari Ini, Kemarin, Hari
++/// Sebelumnya, Custom Date plus relevant filters" — Hari Ini/Kemarin/
++/// Custom are PRD-specified; Semua and Bulan Ini are practical additions
++/// under PRD's "plus relevant filters" allowance (not from the React
++/// reference, which isn't the source of truth here — see
++/// [[mamam-kasir-flutter]] notes on why the reference's recycle-bin
++/// pattern was rejected while filter tabs were judged in-spirit-of-PRD).
++enum HistoryDateFilter { hariIni, kemarin, hariSebelumnya, bulanIni, semua, custom }
++
++extension HistoryDateFilterX on HistoryDateFilter {
++  String get label {
++    switch (this) {
++      case HistoryDateFilter.hariIni:
++        return 'Hari Ini';
++      case HistoryDateFilter.kemarin:
++        return 'Kemarin';
++      case HistoryDateFilter.hariSebelumnya:
++        return '7 Hari Terakhir';
++      case HistoryDateFilter.bulanIni:
++        return 'Bulan Ini';
++      case HistoryDateFilter.semua:
++        return 'Semua';
++      case HistoryDateFilter.custom:
++        return 'Tanggal Terpilih';
++    }
++  }
++}
++
++enum HistorySortKey { dateDesc, dateAsc, totalDesc, totalAsc }
++
++extension HistorySortKeyX on HistorySortKey {
++  String get label {
++    switch (this) {
++      case HistorySortKey.dateDesc:
++        return 'Terbaru Dulu';
++      case HistorySortKey.dateAsc:
++        return 'Terlama Dulu';
++      case HistorySortKey.totalDesc:
++        return 'Nominal Tertinggi';
++      case HistorySortKey.totalAsc:
++        return 'Nominal Terendah';
++    }
++  }
++}
++
++/// Revenue breakdown for one payment method, within the currently active
++/// date/order-type filter (but independent of the payment-method filter
++/// itself, so the breakdown always shows the full composition).
++class PaymentMethodBreakdown {
++  final String method;
++  final int total;
++  final int count;
++
++  const PaymentMethodBreakdown({required this.method, required this.total, required this.count});
++}
+diff --git a/lib/features/history/presentation/history_screen.dart b/lib/features/history/presentation/history_screen.dart
+new file mode 100644
+index 0000000..636aa5c
+--- /dev/null
++++ b/lib/features/history/presentation/history_screen.dart
+@@ -0,0 +1,232 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../../../core/navigation/app_nav.dart';
++import '../../../core/theme/app_colors.dart';
++import '../../../core/theme/app_spacing.dart';
++import '../../pos/domain/order_models.dart';
++import '../application/history_provider.dart';
++import 'transaction_detail_screen.dart';
++import 'widgets/date_filter_tabs.dart';
++import 'widgets/payment_breakdown_card.dart';
++import 'widgets/sort_sheet.dart';
++import 'widgets/transaction_card.dart';
++
++/// Riwayat (transaction history) screen. Reached via [AppNav.push] from
++/// the dashboard's "Riwayat" quick action.
++class HistoryScreen extends ConsumerStatefulWidget {
++  const HistoryScreen({super.key});
++
++  @override
++  ConsumerState<HistoryScreen> createState() => _HistoryScreenState();
++}
++
++class _HistoryScreenState extends ConsumerState<HistoryScreen> {
++  final _searchController = TextEditingController();
++
++  @override
++  void dispose() {
++    _searchController.dispose();
++    super.dispose();
++  }
++
++  Future<void> _pickCustomDateRange(BuildContext context, HistoryController controller) async {
++    final range = await showDateRangePicker(
++      context: context,
++      firstDate: DateTime(2020),
++      lastDate: DateTime.now(),
++      initialDateRange: DateTimeRange(start: DateTime.now().subtract(const Duration(days: 7)), end: DateTime.now()),
++    );
++    if (range != null) {
++      controller.setCustomDateRange(range.start, range.end);
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final state = ref.watch(historyProvider);
++    final controller = ref.read(historyProvider.notifier);
++
++    ref.listen(historyProvider, (previous, next) {
++      if (next.errorMessage != null && next.errorMessage != previous?.errorMessage) {
++        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(next.errorMessage!), backgroundColor: AppColors.danger));
++      }
++    });
++
++    return Scaffold(
++      backgroundColor: AppColors.background,
++      body: SafeArea(
++        child: Column(
++          children: [
++            const _Header(),
++            Padding(
++              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
++              child: Row(
++                children: [
++                  Expanded(
++                    child: TextField(
++                      controller: _searchController,
++                      onChanged: controller.setSearchQuery,
++                      style: const TextStyle(fontSize: 13.5),
++                      decoration: InputDecoration(
++                        hintText: 'Cari ID, nomor, pelanggan, nominal...',
++                        hintStyle: const TextStyle(fontSize: 12.5, color: AppColors.textMuted),
++                        prefixIcon: const Icon(Icons.search_rounded, size: 19, color: AppColors.textMuted),
++                        filled: true,
++                        fillColor: AppColors.surface,
++                        isDense: true,
++                        contentPadding: const EdgeInsets.symmetric(vertical: 13),
++                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.lg), borderSide: const BorderSide(color: AppColors.border)),
++                      ),
++                    ),
++                  ),
++                  const SizedBox(width: AppSpacing.sm),
++                  Material(
++                    color: AppColors.surface,
++                    borderRadius: BorderRadius.circular(AppRadius.lg),
++                    child: InkWell(
++                      onTap: () => showSortSheet(context, current: state.sortKey, onSelect: controller.setSortKey),
++                      borderRadius: BorderRadius.circular(AppRadius.lg),
++                      child: Container(
++                        width: 44,
++                        height: 44,
++                        decoration: BoxDecoration(borderRadius: BorderRadius.circular(AppRadius.lg), border: Border.all(color: AppColors.border)),
++                        child: const Icon(Icons.sort_rounded, size: 19, color: AppColors.textSecondary),
++                      ),
++                    ),
++                  ),
++                ],
++              ),
++            ),
++            DateFilterTabs(
++              selected: state.dateFilter,
++              onChanged: (filter) {
++                if (filter == HistoryDateFilter.custom) {
++                  _pickCustomDateRange(context, controller);
++                } else {
++                  controller.setDateFilter(filter);
++                }
++              },
++            ),
++            const SizedBox(height: AppSpacing.sm),
++            _OrderTypeFilterRow(selected: state.orderTypeFilter, onChanged: controller.setOrderTypeFilter),
++            const SizedBox(height: AppSpacing.sm),
++            PaymentBreakdownCard(
++              breakdown: state.paymentBreakdown,
++              selectedMethod: state.paymentMethodFilter,
++              onSelect: controller.setPaymentMethodFilter,
++            ),
++            const SizedBox(height: AppSpacing.sm),
++            Expanded(
++              child: state.isLoading
++                  ? const Center(child: CircularProgressIndicator(color: AppColors.brand))
++                  : state.filteredTransactions.isEmpty
++                      ? const _EmptyState()
++                      : ListView.separated(
++                          padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.xxl),
++                          itemCount: state.filteredTransactions.length,
++                          separatorBuilder: (_, __) => const SizedBox(height: AppSpacing.sm),
++                          itemBuilder: (context, index) {
++                            final transaction = state.filteredTransactions[index];
++                            return TransactionCard(
++                              transaction: transaction,
++                              onTap: () => AppNav.push(context, (_) => TransactionDetailScreen(transaction: transaction)),
++                            );
++                          },
++                        ),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++class _Header extends StatelessWidget {
++  const _Header();
++
++  @override
++  Widget build(BuildContext context) {
++    return Container(
++      padding: const EdgeInsets.fromLTRB(AppSpacing.sm, AppSpacing.sm, AppSpacing.lg, AppSpacing.sm),
++      decoration: const BoxDecoration(color: AppColors.background, border: Border(bottom: BorderSide(color: AppColors.border))),
++      child: Row(
++        children: [
++          Builder(
++            builder: (context) => IconButton(onPressed: () => Navigator.of(context).pop(), icon: const Icon(Icons.arrow_back_rounded, color: AppColors.textPrimary)),
++          ),
++          const Text('Riwayat', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
++        ],
++      ),
++    );
++  }
++}
++
++class _OrderTypeFilterRow extends StatelessWidget {
++  final OrderType? selected;
++  final ValueChanged<OrderType?> onChanged;
++  const _OrderTypeFilterRow({required this.selected, required this.onChanged});
++
++  @override
++  Widget build(BuildContext context) {
++    return SizedBox(
++      height: 32,
++      child: ListView(
++        scrollDirection: Axis.horizontal,
++        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
++        children: [
++          _Chip(label: 'Semua Tipe', isSelected: selected == null, onTap: () => onChanged(null)),
++          const SizedBox(width: AppSpacing.sm),
++          ...OrderType.values.map((type) => Padding(
++                padding: const EdgeInsets.only(right: AppSpacing.sm),
++                child: _Chip(label: type.label, isSelected: selected == type, onTap: () => onChanged(type)),
++              )),
++        ],
++      ),
++    );
++  }
++}
++
++class _Chip extends StatelessWidget {
++  final String label;
++  final bool isSelected;
++  final VoidCallback onTap;
++  const _Chip({required this.label, required this.isSelected, required this.onTap});
++
++  @override
++  Widget build(BuildContext context) {
++    return InkWell(
++      onTap: onTap,
++      borderRadius: BorderRadius.circular(AppRadius.pill),
++      child: Container(
++        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
++        decoration: BoxDecoration(
++          color: isSelected ? AppColors.brand.withValues(alpha: 0.1) : Colors.transparent,
++          borderRadius: BorderRadius.circular(AppRadius.pill),
++          border: Border.all(color: isSelected ? AppColors.brand : AppColors.border),
++        ),
++        child: Text(label, style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: isSelected ? AppColors.brand : AppColors.textSecondary)),
++      ),
++    );
++  }
++}
++
++class _EmptyState extends StatelessWidget {
++  const _EmptyState();
++
++  @override
++  Widget build(BuildContext context) {
++    return Center(
++      child: Column(
++        mainAxisSize: MainAxisSize.min,
++        children: [
++          const Icon(Icons.receipt_long_rounded, size: 48, color: AppColors.border),
++          const SizedBox(height: AppSpacing.md),
++          const Text('Tidak ada transaksi', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: AppColors.textSecondary)),
++          const SizedBox(height: 4),
++          const Text('Coba ubah filter atau kata kunci pencarian.', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: AppColors.textMuted)),
++        ],
++      ),
++    );
++  }
++}
+diff --git a/lib/features/history/presentation/transaction_detail_screen.dart b/lib/features/history/presentation/transaction_detail_screen.dart
+new file mode 100644
+index 0000000..5be2daf
+--- /dev/null
++++ b/lib/features/history/presentation/transaction_detail_screen.dart
+@@ -0,0 +1,266 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++import 'package:intl/intl.dart';
++
++import '../../../core/theme/app_colors.dart';
++import '../../../core/theme/app_spacing.dart';
++import '../../../core/utils/currency.dart';
++import '../../pos/domain/transaction.dart';
++import '../application/history_provider.dart';
++
++/// Transaction detail screen. Reached via [AppNav.push] from
++/// [HistoryScreen] — a "going deeper" destination per the app's
++/// stack-navigation model, distinct from the checkout flow's
++/// [ReceiptModal] (which is a temporary post-checkout confirmation, not
++/// a browsable record).
++class TransactionDetailScreen extends ConsumerWidget {
++  final Transaction transaction;
++
++  const TransactionDetailScreen({super.key, required this.transaction});
++
++  Future<void> _confirmCancel(BuildContext context, WidgetRef ref) async {
++    final reasonController = TextEditingController();
++
++    final confirmed = await showDialog<bool>(
++      context: context,
++      builder: (context) => AlertDialog(
++        title: const Text('Batalkan Transaksi?'),
++        content: Column(
++          mainAxisSize: MainAxisSize.min,
++          crossAxisAlignment: CrossAxisAlignment.start,
++          children: [
++            Text(
++              'Transaksi ${transaction.displayNumber} akan ditandai dibatalkan dan dikecualikan dari omzet. '
++              'Tindakan ini tidak dapat dibatalkan kembali.',
++              style: const TextStyle(fontSize: 13),
++            ),
++            const SizedBox(height: AppSpacing.md),
++            TextField(
++              controller: reasonController,
++              decoration: const InputDecoration(hintText: 'Alasan (opsional)', isDense: true, border: OutlineInputBorder()),
++            ),
++          ],
++        ),
++        actions: [
++          TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Batal')),
++          TextButton(
++            onPressed: () => Navigator.of(context).pop(true),
++            child: const Text('Ya, Batalkan', style: TextStyle(color: AppColors.danger)),
++          ),
++        ],
++      ),
++    );
++
++    if (confirmed != true) return;
++    if (!context.mounted) return;
++
++    await ref.read(historyProvider.notifier).cancelTransaction(transaction.id, reason: reasonController.text.trim());
++
++    if (!context.mounted) return;
++    Navigator.of(context).pop();
++  }
++
++  @override
++  Widget build(BuildContext context, WidgetRef ref) {
++    final isCanceled = transaction.isCanceled;
++
++    return Scaffold(
++      backgroundColor: AppColors.background,
++      body: SafeArea(
++        child: Column(
++          children: [
++            Container(
++              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: AppSpacing.sm),
++              decoration: const BoxDecoration(color: AppColors.background, border: Border(bottom: BorderSide(color: AppColors.border))),
++              child: Row(
++                children: [
++                  IconButton(onPressed: () => Navigator.of(context).pop(), icon: const Icon(Icons.arrow_back_rounded, color: AppColors.textPrimary)),
++                  Text(transaction.displayNumber, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
++                ],
++              ),
++            ),
++            Expanded(
++              child: ListView(
++                padding: const EdgeInsets.all(AppSpacing.lg),
++                children: [
++                  if (isCanceled) _CanceledBanner(reason: transaction.cancelReason, canceledAt: transaction.canceledAt),
++                  if (isCanceled) const SizedBox(height: AppSpacing.lg),
++                  _DetailCard(transaction: transaction),
++                ],
++              ),
++            ),
++            if (!isCanceled)
++              Container(
++                padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.md, AppSpacing.xl, AppSpacing.xl),
++                decoration: BoxDecoration(
++                  color: AppColors.surface,
++                  border: const Border(top: BorderSide(color: AppColors.border)),
++                  boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 16, offset: const Offset(0, -4))],
++                ),
++                child: SizedBox(
++                  width: double.infinity,
++                  child: OutlinedButton(
++                    onPressed: () => _confirmCancel(context, ref),
++                    style: OutlinedButton.styleFrom(
++                      foregroundColor: AppColors.danger,
++                      side: const BorderSide(color: AppColors.danger),
++                      padding: const EdgeInsets.symmetric(vertical: 14),
++                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
++                    ),
++                    child: const Text('Batalkan Transaksi', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800)),
++                  ),
++                ),
++              ),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++class _CanceledBanner extends StatelessWidget {
++  final String? reason;
++  final DateTime? canceledAt;
++  const _CanceledBanner({required this.reason, required this.canceledAt});
++
++  @override
++  Widget build(BuildContext context) {
++    return Container(
++      width: double.infinity,
++      padding: const EdgeInsets.all(AppSpacing.md),
++      decoration: BoxDecoration(color: AppColors.danger.withValues(alpha: 0.08), borderRadius: BorderRadius.circular(AppRadius.md), border: Border.all(color: AppColors.danger.withValues(alpha: 0.25))),
++      child: Row(
++        crossAxisAlignment: CrossAxisAlignment.start,
++        children: [
++          const Icon(Icons.cancel_rounded, size: 18, color: AppColors.danger),
++          const SizedBox(width: AppSpacing.sm),
++          Expanded(
++            child: Column(
++              crossAxisAlignment: CrossAxisAlignment.start,
++              children: [
++                const Text('Transaksi Dibatalkan', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: AppColors.danger)),
++                if (canceledAt != null)
++                  Text(DateFormat('d MMM yyyy, HH:mm', 'id_ID').format(canceledAt!), style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: AppColors.danger)),
++                if (reason != null && reason!.isNotEmpty) ...[
++                  const SizedBox(height: 4),
++                  Text('Alasan: $reason', style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w500, color: AppColors.danger)),
++                ],
++              ],
++            ),
++          ),
++        ],
++      ),
++    );
++  }
++}
++
++class _DetailCard extends StatelessWidget {
++  final Transaction transaction;
++  const _DetailCard({required this.transaction});
++
++  @override
++  Widget build(BuildContext context) {
++    return Container(
++      padding: const EdgeInsets.all(AppSpacing.lg),
++      decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.xl), border: Border.all(color: AppColors.border)),
++      child: Column(
++        crossAxisAlignment: CrossAxisAlignment.start,
++        children: [
++          Text(DateFormat('EEEE, d MMMM yyyy · HH:mm', 'id_ID').format(transaction.createdAt), style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textMuted)),
++          const SizedBox(height: AppSpacing.md),
++          _InfoRow(label: 'Tipe Pesanan', value: transaction.orderType.label),
++          _InfoRow(label: 'Pelanggan', value: transaction.customerName ?? 'Pelanggan Umum'),
++          if (transaction.ojolPlatform != null) _InfoRow(label: 'Platform', value: transaction.ojolPlatform!.label),
++          if (transaction.ojolOrderNumber != null && transaction.ojolOrderNumber!.isNotEmpty) _InfoRow(label: 'No. Pesanan', value: transaction.ojolOrderNumber!),
++          const SizedBox(height: AppSpacing.md),
++          const Divider(),
++          const SizedBox(height: AppSpacing.md),
++          const Text('Item Pesanan', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
++          const SizedBox(height: AppSpacing.sm),
++          ...transaction.items.map((item) => Padding(
++                padding: const EdgeInsets.only(bottom: AppSpacing.sm),
++                child: Row(
++                  crossAxisAlignment: CrossAxisAlignment.start,
++                  children: [
++                    Expanded(
++                      child: Column(
++                        crossAxisAlignment: CrossAxisAlignment.start,
++                        children: [
++                          Text('${item.qty}x ${item.name}', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
++                          if (item.variantName != null) Text(item.variantName!, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: AppColors.textMuted)),
++                          if (item.note.isNotEmpty) Text('Catatan: ${item.note}', style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.w500, color: AppColors.textMuted, fontStyle: FontStyle.italic)),
++                        ],
++                      ),
++                    ),
++                    Text(formatRupiah(item.lineTotal), style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
++                  ],
++                ),
++              )),
++          const SizedBox(height: AppSpacing.sm),
++          const Divider(),
++          const SizedBox(height: AppSpacing.sm),
++          _AmountRow(label: 'Subtotal', value: transaction.subtotal),
++          if (transaction.voucherDiscount > 0) _AmountRow(label: 'Diskon Voucher (${transaction.voucherCode})', value: -transaction.voucherDiscount),
++          if (transaction.manualDiscountAmount > 0) _AmountRow(label: 'Diskon Manual', value: -transaction.manualDiscountAmount),
++          if (transaction.taxAmount > 0) _AmountRow(label: 'Pajak', value: transaction.taxAmount),
++          if (transaction.serviceAmount > 0) _AmountRow(label: 'Service', value: transaction.serviceAmount),
++          if (transaction.deliveryFee > 0) _AmountRow(label: 'Ongkir', value: transaction.deliveryFee),
++          const SizedBox(height: AppSpacing.sm),
++          const Divider(),
++          const SizedBox(height: AppSpacing.sm),
++          _AmountRow(label: 'TOTAL', value: transaction.total, isBold: true),
++          const SizedBox(height: AppSpacing.md),
++          if (transaction.paymentMethodLabel != null) _InfoRow(label: 'Metode Pembayaran', value: transaction.paymentMethodLabel!),
++          if (transaction.splitPayments.isNotEmpty)
++            ...transaction.splitPayments.map((p) => _InfoRow(label: '  • ${p.method.label}', value: formatRupiah(p.amount))),
++          if (transaction.amountPaid != null) _AmountRow(label: 'Dibayar', value: transaction.amountPaid!),
++          if (transaction.changeAmount != null && transaction.changeAmount! > 0) _AmountRow(label: 'Kembalian', value: transaction.changeAmount!),
++        ],
++      ),
++    );
++  }
++}
++
++class _InfoRow extends StatelessWidget {
++  final String label;
++  final String value;
++  const _InfoRow({required this.label, required this.value});
++
++  @override
++  Widget build(BuildContext context) {
++    return Padding(
++      padding: const EdgeInsets.symmetric(vertical: 3),
++      child: Row(
++        mainAxisAlignment: MainAxisAlignment.spaceBetween,
++        children: [
++          Text(label, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: AppColors.textMuted)),
++          Flexible(child: Text(value, textAlign: TextAlign.right, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.textPrimary))),
++        ],
++      ),
++    );
++  }
++}
++
++class _AmountRow extends StatelessWidget {
++  final String label;
++  final int value;
++  final bool isBold;
++  const _AmountRow({required this.label, required this.value, this.isBold = false});
++
++  @override
++  Widget build(BuildContext context) {
++    return Padding(
++      padding: const EdgeInsets.symmetric(vertical: 3),
++      child: Row(
++        mainAxisAlignment: MainAxisAlignment.spaceBetween,
++        children: [
++          Text(label, style: TextStyle(fontSize: isBold ? 14 : 12.5, fontWeight: isBold ? FontWeight.w800 : FontWeight.w500, color: isBold ? AppColors.textPrimary : AppColors.textSecondary)),
++          Text(
++            '${value < 0 ? '-' : ''}${formatRupiah(value.abs())}',
++            style: TextStyle(fontSize: isBold ? 16 : 12.5, fontWeight: isBold ? FontWeight.w800 : FontWeight.w600, color: isBold ? AppColors.brand : AppColors.textPrimary),
++          ),
++        ],
++      ),
++    );
++  }
++}
+diff --git a/lib/features/history/presentation/widgets/date_filter_tabs.dart b/lib/features/history/presentation/widgets/date_filter_tabs.dart
+new file mode 100644
+index 0000000..c1c910f
+--- /dev/null
++++ b/lib/features/history/presentation/widgets/date_filter_tabs.dart
+@@ -0,0 +1,53 @@
++import 'package:flutter/material.dart';
++
++import '../../../../core/theme/app_colors.dart';
++import '../../../../core/theme/app_spacing.dart';
++import '../../domain/history_models.dart';
++
++class DateFilterTabs extends StatelessWidget {
++  final HistoryDateFilter selected;
++  final ValueChanged<HistoryDateFilter> onChanged;
++
++  const DateFilterTabs({super.key, required this.selected, required this.onChanged});
++
++  static const _tabs = [
++    HistoryDateFilter.hariIni,
++    HistoryDateFilter.kemarin,
++    HistoryDateFilter.bulanIni,
++    HistoryDateFilter.semua,
++    HistoryDateFilter.custom,
++  ];
++
++  @override
++  Widget build(BuildContext context) {
++    return SizedBox(
++      height: 36,
++      child: ListView(
++        scrollDirection: Axis.horizontal,
++        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
++        children: _tabs.map((tab) {
++          final isSelected = selected == tab;
++          return Padding(
++            padding: const EdgeInsets.only(right: AppSpacing.sm),
++            child: InkWell(
++              onTap: () => onChanged(tab),
++              borderRadius: BorderRadius.circular(AppRadius.pill),
++              child: Container(
++                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
++                decoration: BoxDecoration(
++                  color: isSelected ? AppColors.textPrimary : AppColors.surface,
++                  borderRadius: BorderRadius.circular(AppRadius.pill),
++                  border: Border.all(color: isSelected ? AppColors.textPrimary : AppColors.border),
++                ),
++                child: Text(
++                  tab.label,
++                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: isSelected ? Colors.white : AppColors.textSecondary),
++                ),
++              ),
++            ),
++          );
++        }).toList(),
++      ),
++    );
++  }
++}
+diff --git a/lib/features/history/presentation/widgets/payment_breakdown_card.dart b/lib/features/history/presentation/widgets/payment_breakdown_card.dart
+new file mode 100644
+index 0000000..c5c687e
+--- /dev/null
++++ b/lib/features/history/presentation/widgets/payment_breakdown_card.dart
+@@ -0,0 +1,104 @@
++import 'package:flutter/material.dart';
++
++import '../../../../core/theme/app_colors.dart';
++import '../../../../core/theme/app_spacing.dart';
++import '../../../../core/utils/currency.dart';
++import '../../domain/history_models.dart';
++
++class PaymentBreakdownCard extends StatelessWidget {
++  final List<PaymentMethodBreakdown> breakdown;
++  final String? selectedMethod;
++  final ValueChanged<String?> onSelect;
++
++  const PaymentBreakdownCard({super.key, required this.breakdown, required this.selectedMethod, required this.onSelect});
++
++  @override
++  Widget build(BuildContext context) {
++    if (breakdown.isEmpty) return const SizedBox.shrink();
++
++    final grandTotal = breakdown.fold<int>(0, (sum, b) => sum + b.total);
++
++    return Container(
++      margin: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
++      padding: const EdgeInsets.all(AppSpacing.md),
++      decoration: BoxDecoration(
++        color: AppColors.surface,
++        borderRadius: BorderRadius.circular(AppRadius.lg),
++        border: Border.all(color: AppColors.border),
++      ),
++      child: Column(
++        crossAxisAlignment: CrossAxisAlignment.start,
++        children: [
++          Row(
++            children: [
++              const Icon(Icons.pie_chart_rounded, size: 15, color: AppColors.textSecondary),
++              const SizedBox(width: 6),
++              const Text('Omset per Metode Pembayaran', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
++            ],
++          ),
++          const SizedBox(height: AppSpacing.sm),
++          Wrap(
++            spacing: AppSpacing.sm,
++            runSpacing: AppSpacing.sm,
++            children: [
++              _BreakdownChip(
++                label: 'Semua',
++                total: grandTotal,
++                count: null,
++                isSelected: selectedMethod == null,
++                onTap: () => onSelect(null),
++              ),
++              ...breakdown.map((b) => _BreakdownChip(
++                    label: b.method,
++                    total: b.total,
++                    count: b.count,
++                    isSelected: selectedMethod == b.method,
++                    onTap: () => onSelect(selectedMethod == b.method ? null : b.method),
++                  )),
++            ],
++          ),
++        ],
++      ),
++    );
++  }
++}
++
++class _BreakdownChip extends StatelessWidget {
++  final String label;
++  final int total;
++  final int? count;
++  final bool isSelected;
++  final VoidCallback onTap;
++
++  const _BreakdownChip({required this.label, required this.total, required this.count, required this.isSelected, required this.onTap});
++
++  @override
++  Widget build(BuildContext context) {
++    return InkWell(
++      onTap: onTap,
++      borderRadius: BorderRadius.circular(AppRadius.md),
++      child: Container(
++        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
++        decoration: BoxDecoration(
++          color: isSelected ? AppColors.textPrimary : AppColors.background,
++          borderRadius: BorderRadius.circular(AppRadius.md),
++          border: Border.all(color: isSelected ? AppColors.textPrimary : AppColors.border),
++        ),
++        child: Column(
++          crossAxisAlignment: CrossAxisAlignment.start,
++          mainAxisSize: MainAxisSize.min,
++          children: [
++            Text(
++              count != null ? '$label · ${count}x' : label,
++              style: TextStyle(fontSize: 9.5, fontWeight: FontWeight.w700, color: isSelected ? Colors.white.withValues(alpha: 0.7) : AppColors.textMuted),
++            ),
++            Text(
++              formatRupiah(total),
++              style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800, color: isSelected ? Colors.white : AppColors.textPrimary),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
+diff --git a/lib/features/history/presentation/widgets/sort_sheet.dart b/lib/features/history/presentation/widgets/sort_sheet.dart
+new file mode 100644
+index 0000000..42e2842
+--- /dev/null
++++ b/lib/features/history/presentation/widgets/sort_sheet.dart
+@@ -0,0 +1,37 @@
++import 'package:flutter/material.dart';
++
++import '../../../../core/theme/app_colors.dart';
++import '../../../../core/theme/app_spacing.dart';
++import '../../domain/history_models.dart';
++
++Future<void> showSortSheet(BuildContext context, {required HistorySortKey current, required ValueChanged<HistorySortKey> onSelect}) {
++  return showModalBottomSheet(
++    context: context,
++    isScrollControlled: false,
++    backgroundColor: Colors.transparent,
++    builder: (context) => SafeArea(
++      child: Container(
++        decoration: const BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
++        padding: const EdgeInsets.symmetric(vertical: AppSpacing.lg),
++        child: Column(
++          mainAxisSize: MainAxisSize.min,
++          children: [
++            Container(width: 48, height: 5, decoration: BoxDecoration(color: AppColors.border, borderRadius: BorderRadius.circular(AppRadius.pill))),
++            const SizedBox(height: AppSpacing.lg),
++            ...HistorySortKey.values.map((key) {
++              final selected = key == current;
++              return ListTile(
++                title: Text(key.label, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: selected ? AppColors.brand : AppColors.textPrimary)),
++                trailing: selected ? const Icon(Icons.check_rounded, color: AppColors.brand) : null,
++                onTap: () {
++                  onSelect(key);
++                  Navigator.of(context).pop();
++                },
++              );
++            }),
++          ],
++        ),
++      ),
++    ),
++  );
++}
+diff --git a/lib/features/history/presentation/widgets/transaction_card.dart b/lib/features/history/presentation/widgets/transaction_card.dart
+new file mode 100644
+index 0000000..39d4931
+--- /dev/null
++++ b/lib/features/history/presentation/widgets/transaction_card.dart
+@@ -0,0 +1,92 @@
++import 'package:flutter/material.dart';
++import 'package:intl/intl.dart';
++
++import '../../../../core/theme/app_colors.dart';
++import '../../../../core/theme/app_spacing.dart';
++import '../../../../core/utils/currency.dart';
++import '../../../pos/domain/transaction.dart';
++
++class TransactionCard extends StatelessWidget {
++  final Transaction transaction;
++  final VoidCallback onTap;
++
++  const TransactionCard({super.key, required this.transaction, required this.onTap});
++
++  @override
++  Widget build(BuildContext context) {
++    final isCanceled = transaction.isCanceled;
++
++    return Material(
++      color: AppColors.surface,
++      borderRadius: BorderRadius.circular(AppRadius.lg),
++      child: InkWell(
++        onTap: onTap,
++        borderRadius: BorderRadius.circular(AppRadius.lg),
++        child: Container(
++          padding: const EdgeInsets.all(AppSpacing.md),
++          decoration: BoxDecoration(
++            borderRadius: BorderRadius.circular(AppRadius.lg),
++            border: Border.all(color: isCanceled ? AppColors.danger.withValues(alpha: 0.3) : AppColors.border),
++          ),
++          child: Column(
++            crossAxisAlignment: CrossAxisAlignment.start,
++            children: [
++              Row(
++                children: [
++                  Expanded(
++                    child: Column(
++                      crossAxisAlignment: CrossAxisAlignment.start,
++                      children: [
++                        Text(
++                          transaction.displayNumber,
++                          style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: isCanceled ? AppColors.danger : AppColors.textPrimary),
++                        ),
++                        const SizedBox(height: 2),
++                        Text(
++                          DateFormat('d MMM yyyy, HH:mm', 'id_ID').format(transaction.createdAt),
++                          style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.w500, color: AppColors.textMuted),
++                        ),
++                      ],
++                    ),
++                  ),
++                  if (isCanceled)
++                    Container(
++                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
++                      decoration: BoxDecoration(color: AppColors.danger.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(AppRadius.sm)),
++                      child: const Text('DIBATALKAN', style: TextStyle(fontSize: 9, fontWeight: FontWeight.w800, color: AppColors.danger, letterSpacing: 0.3)),
++                    )
++                  else if (transaction.paymentMethodLabel != null)
++                    Container(
++                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
++                      decoration: BoxDecoration(color: AppColors.success.withValues(alpha: 0.08), borderRadius: BorderRadius.circular(AppRadius.sm)),
++                      child: Text(
++                        transaction.paymentMethodLabel!,
++                        style: const TextStyle(fontSize: 9.5, fontWeight: FontWeight.w800, color: AppColors.success, letterSpacing: 0.2),
++                      ),
++                    ),
++                ],
++              ),
++              const SizedBox(height: AppSpacing.sm),
++              Text(
++                '${transaction.customerName ?? 'Pelanggan Umum'} · ${transaction.totalQty} item · ${transaction.orderType.label}',
++                maxLines: 1,
++                overflow: TextOverflow.ellipsis,
++                style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w500, color: AppColors.textSecondary),
++              ),
++              const SizedBox(height: AppSpacing.sm),
++              Text(
++                formatRupiah(transaction.total),
++                style: TextStyle(
++                  fontSize: 15,
++                  fontWeight: FontWeight.w800,
++                  color: isCanceled ? AppColors.textMuted : AppColors.textPrimary,
++                  decoration: isCanceled ? TextDecoration.lineThrough : null,
++                ),
++              ),
++            ],
++          ),
++        ),
++      ),
++    );
++  }
++}
+diff --git a/lib/features/pos/domain/transaction.dart b/lib/features/pos/domain/transaction.dart
+index d9c59b6..88c731f 100644
+--- a/lib/features/pos/domain/transaction.dart
++++ b/lib/features/pos/domain/transaction.dart
+@@ -36,6 +36,8 @@ class Transaction {
+ 
+   final DateTime createdAt;
+   final DateTime? paidAt;
++  final DateTime? canceledAt;
++  final String? cancelReason;
+ 
+   const Transaction({
+     required this.id,
+@@ -64,8 +66,12 @@ class Transaction {
+     this.splitPayments = const [],
+     required this.createdAt,
+     this.paidAt,
++    this.canceledAt,
++    this.cancelReason,
+   });
+ 
++  bool get isCanceled => status == TransactionStatus.canceled;
++
+   int get hppTotal => items.fold(0, (sum, item) => sum + (item.hpp * item.qty));
+   int get totalQty => items.fold(0, (sum, item) => sum + item.qty);
+ }
+-- 
+2.43.0
+

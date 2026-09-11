@@ -40,10 +40,6 @@ class PlaceholderScreen extends StatelessWidget {
                     onPressed: () => Navigator.of(context).pop(),
                     icon: const Icon(Icons.arrow_back_rounded, color: AppColors.textPrimary),
                   ),
-                  Text(
-                    title,
-                    style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
-                  ),
                 ],
               ),
             ),

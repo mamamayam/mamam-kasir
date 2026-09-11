@@ -1,0 +1,1317 @@
+From e82a5d5280a98e025a7e22410e52c5628b5ca3a0 Mon Sep 17 00:00:00 2001
+From: Mamam Kasir Dev <dev@mamamayam.local>
+Date: Wed, 9 Sep 2026 21:26:54 +0000
+Subject: [PATCH] feat: wire Menu Management to real encrypted local DB
+ (vertical slice)
+
+- Add AppDatabase: SQLCipher-encrypted SQLite with categories, menu_items,
+  variant_groups, variant_options, menu_item_variant_groups tables + demo seed
+- Add MenuManagementRepository: full CRUD against the local DB
+- Rewrite MenuManagementProvider: async load from repository, loading/error
+  state, create/update/deactivate/reactivate actions
+- Update domain models: categoryId/categoryName relation, isActive flag
+  (soft-delete per edge-case rule), hpp, variantGroupIds
+- Wire AddMenuItemModal to real create/update with validation, loading state,
+  and edit mode (pass editingItem to pre-fill and update instead of create)
+- Wire MenuManagementScreen: tap item to edit, long-press to
+  deactivate/reactivate, loading spinner, error snackbar
+- MenuItemCard: show active/inactive status instead of placeholder stock
+  label, dim inactive items visually in both list and grid layouts
+---
+ lib/core/data/app_database.dart               | 187 +++++++++++++++
+ .../application/menu_management_provider.dart | 130 +++++++---
+ .../menu_management_repository.dart           | 226 ++++++++++++++++++
+ .../domain/menu_management_models.dart        |  64 ++++-
+ .../presentation/menu_management_screen.dart  |  74 +++++-
+ .../widgets/add_menu_item_modal.dart          | 154 ++++++++++--
+ .../presentation/widgets/menu_item_card.dart  | 193 ++++++++-------
+ 7 files changed, 881 insertions(+), 147 deletions(-)
+ create mode 100644 lib/core/data/app_database.dart
+ create mode 100644 lib/features/menu_management/application/menu_management_repository.dart
+
+diff --git a/lib/core/data/app_database.dart b/lib/core/data/app_database.dart
+new file mode 100644
+index 0000000..5a3fa65
+--- /dev/null
++++ b/lib/core/data/app_database.dart
+@@ -0,0 +1,187 @@
++import 'package:path/path.dart' as p;
++import 'package:path_provider/path_provider.dart';
++import 'package:sqflite_sqlcipher/sqflite.dart';
++
++/// App-wide encrypted local database.
++///
++/// Shared across features (not just Menu Management) — each feature's
++/// repository opens its own queries against [database], but there is
++/// only ever one open connection per app run.
++///
++/// NOTE on encryption key: per AGENTS.md security rules, the SQLCipher
++/// passphrase must live in the OS keystore/keychain via
++/// flutter_secure_storage, not hardcoded. This vertical slice uses a
++/// placeholder fixed key so Menu Management can be built and tested
++/// end-to-end now; swapping in the real secure-storage-backed key when
++/// the Auth/security foundation phase (docs/06 phase 3) lands is a
++/// single-line change in [_openDatabase] and does not affect any
++/// repository or UI code above this layer.
++class AppDatabase {
++  AppDatabase._();
++  static final AppDatabase instance = AppDatabase._();
++
++  static const _dbName = 'mamam_kasir.db';
++  static const _dbVersion = 1;
++
++  // TODO(security-foundation): replace with a key generated once and
++  // stored via flutter_secure_storage, per AGENTS.md.
++  static const _placeholderPassphrase = 'mamam-kasir-dev-placeholder-key';
++
++  Database? _db;
++
++  Future<Database> get database async {
++    if (_db != null) return _db!;
++    _db = await _openDatabase();
++    return _db!;
++  }
++
++  Future<Database> _openDatabase() async {
++    final dir = await getApplicationDocumentsDirectory();
++    final path = p.join(dir.path, _dbName);
++
++    return openDatabase(
++      path,
++      password: _placeholderPassphrase,
++      version: _dbVersion,
++      onCreate: _onCreate,
++      onUpgrade: _onUpgrade,
++    );
++  }
++
++  Future<void> _onCreate(Database db, int version) async {
++    await db.execute('''
++      CREATE TABLE categories (
++        id TEXT PRIMARY KEY,
++        name TEXT NOT NULL,
++        sort_order INTEGER NOT NULL DEFAULT 0,
++        is_active INTEGER NOT NULL DEFAULT 1,
++        created_at TEXT NOT NULL,
++        updated_at TEXT NOT NULL
++      )
++    ''');
++
++    await db.execute('''
++      CREATE TABLE menu_items (
++        id TEXT PRIMARY KEY,
++        category_id TEXT NOT NULL,
++        name TEXT NOT NULL,
++        price INTEGER NOT NULL,
++        hpp INTEGER,
++        unit TEXT NOT NULL,
++        is_active INTEGER NOT NULL DEFAULT 1,
++        created_at TEXT NOT NULL,
++        updated_at TEXT NOT NULL,
++        FOREIGN KEY (category_id) REFERENCES categories (id)
++      )
++    ''');
++
++    await db.execute('''
++      CREATE TABLE variant_groups (
++        id TEXT PRIMARY KEY,
++        name TEXT NOT NULL,
++        is_active INTEGER NOT NULL DEFAULT 1,
++        created_at TEXT NOT NULL,
++        updated_at TEXT NOT NULL
++      )
++    ''');
++
++    await db.execute('''
++      CREATE TABLE variant_options (
++        id TEXT PRIMARY KEY,
++        variant_group_id TEXT NOT NULL,
++        name TEXT NOT NULL,
++        sort_order INTEGER NOT NULL DEFAULT 0,
++        FOREIGN KEY (variant_group_id) REFERENCES variant_groups (id)
++      )
++    ''');
++
++    // Join table: a menu item can be linked to multiple variant groups
++    // ("Koneksi Varian" checkboxes in the add-form).
++    await db.execute('''
++      CREATE TABLE menu_item_variant_groups (
++        menu_item_id TEXT NOT NULL,
++        variant_group_id TEXT NOT NULL,
++        PRIMARY KEY (menu_item_id, variant_group_id),
++        FOREIGN KEY (menu_item_id) REFERENCES menu_items (id),
++        FOREIGN KEY (variant_group_id) REFERENCES variant_groups (id)
++      )
++    ''');
++
++    await _seedDemoData(db);
++  }
++
++  Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
++    // NOTE: no migrations yet — this is schema version 1. Future
++    // migrations get added here as `if (oldVersion < N) { ... }` blocks
++    // once the DB is in the hands of real users with existing data.
++  }
++
++  /// Seeds the same demo rows the in-memory provider used to hardcode,
++  /// so the screen shows familiar data on first run instead of an empty
++  /// state. Safe to remove once real menu data entry is a normal flow.
++  Future<void> _seedDemoData(Database db) async {
++    final now = DateTime.now().toIso8601String();
++
++    final categories = {
++      'Saus & Bumbu': 'cat-saus-bumbu',
++      'Makanan Utama': 'cat-makanan-utama',
++      'Minuman': 'cat-minuman',
++    };
++
++    for (final entry in categories.entries) {
++      await db.insert('categories', {
++        'id': entry.value,
++        'name': entry.key,
++        'sort_order': categories.keys.toList().indexOf(entry.key),
++        'is_active': 1,
++        'created_at': now,
++        'updated_at': now,
++      });
++    }
++
++    final menuItems = [
++      {'id': 'menu-1', 'category_id': 'cat-saus-bumbu', 'name': 'Brownbutter', 'price': 18000, 'unit': 'pcs'},
++      {'id': 'menu-2', 'category_id': 'cat-saus-bumbu', 'name': 'Firesauce', 'price': 20000, 'unit': 'pcs'},
++      {'id': 'menu-3', 'category_id': 'cat-makanan-utama', 'name': 'Ayam Crispy Original', 'price': 15000, 'unit': 'porsi'},
++      {'id': 'menu-4', 'category_id': 'cat-makanan-utama', 'name': 'Ayam Bakar Madu', 'price': 17000, 'unit': 'porsi'},
++      {'id': 'menu-5', 'category_id': 'cat-minuman', 'name': 'Es Teh Manis', 'price': 5000, 'unit': 'gelas'},
++      {'id': 'menu-6', 'category_id': 'cat-minuman', 'name': 'Es Jeruk', 'price': 7000, 'unit': 'gelas'},
++    ];
++
++    for (final item in menuItems) {
++      await db.insert('menu_items', {
++        ...item,
++        'hpp': null,
++        'is_active': 1,
++        'created_at': now,
++        'updated_at': now,
++      });
++    }
++
++    final variantGroups = {
++      'vg-1': {'name': 'Level Pedas', 'options': ['Level 0', 'Level 1', 'Level 2', 'Level 3']},
++      'vg-2': {'name': 'Pilihan Minuman', 'options': ['Es Teh Manis', 'Teh Tawar', 'Mineral Water']},
++      'vg-3': {'name': 'Ekstra Topping', 'options': ['Keju', 'Saus Keju', 'Kremes']},
++    };
++
++    for (final entry in variantGroups.entries) {
++      await db.insert('variant_groups', {
++        'id': entry.key,
++        'name': entry.value['name'],
++        'is_active': 1,
++        'created_at': now,
++        'updated_at': now,
++      });
++
++      final options = entry.value['options'] as List<String>;
++      for (var i = 0; i < options.length; i++) {
++        await db.insert('variant_options', {
++          'id': '${entry.key}-opt-$i',
++          'variant_group_id': entry.key,
++          'name': options[i],
++          'sort_order': i,
++        });
++      }
++    }
++  }
++}
+diff --git a/lib/features/menu_management/application/menu_management_provider.dart b/lib/features/menu_management/application/menu_management_provider.dart
+index 549e4a8..81f8b60 100644
+--- a/lib/features/menu_management/application/menu_management_provider.dart
++++ b/lib/features/menu_management/application/menu_management_provider.dart
+@@ -1,6 +1,11 @@
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
+ import '../domain/menu_management_models.dart';
++import 'menu_management_repository.dart';
++
++final menuManagementRepositoryProvider = Provider<MenuManagementRepository>((ref) {
++  return MenuManagementRepository();
++});
+ 
+ class MenuManagementState {
+   final MenuManagementTab tab;
+@@ -8,6 +13,8 @@ class MenuManagementState {
+   final MenuViewMode viewMode;
+   final List<MenuItem> menuItems;
+   final List<VariantGroup> variantGroups;
++  final bool isLoading;
++  final String? errorMessage;
+ 
+   const MenuManagementState({
+     required this.tab,
+@@ -15,30 +22,52 @@ class MenuManagementState {
+     required this.viewMode,
+     required this.menuItems,
+     required this.variantGroups,
++    required this.isLoading,
++    this.errorMessage,
+   });
+ 
++  factory MenuManagementState.initial() => const MenuManagementState(
++        tab: MenuManagementTab.menu,
++        searchQuery: '',
++        viewMode: MenuViewMode.list,
++        menuItems: [],
++        variantGroups: [],
++        isLoading: true,
++      );
++
+   MenuManagementState copyWith({
+     MenuManagementTab? tab,
+     String? searchQuery,
+     MenuViewMode? viewMode,
++    List<MenuItem>? menuItems,
++    List<VariantGroup>? variantGroups,
++    bool? isLoading,
++    String? errorMessage,
++    bool clearError = false,
+   }) {
+     return MenuManagementState(
+       tab: tab ?? this.tab,
+       searchQuery: searchQuery ?? this.searchQuery,
+       viewMode: viewMode ?? this.viewMode,
+-      menuItems: menuItems,
+-      variantGroups: variantGroups,
++      menuItems: menuItems ?? this.menuItems,
++      variantGroups: variantGroups ?? this.variantGroups,
++      isLoading: isLoading ?? this.isLoading,
++      errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
+     );
+   }
+ 
+   /// Menu items matching the current search query, grouped by category —
+   /// preserves first-seen category order, matching the mockup's behavior.
++  /// Inactive items are included here (visually dimmed by the card, see
++  /// [MenuItemCard]) rather than hidden — hiding them silently would make
++  /// "where did my item go" a support question once real deactivation is
++  /// used; a future filter toggle can hide them explicitly if wanted.
+   Map<String, List<MenuItem>> get groupedFilteredMenuItems {
+     final query = searchQuery.toLowerCase();
+     final filtered = menuItems.where((item) => item.name.toLowerCase().contains(query));
+     final grouped = <String, List<MenuItem>>{};
+     for (final item in filtered) {
+-      grouped.putIfAbsent(item.category, () => []).add(item);
++      grouped.putIfAbsent(item.categoryName, () => []).add(item);
+     }
+     return grouped;
+   }
+@@ -54,20 +83,26 @@ class MenuManagementState {
+ 
+ final menuManagementProvider =
+     StateNotifierProvider.autoDispose<MenuManagementController, MenuManagementState>(
+-  (ref) => MenuManagementController(),
++  (ref) => MenuManagementController(ref.watch(menuManagementRepositoryProvider)),
+ );
+ 
+ class MenuManagementController extends StateNotifier<MenuManagementState> {
+-  MenuManagementController()
+-      : super(
+-          MenuManagementState(
+-            tab: MenuManagementTab.menu,
+-            searchQuery: '',
+-            viewMode: MenuViewMode.list,
+-            menuItems: _demoMenuItems(),
+-            variantGroups: _demoVariantGroups(),
+-          ),
+-        );
++  final MenuManagementRepository _repository;
++
++  MenuManagementController(this._repository) : super(MenuManagementState.initial()) {
++    loadAll();
++  }
++
++  Future<void> loadAll() async {
++    state = state.copyWith(isLoading: true, clearError: true);
++    try {
++      final items = await _repository.getMenuItems();
++      final groups = await _repository.getVariantGroups();
++      state = state.copyWith(menuItems: items, variantGroups: groups, isLoading: false);
++    } catch (e) {
++      state = state.copyWith(isLoading: false, errorMessage: 'Gagal memuat data: $e');
++    }
++  }
+ 
+   void setTab(MenuManagementTab tab) => state = state.copyWith(tab: tab);
+ 
+@@ -76,21 +111,54 @@ class MenuManagementController extends StateNotifier<MenuManagementState> {
+   void clearSearch() => state = state.copyWith(searchQuery: '');
+ 
+   void cycleViewMode() => state = state.copyWith(viewMode: state.viewMode.next);
+-}
+ 
+-// Demo data mirrors the supplied React mockup's initial state exactly, so
+-// the shell renders comparably before real menu data/sync is wired up.
+-List<MenuItem> _demoMenuItems() => const [
+-      MenuItem(id: '1', name: 'Brownbutter', price: 18000, unit: 'pcs', stockLabel: 'Tidak Terbatas', category: 'Saus & Bumbu'),
+-      MenuItem(id: '2', name: 'Firesauce', price: 20000, unit: 'pcs', stockLabel: 'Tidak Terbatas', category: 'Saus & Bumbu'),
+-      MenuItem(id: '3', name: 'Ayam Crispy Original', price: 15000, unit: 'porsi', stockLabel: 'Tidak Terbatas', category: 'Makanan Utama'),
+-      MenuItem(id: '4', name: 'Ayam Bakar Madu', price: 17000, unit: 'porsi', stockLabel: 'Tidak Terbatas', category: 'Makanan Utama'),
+-      MenuItem(id: '5', name: 'Es Teh Manis', price: 5000, unit: 'gelas', stockLabel: 'Tidak Terbatas', category: 'Minuman'),
+-      MenuItem(id: '6', name: 'Es Jeruk', price: 7000, unit: 'gelas', stockLabel: 'Tidak Terbatas', category: 'Minuman'),
+-    ];
+-
+-List<VariantGroup> _demoVariantGroups() => const [
+-      VariantGroup(id: '1', name: 'Level Pedas', options: ['Level 0', 'Level 1', 'Level 2', 'Level 3']),
+-      VariantGroup(id: '2', name: 'Pilihan Minuman', options: ['Es Teh Manis', 'Teh Tawar', 'Mineral Water']),
+-      VariantGroup(id: '3', name: 'Ekstra Topping', options: ['Keju', 'Saus Keju', 'Kremes']),
+-    ];
++  Future<void> createMenuItem({
++    required String categoryName,
++    required String name,
++    required int price,
++    int? hpp,
++    required String unit,
++    List<String> variantGroupIds = const [],
++  }) async {
++    try {
++      await _repository.createMenuItem(
++        categoryName: categoryName,
++        name: name,
++        price: price,
++        hpp: hpp,
++        unit: unit,
++        variantGroupIds: variantGroupIds,
++      );
++      await loadAll();
++    } catch (e) {
++      state = state.copyWith(errorMessage: 'Gagal menyimpan menu: $e');
++    }
++  }
++
++  Future<void> updateMenuItem(MenuItem item) async {
++    try {
++      await _repository.updateMenuItem(item);
++      await loadAll();
++    } catch (e) {
++      state = state.copyWith(errorMessage: 'Gagal memperbarui menu: $e');
++    }
++  }
++
++  Future<void> deactivateMenuItem(String id) async {
++    try {
++      await _repository.deactivateMenuItem(id);
++      await loadAll();
++    } catch (e) {
++      state = state.copyWith(errorMessage: 'Gagal menonaktifkan menu: $e');
++    }
++  }
++
++  Future<void> reactivateMenuItem(String id) async {
++    try {
++      await _repository.reactivateMenuItem(id);
++      await loadAll();
++    } catch (e) {
++      state = state.copyWith(errorMessage: 'Gagal mengaktifkan menu: $e');
++    }
++  }
++}
+diff --git a/lib/features/menu_management/application/menu_management_repository.dart b/lib/features/menu_management/application/menu_management_repository.dart
+new file mode 100644
+index 0000000..422314c
+--- /dev/null
++++ b/lib/features/menu_management/application/menu_management_repository.dart
+@@ -0,0 +1,226 @@
++import 'package:sqflite_sqlcipher/sqflite.dart';
++import 'package:uuid/uuid.dart';
++
++import '../../../core/data/app_database.dart';
++import '../domain/menu_management_models.dart';
++
++/// CRUD access for Menu Management (menu items, categories, variant
++/// groups) against the local encrypted database.
++///
++/// This is the only place in the app that runs SQL for these tables —
++/// [MenuManagementController] and the UI never touch [AppDatabase]
++/// directly, so swapping in real sync (docs/06 phase 5) later only
++/// means changing what happens inside these methods, not any call site.
++class MenuManagementRepository {
++  final _uuid = const Uuid();
++
++  Future<Database> get _db => AppDatabase.instance.database;
++
++  // --- Categories ---
++
++  Future<List<MenuCategory>> getCategories() async {
++    final db = await _db;
++    final rows = await db.query('categories', orderBy: 'sort_order ASC');
++    return rows.map(_categoryFromRow).toList();
++  }
++
++  Future<MenuCategory> getOrCreateCategory(String name) async {
++    final db = await _db;
++    final existing = await db.query('categories', where: 'name = ?', whereArgs: [name], limit: 1);
++    if (existing.isNotEmpty) return _categoryFromRow(existing.first);
++
++    final countResult = await db.rawQuery('SELECT COUNT(*) as c FROM categories');
++    final sortOrder = Sqflite.firstIntValue(countResult) ?? 0;
++
++    final now = DateTime.now().toIso8601String();
++    final id = _uuid.v4();
++    await db.insert('categories', {
++      'id': id,
++      'name': name,
++      'sort_order': sortOrder,
++      'is_active': 1,
++      'created_at': now,
++      'updated_at': now,
++    });
++    return MenuCategory(id: id, name: name, sortOrder: sortOrder, isActive: true);
++  }
++
++  MenuCategory _categoryFromRow(Map<String, Object?> row) {
++    return MenuCategory(
++      id: row['id'] as String,
++      name: row['name'] as String,
++      sortOrder: row['sort_order'] as int,
++      isActive: (row['is_active'] as int) == 1,
++    );
++  }
++
++  // --- Menu items ---
++
++  Future<List<MenuItem>> getMenuItems() async {
++    final db = await _db;
++    final rows = await db.rawQuery('''
++      SELECT menu_items.*, categories.name as category_name
++      FROM menu_items
++      JOIN categories ON categories.id = menu_items.category_id
++      ORDER BY menu_items.created_at ASC
++    ''');
++
++    final items = <MenuItem>[];
++    for (final row in rows) {
++      final variantGroupIds = await _getVariantGroupIdsForMenuItem(row['id'] as String);
++      items.add(_menuItemFromRow(row, variantGroupIds));
++    }
++    return items;
++  }
++
++  Future<List<String>> _getVariantGroupIdsForMenuItem(String menuItemId) async {
++    final db = await _db;
++    final rows = await db.query(
++      'menu_item_variant_groups',
++      columns: ['variant_group_id'],
++      where: 'menu_item_id = ?',
++      whereArgs: [menuItemId],
++    );
++    return rows.map((r) => r['variant_group_id'] as String).toList();
++  }
++
++  MenuItem _menuItemFromRow(Map<String, Object?> row, List<String> variantGroupIds) {
++    return MenuItem(
++      id: row['id'] as String,
++      categoryId: row['category_id'] as String,
++      categoryName: row['category_name'] as String,
++      name: row['name'] as String,
++      price: row['price'] as int,
++      hpp: row['hpp'] as int?,
++      unit: row['unit'] as String,
++      isActive: (row['is_active'] as int) == 1,
++      variantGroupIds: variantGroupIds,
++    );
++  }
++
++  /// Creates a new menu item. `categoryName` is resolved to an existing
++  /// category or a newly created one — the add-form's category dropdown
++  /// is currently a fixed list (see [AddMenuItemModal]), but this keeps
++  /// the repository correct even once categories become user-editable.
++  Future<MenuItem> createMenuItem({
++    required String categoryName,
++    required String name,
++    required int price,
++    int? hpp,
++    required String unit,
++    List<String> variantGroupIds = const [],
++  }) async {
++    final db = await _db;
++    final category = await getOrCreateCategory(categoryName);
++    final now = DateTime.now().toIso8601String();
++    final id = _uuid.v4();
++
++    await db.insert('menu_items', {
++      'id': id,
++      'category_id': category.id,
++      'name': name,
++      'price': price,
++      'hpp': hpp,
++      'unit': unit,
++      'is_active': 1,
++      'created_at': now,
++      'updated_at': now,
++    });
++
++    for (final groupId in variantGroupIds) {
++      await db.insert('menu_item_variant_groups', {
++        'menu_item_id': id,
++        'variant_group_id': groupId,
++      });
++    }
++
++    return MenuItem(
++      id: id,
++      categoryId: category.id,
++      categoryName: category.name,
++      name: name,
++      price: price,
++      hpp: hpp,
++      unit: unit,
++      isActive: true,
++      variantGroupIds: variantGroupIds,
++    );
++  }
++
++  Future<void> updateMenuItem(MenuItem item) async {
++    final db = await _db;
++    final category = await getOrCreateCategory(item.categoryName);
++    final now = DateTime.now().toIso8601String();
++
++    await db.update(
++      'menu_items',
++      {
++        'category_id': category.id,
++        'name': item.name,
++        'price': item.price,
++        'hpp': item.hpp,
++        'unit': item.unit,
++        'is_active': item.isActive ? 1 : 0,
++        'updated_at': now,
++      },
++      where: 'id = ?',
++      whereArgs: [item.id],
++    );
++
++    await db.delete('menu_item_variant_groups', where: 'menu_item_id = ?', whereArgs: [item.id]);
++    for (final groupId in item.variantGroupIds) {
++      await db.insert('menu_item_variant_groups', {
++        'menu_item_id': item.id,
++        'variant_group_id': groupId,
++      });
++    }
++  }
++
++  /// Soft-delete only — per edge-case rule ("Inactive masters cannot be
++  /// newly selected; history remains snapshot-based"), menu items are
++  /// never hard-deleted once real transactions can reference them. This
++  /// flips `is_active` off rather than removing the row.
++  Future<void> deactivateMenuItem(String id) async {
++    final db = await _db;
++    await db.update(
++      'menu_items',
++      {'is_active': 0, 'updated_at': DateTime.now().toIso8601String()},
++      where: 'id = ?',
++      whereArgs: [id],
++    );
++  }
++
++  Future<void> reactivateMenuItem(String id) async {
++    final db = await _db;
++    await db.update(
++      'menu_items',
++      {'is_active': 1, 'updated_at': DateTime.now().toIso8601String()},
++      where: 'id = ?',
++      whereArgs: [id],
++    );
++  }
++
++  // --- Variant groups ---
++
++  Future<List<VariantGroup>> getVariantGroups() async {
++    final db = await _db;
++    final groupRows = await db.query('variant_groups', orderBy: 'created_at ASC');
++
++    final groups = <VariantGroup>[];
++    for (final row in groupRows) {
++      final optionRows = await db.query(
++        'variant_options',
++        where: 'variant_group_id = ?',
++        whereArgs: [row['id']],
++        orderBy: 'sort_order ASC',
++      );
++      groups.add(VariantGroup(
++        id: row['id'] as String,
++        name: row['name'] as String,
++        isActive: (row['is_active'] as int) == 1,
++        options: optionRows.map((o) => o['name'] as String).toList(),
++      ));
++    }
++    return groups;
++  }
++}
+diff --git a/lib/features/menu_management/domain/menu_management_models.dart b/lib/features/menu_management/domain/menu_management_models.dart
+index efc5c88..89a393d 100644
+--- a/lib/features/menu_management/domain/menu_management_models.dart
++++ b/lib/features/menu_management/domain/menu_management_models.dart
+@@ -1,31 +1,87 @@
++/// A menu category (e.g. "Makanan Utama").
++class MenuCategory {
++  final String id;
++  final String name;
++  final int sortOrder;
++  final bool isActive;
++
++  const MenuCategory({
++    required this.id,
++    required this.name,
++    required this.sortOrder,
++    required this.isActive,
++  });
++}
++
+ /// A sellable menu item (e.g. "Ayam Crispy Original").
++///
++/// `categoryId` + `categoryName` both live here rather than just an id:
++/// the UI groups by category name directly (see
++/// [MenuManagementState.groupedFilteredMenuItems]), and carrying the
++/// resolved name avoids every screen needing a separate category lookup
++/// just to render a section header.
+ class MenuItem {
+   final String id;
++  final String categoryId;
++  final String categoryName;
+   final String name;
+   final int price;
++  final int? hpp;
+   final String unit; // e.g. "porsi", "pcs", "gelas"
+-  final String stockLabel; // e.g. "Tidak Terbatas" — display-only for shell phase
+-  final String category;
++  final bool isActive;
++  final List<String> variantGroupIds;
+ 
+   const MenuItem({
+     required this.id,
++    required this.categoryId,
++    required this.categoryName,
+     required this.name,
+     required this.price,
++    this.hpp,
+     required this.unit,
+-    required this.stockLabel,
+-    required this.category,
++    required this.isActive,
++    this.variantGroupIds = const [],
+   });
++
++  /// Per edge-case rule ("Inactive masters cannot be newly selected;
++  /// history remains snapshot-based") — inactive items are never
++  /// hard-deleted, just flagged. This flag is what future
++  /// selection/search UIs should filter on once transactions exist.
++  MenuItem copyWith({
++    String? categoryId,
++    String? categoryName,
++    String? name,
++    int? price,
++    int? hpp,
++    String? unit,
++    bool? isActive,
++    List<String>? variantGroupIds,
++  }) {
++    return MenuItem(
++      id: id,
++      categoryId: categoryId ?? this.categoryId,
++      categoryName: categoryName ?? this.categoryName,
++      name: name ?? this.name,
++      price: price ?? this.price,
++      hpp: hpp ?? this.hpp,
++      unit: unit ?? this.unit,
++      isActive: isActive ?? this.isActive,
++      variantGroupIds: variantGroupIds ?? this.variantGroupIds,
++    );
++  }
+ }
+ 
+ /// A variant group (e.g. "Level Pedas" -> ["Level 0", "Level 1", ...]).
+ class VariantGroup {
+   final String id;
+   final String name;
++  final bool isActive;
+   final List<String> options;
+ 
+   const VariantGroup({
+     required this.id,
+     required this.name,
++    required this.isActive,
+     required this.options,
+   });
+ }
+diff --git a/lib/features/menu_management/presentation/menu_management_screen.dart b/lib/features/menu_management/presentation/menu_management_screen.dart
+index bd8888c..7905c15 100644
+--- a/lib/features/menu_management/presentation/menu_management_screen.dart
++++ b/lib/features/menu_management/presentation/menu_management_screen.dart
+@@ -47,6 +47,14 @@ class _MenuManagementScreenState extends ConsumerState<MenuManagementScreen> {
+     final state = ref.watch(menuManagementProvider);
+     final controller = ref.read(menuManagementProvider.notifier);
+ 
++    ref.listen(menuManagementProvider, (previous, next) {
++      if (next.errorMessage != null && next.errorMessage != previous?.errorMessage) {
++        ScaffoldMessenger.of(context).showSnackBar(
++          SnackBar(content: Text(next.errorMessage!), backgroundColor: AppColors.danger),
++        );
++      }
++    });
++
+     return Scaffold(
+       backgroundColor: AppColors.background,
+       body: SafeArea(
+@@ -69,10 +77,56 @@ class _MenuManagementScreenState extends ConsumerState<MenuManagementScreen> {
+               onToggleViewMode: controller.cycleViewMode,
+             ),
+             Expanded(
+-              child: state.tab == MenuManagementTab.menu
+-                  ? _MenuTabContent(state: state)
+-                  : _VarianTabContent(state: state),
++              child: state.isLoading
++                  ? const Center(child: CircularProgressIndicator(color: AppColors.brand))
++                  : state.tab == MenuManagementTab.menu
++                      ? _MenuTabContent(
++                          state: state,
++                          onItemTap: (item) => AppNav.showModal(
++                            context,
++                            builder: (_) => AddMenuItemModal(editingItem: item),
++                          ),
++                          onItemLongPress: (item) => _showItemActions(context, item, controller),
++                        )
++                      : _VarianTabContent(state: state),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++
++  void _showItemActions(BuildContext context, MenuItem item, MenuManagementController controller) {
++    AppNav.showModal(
++      context,
++      isScrollControlled: false,
++      builder: (sheetContext) => SafeArea(
++        child: Column(
++          mainAxisSize: MainAxisSize.min,
++          children: [
++            const SizedBox(height: AppSpacing.sm),
++            Container(
++              width: 48,
++              height: 5,
++              decoration: BoxDecoration(color: AppColors.border, borderRadius: BorderRadius.circular(AppRadius.pill)),
+             ),
++            const SizedBox(height: AppSpacing.lg),
++            ListTile(
++              leading: Icon(
++                item.isActive ? Icons.pause_circle_outline_rounded : Icons.play_circle_outline_rounded,
++                color: AppColors.textPrimary,
++              ),
++              title: Text(item.isActive ? 'Nonaktifkan menu' : 'Aktifkan menu'),
++              onTap: () {
++                Navigator.of(sheetContext).pop();
++                if (item.isActive) {
++                  controller.deactivateMenuItem(item.id);
++                } else {
++                  controller.reactivateMenuItem(item.id);
++                }
++              },
++            ),
++            const SizedBox(height: AppSpacing.md),
+           ],
+         ),
+       ),
+@@ -166,7 +220,10 @@ class _SearchRow extends StatelessWidget {
+ 
+ class _MenuTabContent extends StatelessWidget {
+   final MenuManagementState state;
+-  const _MenuTabContent({required this.state});
++  final ValueChanged<MenuItem> onItemTap;
++  final ValueChanged<MenuItem> onItemLongPress;
++
++  const _MenuTabContent({required this.state, required this.onItemTap, required this.onItemLongPress});
+ 
+   @override
+   Widget build(BuildContext context) {
+@@ -193,7 +250,14 @@ class _MenuTabContent extends StatelessWidget {
+               ),
+               _ItemLayout(
+                 viewMode: state.viewMode,
+-                children: entry.value.map((item) => MenuItemCard(item: item, viewMode: state.viewMode)).toList(),
++                children: entry.value
++                    .map((item) => MenuItemCard(
++                          item: item,
++                          viewMode: state.viewMode,
++                          onTap: () => onItemTap(item),
++                          onLongPress: () => onItemLongPress(item),
++                        ))
++                    .toList(),
+               ),
+             ],
+           ),
+diff --git a/lib/features/menu_management/presentation/widgets/add_menu_item_modal.dart b/lib/features/menu_management/presentation/widgets/add_menu_item_modal.dart
+index fa149c2..9ffdce9 100644
+--- a/lib/features/menu_management/presentation/widgets/add_menu_item_modal.dart
++++ b/lib/features/menu_management/presentation/widgets/add_menu_item_modal.dart
+@@ -6,11 +6,16 @@ import '../../../../core/theme/app_spacing.dart';
+ import '../../application/menu_management_provider.dart';
+ import '../../domain/menu_management_models.dart';
+ 
+-/// Full-screen "Tambah Menu" form, shown as a modal (slide up from bottom)
+-/// per the stack-navigation convention: this is a temporary action layered
+-/// on the Menu Management screen, not a new destination.
++/// "Tambah Menu" / "Edit Menu" form, shown as a modal (slide up from
++/// bottom) per the stack-navigation convention: this is a temporary
++/// action layered on the Menu Management screen, not a new destination.
++///
++/// Pass [editingItem] to open in edit mode (fields pre-filled, submit
++/// updates instead of creates). Leaving it null opens in add mode.
+ class AddMenuItemModal extends ConsumerStatefulWidget {
+-  const AddMenuItemModal({super.key});
++  final MenuItem? editingItem;
++
++  const AddMenuItemModal({super.key, this.editingItem});
+ 
+   @override
+   ConsumerState<AddMenuItemModal> createState() => _AddMenuItemModalState();
+@@ -20,10 +25,95 @@ class _AddMenuItemModalState extends ConsumerState<AddMenuItemModal> {
+   static const _categories = ['Makanan Utama', 'Minuman', 'Saus & Bumbu', 'Snack'];
+   static const _units = ['porsi', 'pcs', 'gelas', 'pack'];
+ 
+-  String _selectedCategory = _categories.first;
+-  String _selectedUnit = _units.first;
++  late final TextEditingController _nameController;
++  late final TextEditingController _priceController;
++  late final TextEditingController _hppController;
++
++  late String _selectedCategory;
++  late String _selectedUnit;
+   final Set<String> _selectedVariantIds = {};
+ 
++  bool _isSaving = false;
++  String? _validationError;
++
++  bool get _isEditMode => widget.editingItem != null;
++
++  @override
++  void initState() {
++    super.initState();
++    final item = widget.editingItem;
++
++    _nameController = TextEditingController(text: item?.name ?? '');
++    _priceController = TextEditingController(text: item != null ? item.price.toString() : '');
++    _hppController = TextEditingController(text: item?.hpp != null ? item!.hpp.toString() : '');
++
++    _selectedCategory = item != null && _categories.contains(item.categoryName) ? item.categoryName : _categories.first;
++    _selectedUnit = item != null && _units.contains(item.unit) ? item.unit : _units.first;
++
++    if (item != null) {
++      _selectedVariantIds.addAll(item.variantGroupIds);
++    }
++  }
++
++  @override
++  void dispose() {
++    _nameController.dispose();
++    _priceController.dispose();
++    _hppController.dispose();
++    super.dispose();
++  }
++
++  Future<void> _handleSave() async {
++    final name = _nameController.text.trim();
++    final priceText = _priceController.text.trim();
++
++    if (name.isEmpty) {
++      setState(() => _validationError = 'Nama menu wajib diisi.');
++      return;
++    }
++    final price = int.tryParse(priceText);
++    if (price == null || price <= 0) {
++      setState(() => _validationError = 'Harga jual harus berupa angka lebih dari 0.');
++      return;
++    }
++    final hppText = _hppController.text.trim();
++    final hpp = hppText.isEmpty ? null : int.tryParse(hppText);
++    if (hppText.isNotEmpty && hpp == null) {
++      setState(() => _validationError = 'HPP harus berupa angka.');
++      return;
++    }
++
++    setState(() {
++      _validationError = null;
++      _isSaving = true;
++    });
++
++    final controller = ref.read(menuManagementProvider.notifier);
++
++    if (_isEditMode) {
++      await controller.updateMenuItem(widget.editingItem!.copyWith(
++        categoryName: _selectedCategory,
++        name: name,
++        price: price,
++        hpp: hpp,
++        unit: _selectedUnit,
++        variantGroupIds: _selectedVariantIds.toList(),
++      ));
++    } else {
++      await controller.createMenuItem(
++        categoryName: _selectedCategory,
++        name: name,
++        price: price,
++        hpp: hpp,
++        unit: _selectedUnit,
++        variantGroupIds: _selectedVariantIds.toList(),
++      );
++    }
++
++    if (!mounted) return;
++    Navigator.of(context).pop();
++  }
++
+   @override
+   Widget build(BuildContext context) {
+     final variantGroups = ref.watch(menuManagementProvider).variantGroups;
+@@ -56,7 +146,10 @@ class _AddMenuItemModalState extends ConsumerState<AddMenuItemModal> {
+                           onPressed: () => Navigator.of(context).pop(),
+                           icon: const Icon(Icons.close_rounded, color: AppColors.textPrimary),
+                         ),
+-                        const Text('Tambah Menu', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
++                        Text(
++                          _isEditMode ? 'Edit Menu' : 'Tambah Menu',
++                          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
++                        ),
+                         const SizedBox(width: 48),
+                       ],
+                     ),
+@@ -66,8 +159,31 @@ class _AddMenuItemModalState extends ConsumerState<AddMenuItemModal> {
+                       controller: scrollController,
+                       padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.lg, AppSpacing.xl, 110),
+                       children: [
++                        if (_validationError != null) ...[
++                          Container(
++                            padding: const EdgeInsets.all(AppSpacing.md),
++                            decoration: BoxDecoration(
++                              color: AppColors.danger.withValues(alpha: 0.08),
++                              borderRadius: BorderRadius.circular(AppRadius.md),
++                              border: Border.all(color: AppColors.danger.withValues(alpha: 0.25)),
++                            ),
++                            child: Row(
++                              children: [
++                                const Icon(Icons.error_outline_rounded, size: 16, color: AppColors.danger),
++                                const SizedBox(width: 8),
++                                Expanded(
++                                  child: Text(
++                                    _validationError!,
++                                    style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: AppColors.danger),
++                                  ),
++                                ),
++                              ],
++                            ),
++                          ),
++                          const SizedBox(height: AppSpacing.lg),
++                        ],
+                         _FieldLabel('NAMA MENU'),
+-                        _TextField(hint: 'Contoh: Ayam Bakar Spesial'),
++                        _TextField(controller: _nameController, hint: 'Contoh: Ayam Bakar Spesial'),
+                         const SizedBox(height: AppSpacing.lg),
+                         Row(
+                           crossAxisAlignment: CrossAxisAlignment.start,
+@@ -110,7 +226,7 @@ class _AddMenuItemModalState extends ConsumerState<AddMenuItemModal> {
+                                 crossAxisAlignment: CrossAxisAlignment.start,
+                                 children: [
+                                   _FieldLabel('HARGA JUAL'),
+-                                  _TextField(hint: '0', prefix: 'Rp', isNumeric: true),
++                                  _TextField(controller: _priceController, hint: '0', prefix: 'Rp', isNumeric: true),
+                                 ],
+                               ),
+                             ),
+@@ -120,7 +236,7 @@ class _AddMenuItemModalState extends ConsumerState<AddMenuItemModal> {
+                                 crossAxisAlignment: CrossAxisAlignment.start,
+                                 children: [
+                                   _FieldLabel('HPP (MODAL)'),
+-                                  _TextField(hint: '0', prefix: 'Rp', isNumeric: true),
++                                  _TextField(controller: _hppController, hint: '0', prefix: 'Rp', isNumeric: true),
+                                 ],
+                               ),
+                             ),
+@@ -171,11 +287,7 @@ class _AddMenuItemModalState extends ConsumerState<AddMenuItemModal> {
+                   child: SizedBox(
+                     width: double.infinity,
+                     child: ElevatedButton(
+-                      onPressed: () {
+-                        // NOTE: real save should validate + persist via the
+-                        // menu management repository once that phase lands.
+-                        Navigator.of(context).pop();
+-                      },
++                      onPressed: _isSaving ? null : _handleSave,
+                       style: ElevatedButton.styleFrom(
+                         backgroundColor: AppColors.brand,
+                         foregroundColor: Colors.white,
+@@ -183,7 +295,13 @@ class _AddMenuItemModalState extends ConsumerState<AddMenuItemModal> {
+                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
+                         elevation: 0,
+                       ),
+-                      child: const Text('Simpan Data', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
++                      child: _isSaving
++                          ? const SizedBox(
++                              width: 20,
++                              height: 20,
++                              child: CircularProgressIndicator(strokeWidth: 2.4, color: Colors.white),
++                            )
++                          : const Text('Simpan Data', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
+                     ),
+                   ),
+                 ),
+@@ -214,11 +332,12 @@ class _FieldLabel extends StatelessWidget {
+ }
+ 
+ class _TextField extends StatelessWidget {
++  final TextEditingController controller;
+   final String hint;
+   final String? prefix;
+   final bool isNumeric;
+ 
+-  const _TextField({required this.hint, this.prefix, this.isNumeric = false});
++  const _TextField({required this.controller, required this.hint, this.prefix, this.isNumeric = false});
+ 
+   @override
+   Widget build(BuildContext context) {
+@@ -229,6 +348,7 @@ class _TextField extends StatelessWidget {
+         border: Border.all(color: AppColors.border),
+       ),
+       child: TextField(
++        controller: controller,
+         keyboardType: isNumeric ? TextInputType.number : TextInputType.text,
+         style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.textPrimary),
+         decoration: InputDecoration(
+diff --git a/lib/features/menu_management/presentation/widgets/menu_item_card.dart b/lib/features/menu_management/presentation/widgets/menu_item_card.dart
+index 1fe93cc..5661fb0 100644
+--- a/lib/features/menu_management/presentation/widgets/menu_item_card.dart
++++ b/lib/features/menu_management/presentation/widgets/menu_item_card.dart
+@@ -9,8 +9,9 @@ class MenuItemCard extends StatelessWidget {
+   final MenuItem item;
+   final MenuViewMode viewMode;
+   final VoidCallback? onTap;
++  final VoidCallback? onLongPress;
+ 
+-  const MenuItemCard({super.key, required this.item, required this.viewMode, this.onTap});
++  const MenuItemCard({super.key, required this.item, required this.viewMode, this.onTap, this.onLongPress});
+ 
+   @override
+   Widget build(BuildContext context) {
+@@ -21,63 +22,71 @@ class MenuItemCard extends StatelessWidget {
+   }
+ 
+   Widget _buildListLayout(BuildContext context) {
+-    return Material(
+-      color: AppColors.surface,
+-      borderRadius: BorderRadius.circular(AppRadius.lg),
+-      child: InkWell(
+-        onTap: onTap,
++    return Opacity(
++      opacity: item.isActive ? 1 : 0.55,
++      child: Material(
++        color: AppColors.surface,
+         borderRadius: BorderRadius.circular(AppRadius.lg),
+-        child: Container(
+-          padding: const EdgeInsets.all(AppSpacing.md),
+-          decoration: BoxDecoration(
+-            borderRadius: BorderRadius.circular(AppRadius.lg),
+-            border: Border.all(color: AppColors.border),
+-          ),
+-          child: Row(
+-            children: [
+-              _ItemThumbnail(size: 48, iconSize: 20),
+-              const SizedBox(width: AppSpacing.md),
+-              Expanded(
+-                child: Column(
+-                  crossAxisAlignment: CrossAxisAlignment.start,
++        child: InkWell(
++          onTap: onTap,
++          onLongPress: onLongPress,
++          borderRadius: BorderRadius.circular(AppRadius.lg),
++          child: Container(
++            padding: const EdgeInsets.all(AppSpacing.md),
++            decoration: BoxDecoration(
++              borderRadius: BorderRadius.circular(AppRadius.lg),
++              border: Border.all(color: AppColors.border),
++            ),
++            child: Row(
++              children: [
++                _ItemThumbnail(size: 48, iconSize: 20),
++                const SizedBox(width: AppSpacing.md),
++                Expanded(
++                  child: Column(
++                    crossAxisAlignment: CrossAxisAlignment.start,
++                    mainAxisSize: MainAxisSize.min,
++                    children: [
++                      Text(
++                        item.name,
++                        maxLines: 1,
++                        overflow: TextOverflow.ellipsis,
++                        style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
++                      ),
++                      const SizedBox(height: 3),
++                      Row(
++                        children: [
++                          Icon(
++                            item.isActive ? Icons.check_circle_rounded : Icons.pause_circle_rounded,
++                            size: 12,
++                            color: item.isActive ? AppColors.success : AppColors.textMuted,
++                          ),
++                          const SizedBox(width: 4),
++                          Text(
++                            item.isActive ? 'Aktif' : 'Nonaktif',
++                            style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w500, color: AppColors.textMuted),
++                          ),
++                        ],
++                      ),
++                    ],
++                  ),
++                ),
++                const SizedBox(width: AppSpacing.sm),
++                Column(
++                  crossAxisAlignment: CrossAxisAlignment.end,
+                   mainAxisSize: MainAxisSize.min,
+                   children: [
+                     Text(
+-                      item.name,
+-                      maxLines: 1,
+-                      overflow: TextOverflow.ellipsis,
+-                      style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
++                      formatRupiah(item.price),
++                      style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
+                     ),
+-                    const SizedBox(height: 3),
+-                    Row(
+-                      children: [
+-                        const Icon(Icons.inventory_2_outlined, size: 12, color: AppColors.textMuted),
+-                        const SizedBox(width: 4),
+-                        Text(
+-                          item.stockLabel,
+-                          style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w500, color: AppColors.textMuted),
+-                        ),
+-                      ],
++                    Text(
++                      '/ ${item.unit}',
++                      style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.w500, color: AppColors.textMuted),
+                     ),
+                   ],
+                 ),
+-              ),
+-              const SizedBox(width: AppSpacing.sm),
+-              Column(
+-                crossAxisAlignment: CrossAxisAlignment.end,
+-                mainAxisSize: MainAxisSize.min,
+-                children: [
+-                  Text(
+-                    formatRupiah(item.price),
+-                    style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
+-                  ),
+-                  Text(
+-                    '/ ${item.unit}',
+-                    style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.w500, color: AppColors.textMuted),
+-                  ),
+-                ],
+-              ),
+-            ],
++              ],
++            ),
+           ),
+         ),
+       ),
+@@ -87,47 +96,51 @@ class MenuItemCard extends StatelessWidget {
+   Widget _buildGridLayout(BuildContext context) {
+     final isGrid3 = viewMode == MenuViewMode.grid3;
+ 
+-    return Material(
+-      color: AppColors.surface,
+-      borderRadius: BorderRadius.circular(AppRadius.lg),
+-      child: InkWell(
+-        onTap: onTap,
++    return Opacity(
++      opacity: item.isActive ? 1 : 0.55,
++      child: Material(
++        color: AppColors.surface,
+         borderRadius: BorderRadius.circular(AppRadius.lg),
+-        child: Container(
+-          padding: const EdgeInsets.all(AppSpacing.sm),
+-          decoration: BoxDecoration(
+-            borderRadius: BorderRadius.circular(AppRadius.lg),
+-            border: Border.all(color: AppColors.border),
+-          ),
+-          child: Column(
+-            crossAxisAlignment: CrossAxisAlignment.stretch,
+-            children: [
+-              AspectRatio(
+-                aspectRatio: 1,
+-                child: _ItemThumbnail(size: double.infinity, iconSize: isGrid3 ? 22 : 28, rounded: true),
+-              ),
+-              const SizedBox(height: AppSpacing.sm),
+-              Text(
+-                item.name,
+-                textAlign: TextAlign.center,
+-                maxLines: 2,
+-                overflow: TextOverflow.ellipsis,
+-                style: TextStyle(fontSize: isGrid3 ? 10.5 : 13, fontWeight: FontWeight.w800, color: AppColors.textPrimary, height: 1.2),
+-              ),
+-              const SizedBox(height: 4),
+-              Text(
+-                formatRupiah(item.price),
+-                textAlign: TextAlign.center,
+-                maxLines: 1,
+-                overflow: TextOverflow.ellipsis,
+-                style: TextStyle(fontSize: isGrid3 ? 10 : 12, fontWeight: FontWeight.w700, color: AppColors.textPrimary),
+-              ),
+-              Text(
+-                '/ ${item.unit}',
+-                textAlign: TextAlign.center,
+-                style: const TextStyle(fontSize: 9.5, fontWeight: FontWeight.w500, color: AppColors.textMuted),
+-              ),
+-            ],
++        child: InkWell(
++          onTap: onTap,
++          onLongPress: onLongPress,
++          borderRadius: BorderRadius.circular(AppRadius.lg),
++          child: Container(
++            padding: const EdgeInsets.all(AppSpacing.sm),
++            decoration: BoxDecoration(
++              borderRadius: BorderRadius.circular(AppRadius.lg),
++              border: Border.all(color: AppColors.border),
++            ),
++            child: Column(
++              crossAxisAlignment: CrossAxisAlignment.stretch,
++              children: [
++                AspectRatio(
++                  aspectRatio: 1,
++                  child: _ItemThumbnail(size: double.infinity, iconSize: isGrid3 ? 22 : 28, rounded: true),
++                ),
++                const SizedBox(height: AppSpacing.sm),
++                Text(
++                  item.name,
++                  textAlign: TextAlign.center,
++                  maxLines: 2,
++                  overflow: TextOverflow.ellipsis,
++                  style: TextStyle(fontSize: isGrid3 ? 10.5 : 13, fontWeight: FontWeight.w800, color: AppColors.textPrimary, height: 1.2),
++                ),
++                const SizedBox(height: 4),
++                Text(
++                  formatRupiah(item.price),
++                  textAlign: TextAlign.center,
++                  maxLines: 1,
++                  overflow: TextOverflow.ellipsis,
++                  style: TextStyle(fontSize: isGrid3 ? 10 : 12, fontWeight: FontWeight.w700, color: AppColors.textPrimary),
++                ),
++                Text(
++                  '/ ${item.unit}',
++                  textAlign: TextAlign.center,
++                  style: const TextStyle(fontSize: 9.5, fontWeight: FontWeight.w500, color: AppColors.textMuted),
++                ),
++              ],
++            ),
+           ),
+         ),
+       ),
+-- 
+2.43.0
+

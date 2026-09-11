@@ -29,6 +29,9 @@ class SalesTrendChart extends StatelessWidget {
         color: AppColors.surface,
         borderRadius: BorderRadius.circular(AppRadius.xl),
         border: Border.all(color: AppColors.border),
+        boxShadow: [
+          BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 10, offset: const Offset(0, 3)),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -181,7 +184,7 @@ class _TrendPainter extends CustomPainter {
       );
 
       labelPainter.text = TextSpan(
-        text: DateFormat('d/M').format(p.date),
+        text: DateFormat('d/M', 'id_ID').format(p.date),
         style: TextStyle(
           fontSize: 9,
           fontWeight: p.isWeekend ? FontWeight.w700 : FontWeight.w500,

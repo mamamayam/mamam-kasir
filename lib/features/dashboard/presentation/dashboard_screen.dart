@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/navigation/app_nav.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_spacing.dart';
 import '../../../core/utils/currency.dart';
 import '../../menu_shell/presentation/menu_bottom_sheet.dart';
 import '../../menu_shell/presentation/swipe_up_trigger.dart';
+import '../../history/presentation/history_screen.dart';
+import '../../pos/presentation/pos_screen.dart';
 import '../application/dashboard_provider.dart';
 import '../domain/dashboard_models.dart';
 import 'widgets/hero_sales_card.dart';
@@ -133,12 +136,8 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                           ),
                           const SizedBox(height: AppSpacing.lg),
                           QuickActionsRow(
-                            onKasirTap: () {
-                              // Route to Kasir/POS — out of scope for this shell pass.
-                            },
-                            onRiwayatTap: () {
-                              // Route to Riwayat — out of scope for this shell pass.
-                            },
+                            onKasirTap: () => AppNav.push(context, (_) => const PosScreen()),
+                            onRiwayatTap: () => AppNav.push(context, (_) => const HistoryScreen()),
                           ),
                         ],
                       ),

@@ -1,6 +1,11 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../domain/menu_management_models.dart';
+import 'menu_management_repository.dart';
+
+final menuManagementRepositoryProvider = Provider<MenuManagementRepository>((ref) {
+  return MenuManagementRepository();
+});
 
 class MenuManagementState {
   final MenuManagementTab tab;
@@ -8,6 +13,8 @@ class MenuManagementState {
   final MenuViewMode viewMode;
   final List<MenuItem> menuItems;
   final List<VariantGroup> variantGroups;
+  final bool isLoading;
+  final String? errorMessage;
 
   const MenuManagementState({
     required this.tab,
@@ -15,30 +22,52 @@ class MenuManagementState {
     required this.viewMode,
     required this.menuItems,
     required this.variantGroups,
+    required this.isLoading,
+    this.errorMessage,
   });
+
+  factory MenuManagementState.initial() => const MenuManagementState(
+        tab: MenuManagementTab.menu,
+        searchQuery: '',
+        viewMode: MenuViewMode.list,
+        menuItems: [],
+        variantGroups: [],
+        isLoading: true,
+      );
 
   MenuManagementState copyWith({
     MenuManagementTab? tab,
     String? searchQuery,
     MenuViewMode? viewMode,
+    List<MenuItem>? menuItems,
+    List<VariantGroup>? variantGroups,
+    bool? isLoading,
+    String? errorMessage,
+    bool clearError = false,
   }) {
     return MenuManagementState(
       tab: tab ?? this.tab,
       searchQuery: searchQuery ?? this.searchQuery,
       viewMode: viewMode ?? this.viewMode,
-      menuItems: menuItems,
-      variantGroups: variantGroups,
+      menuItems: menuItems ?? this.menuItems,
+      variantGroups: variantGroups ?? this.variantGroups,
+      isLoading: isLoading ?? this.isLoading,
+      errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
     );
   }
 
   /// Menu items matching the current search query, grouped by category —
   /// preserves first-seen category order, matching the mockup's behavior.
+  /// Inactive items are included here (visually dimmed by the card, see
+  /// [MenuItemCard]) rather than hidden — hiding them silently would make
+  /// "where did my item go" a support question once real deactivation is
+  /// used; a future filter toggle can hide them explicitly if wanted.
   Map<String, List<MenuItem>> get groupedFilteredMenuItems {
     final query = searchQuery.toLowerCase();
     final filtered = menuItems.where((item) => item.name.toLowerCase().contains(query));
     final grouped = <String, List<MenuItem>>{};
     for (final item in filtered) {
-      grouped.putIfAbsent(item.category, () => []).add(item);
+      grouped.putIfAbsent(item.categoryName, () => []).add(item);
     }
     return grouped;
   }
@@ -47,27 +76,33 @@ class MenuManagementState {
     final query = searchQuery.toLowerCase();
     return variantGroups.where((group) {
       return group.name.toLowerCase().contains(query) ||
-          group.options.any((opt) => opt.toLowerCase().contains(query));
+          group.options.any((opt) => opt.name.toLowerCase().contains(query));
     }).toList();
   }
 }
 
 final menuManagementProvider =
     StateNotifierProvider.autoDispose<MenuManagementController, MenuManagementState>(
-  (ref) => MenuManagementController(),
+  (ref) => MenuManagementController(ref.watch(menuManagementRepositoryProvider)),
 );
 
 class MenuManagementController extends StateNotifier<MenuManagementState> {
-  MenuManagementController()
-      : super(
-          MenuManagementState(
-            tab: MenuManagementTab.menu,
-            searchQuery: '',
-            viewMode: MenuViewMode.list,
-            menuItems: _demoMenuItems(),
-            variantGroups: _demoVariantGroups(),
-          ),
-        );
+  final MenuManagementRepository _repository;
+
+  MenuManagementController(this._repository) : super(MenuManagementState.initial()) {
+    loadAll();
+  }
+
+  Future<void> loadAll() async {
+    state = state.copyWith(isLoading: true, clearError: true);
+    try {
+      final items = await _repository.getMenuItems();
+      final groups = await _repository.getVariantGroups();
+      state = state.copyWith(menuItems: items, variantGroups: groups, isLoading: false);
+    } catch (e) {
+      state = state.copyWith(isLoading: false, errorMessage: 'Gagal memuat data: $e');
+    }
+  }
 
   void setTab(MenuManagementTab tab) => state = state.copyWith(tab: tab);
 
@@ -76,21 +111,54 @@ class MenuManagementController extends StateNotifier<MenuManagementState> {
   void clearSearch() => state = state.copyWith(searchQuery: '');
 
   void cycleViewMode() => state = state.copyWith(viewMode: state.viewMode.next);
+
+  Future<void> createMenuItem({
+    required String categoryName,
+    required String name,
+    required int price,
+    int? hpp,
+    required String unit,
+    List<String> variantGroupIds = const [],
+  }) async {
+    try {
+      await _repository.createMenuItem(
+        categoryName: categoryName,
+        name: name,
+        price: price,
+        hpp: hpp,
+        unit: unit,
+        variantGroupIds: variantGroupIds,
+      );
+      await loadAll();
+    } catch (e) {
+      state = state.copyWith(errorMessage: 'Gagal menyimpan menu: $e');
+    }
+  }
+
+  Future<void> updateMenuItem(MenuItem item) async {
+    try {
+      await _repository.updateMenuItem(item);
+      await loadAll();
+    } catch (e) {
+      state = state.copyWith(errorMessage: 'Gagal memperbarui menu: $e');
+    }
+  }
+
+  Future<void> deactivateMenuItem(String id) async {
+    try {
+      await _repository.deactivateMenuItem(id);
+      await loadAll();
+    } catch (e) {
+      state = state.copyWith(errorMessage: 'Gagal menonaktifkan menu: $e');
+    }
+  }
+
+  Future<void> reactivateMenuItem(String id) async {
+    try {
+      await _repository.reactivateMenuItem(id);
+      await loadAll();
+    } catch (e) {
+      state = state.copyWith(errorMessage: 'Gagal mengaktifkan menu: $e');
+    }
+  }
 }
-
-// Demo data mirrors the supplied React mockup's initial state exactly, so
-// the shell renders comparably before real menu data/sync is wired up.
-List<MenuItem> _demoMenuItems() => const [
-      MenuItem(id: '1', name: 'Brownbutter', price: 18000, unit: 'pcs', stockLabel: 'Tidak Terbatas', category: 'Saus & Bumbu'),
-      MenuItem(id: '2', name: 'Firesauce', price: 20000, unit: 'pcs', stockLabel: 'Tidak Terbatas', category: 'Saus & Bumbu'),
-      MenuItem(id: '3', name: 'Ayam Crispy Original', price: 15000, unit: 'porsi', stockLabel: 'Tidak Terbatas', category: 'Makanan Utama'),
-      MenuItem(id: '4', name: 'Ayam Bakar Madu', price: 17000, unit: 'porsi', stockLabel: 'Tidak Terbatas', category: 'Makanan Utama'),
-      MenuItem(id: '5', name: 'Es Teh Manis', price: 5000, unit: 'gelas', stockLabel: 'Tidak Terbatas', category: 'Minuman'),
-      MenuItem(id: '6', name: 'Es Jeruk', price: 7000, unit: 'gelas', stockLabel: 'Tidak Terbatas', category: 'Minuman'),
-    ];
-
-List<VariantGroup> _demoVariantGroups() => const [
-      VariantGroup(id: '1', name: 'Level Pedas', options: ['Level 0', 'Level 1', 'Level 2', 'Level 3']),
-      VariantGroup(id: '2', name: 'Pilihan Minuman', options: ['Es Teh Manis', 'Teh Tawar', 'Mineral Water']),
-      VariantGroup(id: '3', name: 'Ekstra Topping', options: ['Keju', 'Saus Keju', 'Kremes']),
-    ];
