@@ -5,6 +5,7 @@ import 'package:intl/intl.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_spacing.dart';
 import '../../../core/utils/currency.dart';
+import '../../../core/widgets/ios_page_header.dart';
 import '../../pos/domain/order_models.dart';
 import '../../pos/domain/transaction.dart';
 import '../application/history_provider.dart';
@@ -70,16 +71,7 @@ class TransactionDetailScreen extends ConsumerWidget {
       body: SafeArea(
         child: Column(
           children: [
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: AppSpacing.sm),
-              decoration: const BoxDecoration(color: AppColors.background, border: Border(bottom: BorderSide(color: AppColors.border))),
-              child: Row(
-                children: [
-                  IconButton(onPressed: () => Navigator.of(context).pop(), icon: const Icon(Icons.arrow_back_rounded, color: AppColors.textPrimary)),
-                  Text(transaction.displayNumber, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
-                ],
-              ),
-            ),
+            IosPageHeader(title: Text(transaction.displayNumber)),
             Expanded(
               child: ListView(
                 padding: const EdgeInsets.all(AppSpacing.lg),

@@ -39,7 +39,7 @@ class _PosScreenState extends ConsumerState<PosScreen> {
       return;
     }
 
-    final selected = await showModalBottomSheet<Map<String, List<String>>>(
+    final selected = await showModalBottomSheet<VariantSelectionResult>(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
@@ -47,7 +47,7 @@ class _PosScreenState extends ConsumerState<PosScreen> {
     );
 
     if (selected != null) {
-      cartController.addToCart(menu, selected, catalog.variantGroups);
+      cartController.addToCart(menu, selected.selectedOptions, catalog.variantGroups, quantity: selected.quantity);
     }
   }
 

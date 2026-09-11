@@ -5,10 +5,20 @@ import '../../../../core/theme/app_spacing.dart';
 import '../../../../core/utils/currency.dart';
 import '../../../menu_management/domain/menu_management_models.dart';
 
+/// Result of [VariantSelectionModal] — selected options plus the chosen
+/// quantity (set via the modal's own stepper), so a single confirm tap
+/// can add more than one unit at once.
+class VariantSelectionResult {
+  final Map<String, List<String>> selectedOptions;
+  final int quantity;
+
+  const VariantSelectionResult({required this.selectedOptions, required this.quantity});
+}
+
 /// Shown as a modal (bottom-up) when a tapped menu item has one or more
-/// linked variant groups. Returns the selected options map (groupId ->
-/// list of optionIds) via [Navigator.pop], or null if dismissed without
-/// completing a required selection.
+/// linked variant groups. Returns a [VariantSelectionResult] via
+/// [Navigator.pop], or null if dismissed without completing a required
+/// selection.
 class VariantSelectionModal extends StatefulWidget {
   final MenuItem menu;
   final List<VariantGroup> allGroups;
@@ -21,6 +31,7 @@ class VariantSelectionModal extends StatefulWidget {
 
 class _VariantSelectionModalState extends State<VariantSelectionModal> {
   final Map<String, List<String>> _selected = {};
+  int _quantity = 1;
 
   List<VariantGroup> get _relevantGroups =>
       widget.allGroups.where((g) => widget.menu.variantGroupIds.contains(g.id) && g.isActive).toList();
@@ -43,6 +54,10 @@ class _VariantSelectionModalState extends State<VariantSelectionModal> {
     });
   }
 
+  void _incrementQty() => setState(() => _quantity++);
+
+  void _decrementQty() => setState(() => _quantity = _quantity > 1 ? _quantity - 1 : 1);
+
   int get _extraPriceTotal {
     var total = 0;
     for (final group in _relevantGroups) {
@@ -64,6 +79,7 @@ class _VariantSelectionModalState extends State<VariantSelectionModal> {
   @override
   Widget build(BuildContext context) {
     final groups = _relevantGroups;
+    final unitPrice = widget.menu.price + _extraPriceTotal;
 
     return DraggableScrollableSheet(
       initialChildSize: 0.75,
@@ -79,42 +95,32 @@ class _VariantSelectionModalState extends State<VariantSelectionModal> {
             children: [
               Column(
                 children: [
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: AppSpacing.sm),
-                    decoration: const BoxDecoration(
-                      color: AppColors.surface,
-                      borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
-                      border: Border(bottom: BorderSide(color: AppColors.border)),
-                    ),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        IconButton(
-                          onPressed: () => Navigator.of(context).pop(),
-                          icon: const Icon(Icons.close_rounded, color: AppColors.textPrimary),
-                        ),
-                        Expanded(
-                          child: Text(
-                            widget.menu.name,
-                            textAlign: TextAlign.center,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
-                          ),
-                        ),
-                        const SizedBox(width: 48),
-                      ],
+                  // Drag handle, replacing the old close-icon header bar —
+                  // this sheet now leads with the product card below
+                  // instead, matching the reference design.
+                  Padding(
+                    padding: const EdgeInsets.only(top: 14, bottom: 6),
+                    child: Container(
+                      width: 56,
+                      height: 5,
+                      decoration: BoxDecoration(color: AppColors.border, borderRadius: BorderRadius.circular(AppRadius.pill)),
                     ),
                   ),
                   Expanded(
                     child: ListView(
                       controller: scrollController,
-                      padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.lg, AppSpacing.xl, 100),
-                      children: groups.map((group) => _VariantGroupSection(
-                            group: group,
-                            selectedIds: _selected[group.id] ?? [],
-                            onToggle: (optionId) => _toggleOption(group, optionId),
-                          )).toList(),
+                      padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.sm, AppSpacing.xl, 100),
+                      children: [
+                        _ProductHeaderCard(menu: widget.menu),
+                        const SizedBox(height: AppSpacing.xl),
+                        ...groups.map((group) => _VariantGroupSection(
+                              group: group,
+                              selectedIds: _selected[group.id] ?? [],
+                              onToggle: (optionId) => _toggleOption(group, optionId),
+                            )),
+                        const Divider(height: AppSpacing.xxl),
+                        _QtySelector(quantity: _quantity, onDecrement: _decrementQty, onIncrement: _incrementQty),
+                      ],
                     ),
                   ),
                 ],
@@ -132,23 +138,36 @@ class _VariantSelectionModalState extends State<VariantSelectionModal> {
                       BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 16, offset: const Offset(0, -4)),
                     ],
                   ),
-                  child: SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton(
-                      onPressed: _canConfirm ? () => Navigator.of(context).pop(_selected) : null,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: AppColors.brand,
-                        foregroundColor: Colors.white,
-                        disabledBackgroundColor: AppColors.border,
-                        padding: const EdgeInsets.symmetric(vertical: 15),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
-                        elevation: 0,
+                  child: Row(
+                    children: [
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text('Total', style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: AppColors.textMuted)),
+                          Text(
+                            formatRupiah(unitPrice * _quantity),
+                            style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
+                          ),
+                        ],
                       ),
-                      child: Text(
-                        'Tambah • ${formatRupiah(widget.menu.price + _extraPriceTotal)}',
-                        style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800),
+                      const SizedBox(width: AppSpacing.lg),
+                      Expanded(
+                        child: ElevatedButton(
+                          onPressed: _canConfirm
+                              ? () => Navigator.of(context).pop(VariantSelectionResult(selectedOptions: _selected, quantity: _quantity))
+                              : null,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: AppColors.brand,
+                            foregroundColor: Colors.white,
+                            disabledBackgroundColor: AppColors.border,
+                            padding: const EdgeInsets.symmetric(vertical: 15),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
+                            elevation: 0,
+                          ),
+                          child: const Text('Add to Cart', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
+                        ),
                       ),
-                    ),
+                    ],
                   ),
                 ),
               ),
@@ -156,6 +175,71 @@ class _VariantSelectionModalState extends State<VariantSelectionModal> {
           ),
         );
       },
+    );
+  }
+}
+
+/// Product identity card at the top of the sheet — thumbnail, name,
+/// price, and a "Stok ∞" badge. The menu model has no image or stock
+/// field (this app has no stock-tracking feature at all — see product
+/// notes), so the thumbnail is a generic icon placeholder and the stock
+/// badge is a fixed decorative "∞", not real data.
+class _ProductHeaderCard extends StatelessWidget {
+  final MenuItem menu;
+  const _ProductHeaderCard({required this.menu});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: Container(
+            padding: const EdgeInsets.all(AppSpacing.md),
+            decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.lg)),
+            child: Row(
+              children: [
+                Container(
+                  width: 52,
+                  height: 52,
+                  decoration: BoxDecoration(color: AppColors.background, borderRadius: BorderRadius.circular(AppRadius.md)),
+                  child: const Icon(Icons.fastfood_rounded, size: 24, color: AppColors.textMuted),
+                ),
+                const SizedBox(width: AppSpacing.md),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        menu.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(formatRupiah(menu.price), style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: AppColors.textSecondary)),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(width: AppSpacing.sm),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.md),
+          decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.lg)),
+          child: const Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text('Stok', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.textMuted)),
+              SizedBox(height: 2),
+              Icon(Icons.all_inclusive_rounded, size: 18, color: AppColors.textSecondary),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }
@@ -200,34 +284,41 @@ class _VariantGroupSection extends StatelessWidget {
               padding: const EdgeInsets.only(bottom: AppSpacing.sm),
               child: Material(
                 color: AppColors.surface,
-                borderRadius: BorderRadius.circular(AppRadius.md),
+                borderRadius: BorderRadius.circular(AppRadius.pill),
                 child: InkWell(
                   onTap: () => onToggle(option.id),
-                  borderRadius: BorderRadius.circular(AppRadius.md),
+                  borderRadius: BorderRadius.circular(AppRadius.pill),
                   child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.md),
+                    padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.md),
                     decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(AppRadius.md),
+                      borderRadius: BorderRadius.circular(AppRadius.pill),
                       border: Border.all(color: selected ? AppColors.brand : AppColors.border, width: selected ? 1.5 : 1),
                     ),
                     child: Row(
                       children: [
-                        Icon(
-                          selected
-                              ? (isSingleSelect ? Icons.radio_button_checked_rounded : Icons.check_box_rounded)
-                              : (isSingleSelect ? Icons.radio_button_off_rounded : Icons.check_box_outline_blank_rounded),
-                          size: 20,
-                          color: selected ? AppColors.brand : AppColors.textMuted,
-                        ),
-                        const SizedBox(width: AppSpacing.sm),
-                        Expanded(
-                          child: Text(option.name, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-                        ),
-                        if (option.extraPrice > 0)
-                          Text(
-                            '+${formatRupiah(option.extraPrice)}',
-                            style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: AppColors.textSecondary),
+                        // Kept for multi-select groups so it's still clear
+                        // more than one option can be checked; single-select
+                        // groups (the common case, e.g. "Level Pedas") omit
+                        // it entirely to match the reference design's plain
+                        // pill-row look.
+                        if (!isSingleSelect) ...[
+                          Icon(
+                            selected ? Icons.check_box_rounded : Icons.check_box_outline_blank_rounded,
+                            size: 20,
+                            color: selected ? AppColors.brand : AppColors.textMuted,
                           ),
+                          const SizedBox(width: AppSpacing.sm),
+                        ],
+                        Expanded(
+                          child: Text(
+                            option.name,
+                            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: selected ? AppColors.brand : AppColors.textPrimary),
+                          ),
+                        ),
+                        Text(
+                          option.extraPrice > 0 ? '+${formatRupiah(option.extraPrice)}' : 'Free',
+                          style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: selected ? AppColors.brand : AppColors.textSecondary),
+                        ),
                       ],
                     ),
                   ),
@@ -236,6 +327,63 @@ class _VariantGroupSection extends StatelessWidget {
             );
           }),
         ],
+      ),
+    );
+  }
+}
+
+/// Quantity stepper for the whole line — separate row below the variant
+/// groups (per reference design), distinct in style from the smaller
+/// per-cart-item stepper in [CartDrawer].
+class _QtySelector extends StatelessWidget {
+  final int quantity;
+  final VoidCallback onDecrement;
+  final VoidCallback onIncrement;
+  const _QtySelector({required this.quantity, required this.onDecrement, required this.onIncrement});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        _CircleStepperButton(icon: Icons.remove_rounded, onTap: quantity > 1 ? onDecrement : null, filled: false),
+        Expanded(
+          child: Container(
+            margin: const EdgeInsets.symmetric(horizontal: AppSpacing.sm),
+            padding: const EdgeInsets.symmetric(vertical: AppSpacing.sm),
+            decoration: BoxDecoration(
+              color: AppColors.surface,
+              borderRadius: BorderRadius.circular(AppRadius.pill),
+              border: Border.all(color: AppColors.border),
+            ),
+            child: Text('$quantity', textAlign: TextAlign.center, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
+          ),
+        ),
+        _CircleStepperButton(icon: Icons.add_rounded, onTap: onIncrement, filled: true),
+      ],
+    );
+  }
+}
+
+class _CircleStepperButton extends StatelessWidget {
+  final IconData icon;
+  final VoidCallback? onTap;
+  final bool filled;
+  const _CircleStepperButton({required this.icon, required this.onTap, required this.filled});
+
+  @override
+  Widget build(BuildContext context) {
+    final isEnabled = onTap != null;
+    return Material(
+      color: filled ? AppColors.textPrimary : AppColors.background,
+      shape: const CircleBorder(),
+      child: InkWell(
+        onTap: onTap,
+        customBorder: const CircleBorder(),
+        child: SizedBox(
+          width: 40,
+          height: 40,
+          child: Icon(icon, size: 18, color: filled ? Colors.white : (isEnabled ? AppColors.textPrimary : AppColors.textMuted)),
+        ),
       ),
     );
   }

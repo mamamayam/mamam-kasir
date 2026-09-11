@@ -108,98 +108,116 @@ class _PaymentModalState extends ConsumerState<PaymentModal> {
             ? remaining <= 0 && paymentState.splitPayments.isNotEmpty
             : paidSoFar >= totals.roundedTotal;
 
+    // Full-height, matching CartDrawer — still a modal layer (not a page
+    // route), just sized to read like the reference design's Checkout
+    // screen instead of a half-screen sheet.
     return DraggableScrollableSheet(
-      initialChildSize: 0.85,
-      minChildSize: 0.5,
-      maxChildSize: 0.95,
+      initialChildSize: 1,
+      minChildSize: 0.9,
+      maxChildSize: 1,
       builder: (context, scrollController) {
         return Container(
-          decoration: const BoxDecoration(
-            color: AppColors.background,
-            borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
-          ),
-          child: Column(
-            children: [
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: AppSpacing.sm),
-                decoration: const BoxDecoration(
-                  color: AppColors.surface,
-                  borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
-                  border: Border(bottom: BorderSide(color: AppColors.border)),
-                ),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    IconButton(
-                      onPressed: () {
-                        paymentController.close();
-                        Navigator.of(context).pop();
-                      },
-                      icon: const Icon(Icons.close_rounded, color: AppColors.textPrimary),
-                    ),
-                    const Text('Pembayaran', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
-                    const SizedBox(width: 48),
-                  ],
-                ),
-              ),
-              Expanded(
-                child: ListView(
-                  controller: scrollController,
-                  padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.lg, AppSpacing.xl, 120),
-                  children: [
-                    _TotalDueCard(total: totals.roundedTotal),
-                    const SizedBox(height: AppSpacing.xl),
-                    if (isOjol)
-                      _OjolSection(paymentState: paymentState, controller: paymentController)
-                    else ...[
-                      _SplitModeToggle(paymentState: paymentState, controller: paymentController),
-                      const SizedBox(height: AppSpacing.lg),
-                      if (paymentState.isSplitMode)
-                        _SplitPaymentSection(
-                          paymentState: paymentState,
-                          controller: paymentController,
-                          remaining: remaining,
-                        )
-                      else
-                        _SinglePaymentSection(
-                          paymentState: paymentState,
-                          controller: paymentController,
-                          total: totals.roundedTotal,
+          decoration: const BoxDecoration(color: AppColors.background),
+          child: SafeArea(
+            bottom: false,
+            child: Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
+                  child: SizedBox(
+                    height: 44,
+                    child: Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        const Center(
+                          child: Text('Pembayaran', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
                         ),
-                      const SizedBox(height: AppSpacing.lg),
-                      if (change > 0) _ChangeCard(amount: change),
-                    ],
-                  ],
-                ),
-              ),
-              Container(
-                padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.md, AppSpacing.xl, AppSpacing.xl),
-                decoration: BoxDecoration(
-                  color: AppColors.surface,
-                  border: const Border(top: BorderSide(color: AppColors.border)),
-                  boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 16, offset: const Offset(0, -4))],
-                ),
-                child: SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton(
-                    onPressed: (!canConfirm || _isSaving)
-                        ? null
-                        : () => _finalizePayment(cartState: cartState, totals: totals, paymentState: paymentState),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: AppColors.brand,
-                      foregroundColor: Colors.white,
-                      disabledBackgroundColor: AppColors.border,
-                      padding: const EdgeInsets.symmetric(vertical: 15),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
-                      elevation: 0,
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: Material(
+                            color: AppColors.surface,
+                            shape: const CircleBorder(),
+                            child: InkWell(
+                              onTap: () {
+                                paymentController.close();
+                                Navigator.of(context).pop();
+                              },
+                              customBorder: const CircleBorder(),
+                              child: Container(
+                                width: 44,
+                                height: 44,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 10, offset: const Offset(0, 2))],
+                                ),
+                                child: const Icon(Icons.close_rounded, size: 22, color: AppColors.textPrimary),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
-                    child: _isSaving
-                        ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2.4, color: Colors.white))
-                        : const Text('Konfirmasi Pembayaran', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
                   ),
                 ),
-              ),
-            ],
+                Expanded(
+                  child: ListView(
+                    controller: scrollController,
+                    padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.lg, AppSpacing.xl, 120),
+                    children: [
+                      _TotalDueCard(total: totals.roundedTotal),
+                      const SizedBox(height: AppSpacing.xl),
+                      if (isOjol)
+                        _OjolSection(paymentState: paymentState, controller: paymentController)
+                      else ...[
+                        _SplitModeToggle(paymentState: paymentState, controller: paymentController),
+                        const SizedBox(height: AppSpacing.lg),
+                        if (paymentState.isSplitMode)
+                          _SplitPaymentSection(
+                            paymentState: paymentState,
+                            controller: paymentController,
+                            remaining: remaining,
+                          )
+                        else
+                          _SinglePaymentSection(
+                            paymentState: paymentState,
+                            controller: paymentController,
+                            total: totals.roundedTotal,
+                          ),
+                        const SizedBox(height: AppSpacing.lg),
+                        if (change > 0) _ChangeCard(amount: change),
+                      ],
+                    ],
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.md, AppSpacing.xl, AppSpacing.xl),
+                  decoration: BoxDecoration(
+                    color: AppColors.surface,
+                    border: const Border(top: BorderSide(color: AppColors.border)),
+                    boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 16, offset: const Offset(0, -4))],
+                  ),
+                  child: SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      onPressed: (!canConfirm || _isSaving)
+                          ? null
+                          : () => _finalizePayment(cartState: cartState, totals: totals, paymentState: paymentState),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppColors.brand,
+                        foregroundColor: Colors.white,
+                        disabledBackgroundColor: AppColors.border,
+                        padding: const EdgeInsets.symmetric(vertical: 15),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
+                        elevation: 0,
+                      ),
+                      child: _isSaving
+                          ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2.4, color: Colors.white))
+                          : const Text('Konfirmasi Pembayaran', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
         );
       },
@@ -232,6 +250,11 @@ class _TotalDueCard extends StatelessWidget {
   }
 }
 
+/// Payment method picker — full-width rows with a leading icon and
+/// trailing chevron, matching the reference design's method-list sheet,
+/// rather than the previous 3-up button row. Tapping a row still just
+/// calls [onChanged] immediately (no separate confirm step, since there's
+/// nothing further to configure per method today).
 class _MethodSelector extends StatelessWidget {
   final PaymentMethod selected;
   final ValueChanged<PaymentMethod> onChanged;
@@ -239,34 +262,80 @@ class _MethodSelector extends StatelessWidget {
 
   static const _methods = [PaymentMethod.tunai, PaymentMethod.qris, PaymentMethod.transfer];
 
+  static IconData _iconFor(PaymentMethod m) {
+    switch (m) {
+      case PaymentMethod.tunai:
+        return Icons.payments_outlined;
+      case PaymentMethod.qris:
+        return Icons.qr_code_rounded;
+      case PaymentMethod.transfer:
+        return Icons.account_balance_outlined;
+      case PaymentMethod.ojol:
+        return Icons.moped_rounded; // unused here (Ojol has its own section) but keeps the switch exhaustive
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Row(
-      children: _methods.map((m) {
-        final isSelected = selected == m;
-        return Expanded(
-          child: Padding(
-            padding: const EdgeInsets.only(right: AppSpacing.sm),
+    return Column(
+      children: [
+        // Visual-only per reference design — not wired to any action yet.
+        Padding(
+          padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.md),
+            decoration: BoxDecoration(
+              color: AppColors.background,
+              borderRadius: BorderRadius.circular(AppRadius.md),
+              border: Border.all(color: AppColors.border),
+            ),
+            child: Row(
+              children: const [
+                Icon(Icons.add_circle_outline_rounded, size: 20, color: AppColors.textSecondary),
+                SizedBox(width: AppSpacing.sm),
+                Expanded(
+                  child: Text(
+                    'Tambah metode pembayaran baru / hapus metode pembayaran',
+                    style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: AppColors.textSecondary),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        ..._methods.map((m) {
+          final isSelected = selected == m;
+          return Padding(
+            padding: const EdgeInsets.only(bottom: AppSpacing.sm),
             child: InkWell(
               onTap: () => onChanged(m),
               borderRadius: BorderRadius.circular(AppRadius.md),
               child: Container(
-                padding: const EdgeInsets.symmetric(vertical: 12),
+                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.md),
                 decoration: BoxDecoration(
-                  color: isSelected ? AppColors.brand : AppColors.surface,
+                  color: AppColors.surface,
                   borderRadius: BorderRadius.circular(AppRadius.md),
-                  border: Border.all(color: isSelected ? AppColors.brand : AppColors.border),
+                  border: Border.all(color: isSelected ? AppColors.brand : AppColors.border, width: isSelected ? 1.5 : 1),
                 ),
-                child: Text(
-                  m.label,
-                  textAlign: TextAlign.center,
-                  style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: isSelected ? Colors.white : AppColors.textPrimary),
+                child: Row(
+                  children: [
+                    Icon(_iconFor(m), size: 20, color: isSelected ? AppColors.brand : AppColors.textSecondary),
+                    const SizedBox(width: AppSpacing.sm),
+                    Expanded(
+                      child: Text(m.label, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+                    ),
+                    Icon(
+                      isSelected ? Icons.radio_button_checked_rounded : Icons.chevron_right_rounded,
+                      size: isSelected ? 20 : 22,
+                      color: isSelected ? AppColors.brand : AppColors.textMuted,
+                    ),
+                  ],
                 ),
               ),
             ),
-          ),
-        );
-      }).toList(),
+          );
+        }),
+      ],
     );
   }
 }

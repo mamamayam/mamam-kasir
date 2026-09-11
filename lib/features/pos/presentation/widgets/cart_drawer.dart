@@ -28,84 +28,147 @@ class CartDrawer extends ConsumerWidget {
     final totals = CheckoutCalculator.compute(cartState, settings);
     final isOjol = cartState.orderType == OrderType.ojol;
 
+    // Full-height sheet: still a modal layer over the POS screen (per
+    // product direction — cart is "on top of", not a separate page), but
+    // sized to (almost) the whole screen so it reads like the Checkout
+    // page in the reference design rather than a half-screen drawer.
     return DraggableScrollableSheet(
-      initialChildSize: 0.9,
-      minChildSize: 0.5,
-      maxChildSize: 0.95,
+      initialChildSize: 1,
+      minChildSize: 0.9,
+      maxChildSize: 1,
       builder: (context, scrollController) {
         return Container(
-          decoration: const BoxDecoration(
-            color: AppColors.background,
-            borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
-          ),
-          child: Column(
-            children: [
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: AppSpacing.sm),
-                decoration: const BoxDecoration(
-                  color: AppColors.surface,
-                  borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
-                  border: Border(bottom: BorderSide(color: AppColors.border)),
-                ),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    IconButton(
-                      onPressed: () => Navigator.of(context).pop(),
-                      icon: const Icon(Icons.close_rounded, color: AppColors.textPrimary),
+          decoration: const BoxDecoration(color: AppColors.background),
+          child: SafeArea(
+            bottom: false,
+            child: Column(
+              children: [
+                const _CheckoutHeader(),
+                if (cartState.cart.isEmpty)
+                  const Expanded(
+                    child: Center(
+                      child: Text('Keranjang kosong', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.textMuted)),
                     ),
-                    const Text('Keranjang', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
-                    const SizedBox(width: 48),
-                  ],
-                ),
-              ),
-              if (cartState.cart.isEmpty)
-                const Expanded(
-                  child: Center(
-                    child: Text('Keranjang kosong', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.textMuted)),
-                  ),
-                )
-              else
-                Expanded(
-                  child: ListView(
-                    controller: scrollController,
-                    padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.lg, AppSpacing.lg, AppSpacing.xxl),
-                    children: [
-                      _CustomerSection(cartState: cartState),
-                      const SizedBox(height: AppSpacing.lg),
-                      _OrderTypeSection(cartState: cartState, controller: cartController),
-                      if (cartState.orderType == OrderType.delivery) ...[
+                  )
+                else
+                  Expanded(
+                    child: ListView(
+                      controller: scrollController,
+                      padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.lg, AppSpacing.lg, AppSpacing.xxl),
+                      children: [
+                        _CustomerSection(cartState: cartState),
                         const SizedBox(height: AppSpacing.lg),
-                        _DeliveryFeeField(cartState: cartState, controller: cartController),
-                      ],
-                      const SizedBox(height: AppSpacing.lg),
-                      _CartItemsList(items: cartState.cart, controller: cartController),
-                      if (!isOjol) ...[
+                        _OrderTypeSection(cartState: cartState, controller: cartController),
+                        if (cartState.orderType == OrderType.delivery) ...[
+                          const SizedBox(height: AppSpacing.lg),
+                          _DeliveryFeeField(cartState: cartState, controller: cartController),
+                        ],
                         const SizedBox(height: AppSpacing.lg),
-                        _VoucherAndDiscountSection(cartState: cartState, controller: cartController),
+                        _CartItemsList(items: cartState.cart, controller: cartController),
+                        const SizedBox(height: AppSpacing.lg),
+                        const _OpenBillToggle(), // visual-only for now, not wired to state
+                        if (!isOjol) ...[
+                          const SizedBox(height: AppSpacing.lg),
+                          const _PromoRow(), // visual-only shortcut row; existing voucher/discount section below still does the real work
+                          const SizedBox(height: AppSpacing.lg),
+                          _VoucherAndDiscountSection(cartState: cartState, controller: cartController),
+                        ],
+                        const SizedBox(height: AppSpacing.lg),
+                        _TotalsSummary(totals: totals),
                       ],
-                      const SizedBox(height: AppSpacing.lg),
-                      _TotalsSummary(totals: totals),
-                    ],
+                    ),
                   ),
+                _BottomBar(
+                  total: totals.roundedTotal,
+                  enabled: cartState.cart.isNotEmpty,
+                  onCheckout: () {
+                    Navigator.of(context).pop();
+                    showModalBottomSheet(
+                      context: context,
+                      isScrollControlled: true,
+                      backgroundColor: Colors.transparent,
+                      builder: (_) => const PaymentModal(),
+                    );
+                  },
                 ),
-              _BottomBar(
-                total: totals.roundedTotal,
-                enabled: cartState.cart.isNotEmpty,
-                onCheckout: () {
-                  Navigator.of(context).pop();
-                  showModalBottomSheet(
-                    context: context,
-                    isScrollControlled: true,
-                    backgroundColor: Colors.transparent,
-                    builder: (_) => const PaymentModal(),
-                  );
-                },
-              ),
-            ],
+              ],
+            ),
           ),
         );
       },
+    );
+  }
+}
+
+/// Checkout header — "close" (not a real back-navigation; this sheet is
+/// a layer over the POS screen, so it pops back to it) plus a centered
+/// title, matching the app's iOS-style header spacing/sizing without
+/// switching to a full page route.
+class _CheckoutHeader extends StatelessWidget {
+  const _CheckoutHeader();
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
+      child: SizedBox(
+        height: 44,
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            const Center(
+              child: Text('Checkout', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
+            ),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Material(
+                color: AppColors.surface,
+                shape: const CircleBorder(),
+                child: InkWell(
+                  onTap: () => Navigator.of(context).pop(),
+                  customBorder: const CircleBorder(),
+                  child: Container(
+                    width: 44,
+                    height: 44,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 10, offset: const Offset(0, 2))],
+                    ),
+                    child: const Icon(Icons.close_rounded, size: 22, color: AppColors.textPrimary),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Visual-only "Open Bill" toggle, per reference design. Not wired to
+/// [CartState] yet — Agung is iterating on UI first, functionality later.
+class _OpenBillToggle extends StatefulWidget {
+  const _OpenBillToggle();
+
+  @override
+  State<_OpenBillToggle> createState() => _OpenBillToggleState();
+}
+
+class _OpenBillToggleState extends State<_OpenBillToggle> {
+  bool _value = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return _SectionCard(
+      child: Row(
+        children: [
+          const Expanded(
+            child: Text('Open Bill', style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+          ),
+          Switch(value: _value, onChanged: (v) => setState(() => _value = v), activeColor: AppColors.brand),
+        ],
+      ),
     );
   }
 }
@@ -312,8 +375,10 @@ class _CartItemTile extends StatelessWidget {
       padding: const EdgeInsets.only(bottom: AppSpacing.sm),
       child: _SectionCard(
         child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.center,
           children: [
+            const _ItemThumbnail(),
+            const SizedBox(width: AppSpacing.md),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -324,18 +389,41 @@ class _CartItemTile extends StatelessWidget {
                     Text(item.variantName!, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: AppColors.textSecondary)),
                   ],
                   const SizedBox(height: 4),
-                  Text(formatRupiah(item.price), style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textMuted)),
+                  Text('${item.qty} x ${formatRupiah(item.price)}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textMuted)),
                 ],
               ),
             ),
-            _QtyStepper(
-              qty: item.qty,
-              onDecrement: () => controller.updateQty(item.cartItemId, -1),
-              onIncrement: () => controller.updateQty(item.cartItemId, 1),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(formatRupiah(item.lineTotal), style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
+                const SizedBox(height: 6),
+                _QtyStepper(
+                  qty: item.qty,
+                  onDecrement: () => controller.updateQty(item.cartItemId, -1),
+                  onIncrement: () => controller.updateQty(item.cartItemId, 1),
+                ),
+              ],
             ),
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Square thumbnail placeholder — the menu item model has no image field
+/// yet, so this shows a generic icon rather than a real product photo.
+class _ItemThumbnail extends StatelessWidget {
+  const _ItemThumbnail();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 44,
+      height: 44,
+      decoration: BoxDecoration(color: AppColors.background, borderRadius: BorderRadius.circular(AppRadius.md)),
+      child: const Icon(Icons.fastfood_rounded, size: 20, color: AppColors.textMuted),
     );
   }
 }
@@ -351,31 +439,61 @@ class _QtyStepper extends StatelessWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        _StepperButton(icon: Icons.remove_rounded, onTap: onDecrement),
+        _StepperButton(icon: Icons.remove_rounded, onTap: onDecrement, filled: false),
         SizedBox(
-          width: 28,
-          child: Text('$qty', textAlign: TextAlign.center, style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w800)),
+          width: 22,
+          child: Text('$qty', textAlign: TextAlign.center, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800)),
         ),
-        _StepperButton(icon: Icons.add_rounded, onTap: onIncrement),
+        _StepperButton(icon: Icons.add_rounded, onTap: onIncrement, filled: true),
       ],
     );
   }
 }
 
+/// Stepper button — hollow/neutral for decrement, filled brand-dark for
+/// increment, matching the reference design's asymmetric styling.
 class _StepperButton extends StatelessWidget {
   final IconData icon;
   final VoidCallback onTap;
-  const _StepperButton({required this.icon, required this.onTap});
+  final bool filled;
+  const _StepperButton({required this.icon, required this.onTap, required this.filled});
 
   @override
   Widget build(BuildContext context) {
     return Material(
-      color: AppColors.background,
+      color: filled ? AppColors.textPrimary : AppColors.background,
       shape: const CircleBorder(),
       child: InkWell(
         onTap: onTap,
         customBorder: const CircleBorder(),
-        child: SizedBox(width: 28, height: 28, child: Icon(icon, size: 15, color: AppColors.textPrimary)),
+        child: SizedBox(
+          width: 24,
+          height: 24,
+          child: Icon(icon, size: 14, color: filled ? Colors.white : AppColors.textPrimary),
+        ),
+      ),
+    );
+  }
+}
+
+/// Visual-only "Terapkan Promosi" shortcut row, per reference design.
+/// Not wired to any action yet — the functional voucher/discount UI
+/// below it is unchanged.
+class _PromoRow extends StatelessWidget {
+  const _PromoRow();
+
+  @override
+  Widget build(BuildContext context) {
+    return _SectionCard(
+      child: Row(
+        children: [
+          const Icon(Icons.local_offer_outlined, size: 18, color: AppColors.textSecondary),
+          const SizedBox(width: AppSpacing.sm),
+          const Expanded(
+            child: Text('Terapkan Promosi', style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+          ),
+          const Icon(Icons.chevron_right_rounded, color: AppColors.textMuted),
+        ],
       ),
     );
   }

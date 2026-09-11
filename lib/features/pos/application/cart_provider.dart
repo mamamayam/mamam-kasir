@@ -26,13 +26,13 @@ class CartController extends StateNotifier<CartState> {
 
   // --- Cart item actions ---
 
-  void addToCart(MenuItem menu, Map<String, List<String>> selectedOptions, List<VariantGroup> variantGroups) {
+  void addToCart(MenuItem menu, Map<String, List<String>> selectedOptions, List<VariantGroup> variantGroups, {int quantity = 1}) {
     final cartItemId = CartItemBuilder.buildCartItemId(menu.id, selectedOptions);
     final existingIndex = state.cart.indexWhere((i) => i.cartItemId == cartItemId);
 
     if (existingIndex != -1) {
       final updated = [...state.cart];
-      updated[existingIndex] = updated[existingIndex].copyWith(qty: updated[existingIndex].qty + 1);
+      updated[existingIndex] = updated[existingIndex].copyWith(qty: updated[existingIndex].qty + quantity);
       state = state.copyWith(cart: updated);
       return;
     }
@@ -41,7 +41,7 @@ class CartController extends StateNotifier<CartState> {
       menu: menu,
       selectedOptions: selectedOptions,
       variantGroups: variantGroups,
-      existingQty: 0,
+      existingQty: quantity - 1,
     );
     state = state.copyWith(cart: [...state.cart, newItem]);
   }

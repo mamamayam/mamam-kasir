@@ -86,38 +86,71 @@ class _MenuManagementHeaderState extends State<MenuManagementHeader> {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(AppSpacing.sm, AppSpacing.sm, AppSpacing.sm, AppSpacing.sm),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          IconButton(
-            onPressed: widget.onBack,
-            icon: const Icon(Icons.arrow_back_rounded, color: AppColors.textPrimary),
-          ),
-          GestureDetector(
-            key: _dropdownKey,
-            onTap: _toggleDropdown,
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  widget.currentTab == MenuManagementTab.menu ? 'Menu' : 'Varian',
-                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
+      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
+      child: SizedBox(
+        height: 44,
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            Center(
+              child: GestureDetector(
+                key: _dropdownKey,
+                onTap: _toggleDropdown,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      widget.currentTab == MenuManagementTab.menu ? 'Menu' : 'Varian',
+                      style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
+                    ),
+                    const SizedBox(width: 4),
+                    AnimatedRotation(
+                      turns: _isOpen ? 0.5 : 0,
+                      duration: const Duration(milliseconds: 180),
+                      child: const Icon(Icons.keyboard_arrow_down_rounded, size: 20, color: AppColors.textPrimary),
+                    ),
+                  ],
                 ),
-                const SizedBox(width: 4),
-                AnimatedRotation(
-                  turns: _isOpen ? 0.5 : 0,
-                  duration: const Duration(milliseconds: 180),
-                  child: const Icon(Icons.keyboard_arrow_down_rounded, size: 20, color: AppColors.textPrimary),
-                ),
-              ],
+              ),
             ),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: _CircleIconButton(icon: Icons.chevron_left_rounded, onTap: widget.onBack),
+            ),
+            Align(
+              alignment: Alignment.centerRight,
+              child: _CircleIconButton(icon: Icons.add_rounded, onTap: widget.onAdd),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _CircleIconButton extends StatelessWidget {
+  final IconData icon;
+  final VoidCallback? onTap;
+  const _CircleIconButton({required this.icon, this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: AppColors.surface,
+      shape: const CircleBorder(),
+      elevation: 0,
+      child: InkWell(
+        onTap: onTap,
+        customBorder: const CircleBorder(),
+        child: Container(
+          width: 44,
+          height: 44,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 10, offset: const Offset(0, 2))],
           ),
-          IconButton(
-            onPressed: widget.onAdd,
-            icon: const Icon(Icons.add_rounded, size: 26, color: AppColors.textPrimary),
-          ),
-        ],
+          child: Icon(icon, size: 24, color: AppColors.textPrimary),
+        ),
       ),
     );
   }

@@ -1,0 +1,1399 @@
+diff --git a/lib/core/widgets/ios_page_header.dart b/lib/core/widgets/ios_page_header.dart
+new file mode 100644
+index 0000000..186511a
+--- /dev/null
++++ b/lib/core/widgets/ios_page_header.dart
+@@ -0,0 +1,99 @@
++import 'package:flutter/material.dart';
++
++import '../theme/app_colors.dart';
++import '../theme/app_spacing.dart';
++
++/// iOS-style page header: a floating circular back button, a centered
++/// title, and an optional floating circular action button on the right
++/// (e.g. "..." menu, add, or a dropdown trigger). No bottom border/bar —
++/// the header sits directly on [AppColors.background].
++///
++/// Used by full-page screens reached via [Navigator.push] (Riwayat,
++/// transaction detail, Menu Management, and the placeholder screens for
++/// swipe-up grid tiles like Laporan). Bottom sheets / modals (Checkout,
++/// variant picker, etc.) keep their own close-icon header and are not
++/// affected by this widget.
++class IosPageHeader extends StatelessWidget implements PreferredSizeWidget {
++  /// The title widget, typically a [Text]. Kept as a widget (rather than
++  /// a plain string) so callers needing a tappable title with a dropdown
++  /// chevron (e.g. Menu Management) can still center it the same way.
++  final Widget title;
++  final VoidCallback? onBack;
++
++  /// Icon shown in the right-side circular button. Null hides the button
++  /// entirely, letting the title center against the back button alone.
++  final IconData? trailingIcon;
++  final VoidCallback? onTrailingTap;
++
++  const IosPageHeader({
++    super.key,
++    required this.title,
++    this.onBack,
++    this.trailingIcon,
++    this.onTrailingTap,
++  });
++
++  @override
++  Size get preferredSize => const Size.fromHeight(64);
++
++  @override
++  Widget build(BuildContext context) {
++    return Padding(
++      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
++      child: SizedBox(
++        height: 44,
++        child: Stack(
++          alignment: Alignment.center,
++          children: [
++            Center(
++              child: DefaultTextStyle.merge(
++                style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
++                child: title,
++              ),
++            ),
++            Align(
++              alignment: Alignment.centerLeft,
++              child: _CircleIconButton(
++                icon: Icons.chevron_left_rounded,
++                onTap: onBack ?? () => Navigator.of(context).pop(),
++              ),
++            ),
++            if (trailingIcon != null)
++              Align(
++                alignment: Alignment.centerRight,
++                child: _CircleIconButton(icon: trailingIcon!, onTap: onTrailingTap),
++              ),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++class _CircleIconButton extends StatelessWidget {
++  final IconData icon;
++  final VoidCallback? onTap;
++  const _CircleIconButton({required this.icon, this.onTap});
++
++  @override
++  Widget build(BuildContext context) {
++    return Material(
++      color: AppColors.surface,
++      shape: const CircleBorder(),
++      elevation: 0,
++      child: InkWell(
++        onTap: onTap,
++        customBorder: const CircleBorder(),
++        child: Container(
++          width: 44,
++          height: 44,
++          decoration: BoxDecoration(
++            shape: BoxShape.circle,
++            boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 10, offset: const Offset(0, 2))],
++          ),
++          child: Icon(icon, size: 24, color: AppColors.textPrimary),
++        ),
++      ),
++    );
++  }
++}
+diff --git a/lib/core/widgets/placeholder_screen.dart b/lib/core/widgets/placeholder_screen.dart
+index 8b28e1e..9ed8867 100644
+--- a/lib/core/widgets/placeholder_screen.dart
++++ b/lib/core/widgets/placeholder_screen.dart
+@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
+ 
+ import '../theme/app_colors.dart';
+ import '../theme/app_spacing.dart';
++import 'ios_page_header.dart';
+ 
+ /// Generic placeholder screen for any feature not yet built out.
+ ///
+@@ -32,17 +33,7 @@ class PlaceholderScreen extends StatelessWidget {
+       body: SafeArea(
+         child: Column(
+           children: [
+-            Padding(
+-              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: AppSpacing.sm),
+-              child: Row(
+-                children: [
+-                  IconButton(
+-                    onPressed: () => Navigator.of(context).pop(),
+-                    icon: const Icon(Icons.arrow_back_rounded, color: AppColors.textPrimary),
+-                  ),
+-                ],
+-              ),
+-            ),
++            IosPageHeader(title: Text(title)),
+             Expanded(
+               child: Center(
+                 child: Column(
+diff --git a/lib/features/history/presentation/history_screen.dart b/lib/features/history/presentation/history_screen.dart
+index 30d1781..0e8710f 100644
+--- a/lib/features/history/presentation/history_screen.dart
++++ b/lib/features/history/presentation/history_screen.dart
+@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ import '../../../core/navigation/app_nav.dart';
+ import '../../../core/theme/app_colors.dart';
+ import '../../../core/theme/app_spacing.dart';
++import '../../../core/widgets/ios_page_header.dart';
+ import '../../pos/domain/order_models.dart';
+ import '../application/history_provider.dart';
+ import '../domain/history_models.dart';
+@@ -59,7 +60,7 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
+       body: SafeArea(
+         child: Column(
+           children: [
+-            const _Header(),
++            const IosPageHeader(title: Text('Riwayat')),
+             Padding(
+               padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
+               child: Row(
+@@ -143,26 +144,6 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
+   }
+ }
+ 
+-class _Header extends StatelessWidget {
+-  const _Header();
+-
+-  @override
+-  Widget build(BuildContext context) {
+-    return Container(
+-      padding: const EdgeInsets.fromLTRB(AppSpacing.sm, AppSpacing.sm, AppSpacing.lg, AppSpacing.sm),
+-      decoration: const BoxDecoration(color: AppColors.background, border: Border(bottom: BorderSide(color: AppColors.border))),
+-      child: Row(
+-        children: [
+-          Builder(
+-            builder: (context) => IconButton(onPressed: () => Navigator.of(context).pop(), icon: const Icon(Icons.arrow_back_rounded, color: AppColors.textPrimary)),
+-          ),
+-          const Text('Riwayat', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
+-        ],
+-      ),
+-    );
+-  }
+-}
+-
+ class _OrderTypeFilterRow extends StatelessWidget {
+   final OrderType? selected;
+   final ValueChanged<OrderType?> onChanged;
+diff --git a/lib/features/history/presentation/transaction_detail_screen.dart b/lib/features/history/presentation/transaction_detail_screen.dart
+index 102c93f..e8f7149 100644
+--- a/lib/features/history/presentation/transaction_detail_screen.dart
++++ b/lib/features/history/presentation/transaction_detail_screen.dart
+@@ -5,6 +5,7 @@ import 'package:intl/intl.dart';
+ import '../../../core/theme/app_colors.dart';
+ import '../../../core/theme/app_spacing.dart';
+ import '../../../core/utils/currency.dart';
++import '../../../core/widgets/ios_page_header.dart';
+ import '../../pos/domain/order_models.dart';
+ import '../../pos/domain/transaction.dart';
+ import '../application/history_provider.dart';
+@@ -70,16 +71,7 @@ class TransactionDetailScreen extends ConsumerWidget {
+       body: SafeArea(
+         child: Column(
+           children: [
+-            Container(
+-              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: AppSpacing.sm),
+-              decoration: const BoxDecoration(color: AppColors.background, border: Border(bottom: BorderSide(color: AppColors.border))),
+-              child: Row(
+-                children: [
+-                  IconButton(onPressed: () => Navigator.of(context).pop(), icon: const Icon(Icons.arrow_back_rounded, color: AppColors.textPrimary)),
+-                  Text(transaction.displayNumber, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
+-                ],
+-              ),
+-            ),
++            IosPageHeader(title: Text(transaction.displayNumber)),
+             Expanded(
+               child: ListView(
+                 padding: const EdgeInsets.all(AppSpacing.lg),
+diff --git a/lib/features/menu_management/presentation/widgets/menu_management_header.dart b/lib/features/menu_management/presentation/widgets/menu_management_header.dart
+index 130defd..2714fd2 100644
+--- a/lib/features/menu_management/presentation/widgets/menu_management_header.dart
++++ b/lib/features/menu_management/presentation/widgets/menu_management_header.dart
+@@ -86,38 +86,71 @@ class _MenuManagementHeaderState extends State<MenuManagementHeader> {
+   @override
+   Widget build(BuildContext context) {
+     return Padding(
+-      padding: const EdgeInsets.fromLTRB(AppSpacing.sm, AppSpacing.sm, AppSpacing.sm, AppSpacing.sm),
+-      child: Row(
+-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+-        children: [
+-          IconButton(
+-            onPressed: widget.onBack,
+-            icon: const Icon(Icons.arrow_back_rounded, color: AppColors.textPrimary),
+-          ),
+-          GestureDetector(
+-            key: _dropdownKey,
+-            onTap: _toggleDropdown,
+-            child: Row(
+-              mainAxisSize: MainAxisSize.min,
+-              children: [
+-                Text(
+-                  widget.currentTab == MenuManagementTab.menu ? 'Menu' : 'Varian',
+-                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
+-                ),
+-                const SizedBox(width: 4),
+-                AnimatedRotation(
+-                  turns: _isOpen ? 0.5 : 0,
+-                  duration: const Duration(milliseconds: 180),
+-                  child: const Icon(Icons.keyboard_arrow_down_rounded, size: 20, color: AppColors.textPrimary),
++      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
++      child: SizedBox(
++        height: 44,
++        child: Stack(
++          alignment: Alignment.center,
++          children: [
++            Center(
++              child: GestureDetector(
++                key: _dropdownKey,
++                onTap: _toggleDropdown,
++                child: Row(
++                  mainAxisSize: MainAxisSize.min,
++                  children: [
++                    Text(
++                      widget.currentTab == MenuManagementTab.menu ? 'Menu' : 'Varian',
++                      style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
++                    ),
++                    const SizedBox(width: 4),
++                    AnimatedRotation(
++                      turns: _isOpen ? 0.5 : 0,
++                      duration: const Duration(milliseconds: 180),
++                      child: const Icon(Icons.keyboard_arrow_down_rounded, size: 20, color: AppColors.textPrimary),
++                    ),
++                  ],
+                 ),
+-              ],
++              ),
+             ),
++            Align(
++              alignment: Alignment.centerLeft,
++              child: _CircleIconButton(icon: Icons.chevron_left_rounded, onTap: widget.onBack),
++            ),
++            Align(
++              alignment: Alignment.centerRight,
++              child: _CircleIconButton(icon: Icons.add_rounded, onTap: widget.onAdd),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++class _CircleIconButton extends StatelessWidget {
++  final IconData icon;
++  final VoidCallback? onTap;
++  const _CircleIconButton({required this.icon, this.onTap});
++
++  @override
++  Widget build(BuildContext context) {
++    return Material(
++      color: AppColors.surface,
++      shape: const CircleBorder(),
++      elevation: 0,
++      child: InkWell(
++        onTap: onTap,
++        customBorder: const CircleBorder(),
++        child: Container(
++          width: 44,
++          height: 44,
++          decoration: BoxDecoration(
++            shape: BoxShape.circle,
++            boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 10, offset: const Offset(0, 2))],
+           ),
+-          IconButton(
+-            onPressed: widget.onAdd,
+-            icon: const Icon(Icons.add_rounded, size: 26, color: AppColors.textPrimary),
+-          ),
+-        ],
++          child: Icon(icon, size: 24, color: AppColors.textPrimary),
++        ),
+       ),
+     );
+   }
+diff --git a/lib/features/pos/application/cart_provider.dart b/lib/features/pos/application/cart_provider.dart
+index 52b6b7a..b72027d 100644
+--- a/lib/features/pos/application/cart_provider.dart
++++ b/lib/features/pos/application/cart_provider.dart
+@@ -26,13 +26,13 @@ class CartController extends StateNotifier<CartState> {
+ 
+   // --- Cart item actions ---
+ 
+-  void addToCart(MenuItem menu, Map<String, List<String>> selectedOptions, List<VariantGroup> variantGroups) {
++  void addToCart(MenuItem menu, Map<String, List<String>> selectedOptions, List<VariantGroup> variantGroups, {int quantity = 1}) {
+     final cartItemId = CartItemBuilder.buildCartItemId(menu.id, selectedOptions);
+     final existingIndex = state.cart.indexWhere((i) => i.cartItemId == cartItemId);
+ 
+     if (existingIndex != -1) {
+       final updated = [...state.cart];
+-      updated[existingIndex] = updated[existingIndex].copyWith(qty: updated[existingIndex].qty + 1);
++      updated[existingIndex] = updated[existingIndex].copyWith(qty: updated[existingIndex].qty + quantity);
+       state = state.copyWith(cart: updated);
+       return;
+     }
+@@ -41,7 +41,7 @@ class CartController extends StateNotifier<CartState> {
+       menu: menu,
+       selectedOptions: selectedOptions,
+       variantGroups: variantGroups,
+-      existingQty: 0,
++      existingQty: quantity - 1,
+     );
+     state = state.copyWith(cart: [...state.cart, newItem]);
+   }
+diff --git a/lib/features/pos/presentation/pos_screen.dart b/lib/features/pos/presentation/pos_screen.dart
+index 595368f..29488b8 100644
+--- a/lib/features/pos/presentation/pos_screen.dart
++++ b/lib/features/pos/presentation/pos_screen.dart
+@@ -39,7 +39,7 @@ class _PosScreenState extends ConsumerState<PosScreen> {
+       return;
+     }
+ 
+-    final selected = await showModalBottomSheet<Map<String, List<String>>>(
++    final selected = await showModalBottomSheet<VariantSelectionResult>(
+       context: context,
+       isScrollControlled: true,
+       backgroundColor: Colors.transparent,
+@@ -47,7 +47,7 @@ class _PosScreenState extends ConsumerState<PosScreen> {
+     );
+ 
+     if (selected != null) {
+-      cartController.addToCart(menu, selected, catalog.variantGroups);
++      cartController.addToCart(menu, selected.selectedOptions, catalog.variantGroups, quantity: selected.quantity);
+     }
+   }
+ 
+diff --git a/lib/features/pos/presentation/widgets/cart_drawer.dart b/lib/features/pos/presentation/widgets/cart_drawer.dart
+index 4aab3ce..ef6fe21 100644
+--- a/lib/features/pos/presentation/widgets/cart_drawer.dart
++++ b/lib/features/pos/presentation/widgets/cart_drawer.dart
+@@ -28,81 +28,71 @@ class CartDrawer extends ConsumerWidget {
+     final totals = CheckoutCalculator.compute(cartState, settings);
+     final isOjol = cartState.orderType == OrderType.ojol;
+ 
++    // Full-height sheet: still a modal layer over the POS screen (per
++    // product direction — cart is "on top of", not a separate page), but
++    // sized to (almost) the whole screen so it reads like the Checkout
++    // page in the reference design rather than a half-screen drawer.
+     return DraggableScrollableSheet(
+-      initialChildSize: 0.9,
+-      minChildSize: 0.5,
+-      maxChildSize: 0.95,
++      initialChildSize: 1,
++      minChildSize: 0.9,
++      maxChildSize: 1,
+       builder: (context, scrollController) {
+         return Container(
+-          decoration: const BoxDecoration(
+-            color: AppColors.background,
+-            borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+-          ),
+-          child: Column(
+-            children: [
+-              Container(
+-                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: AppSpacing.sm),
+-                decoration: const BoxDecoration(
+-                  color: AppColors.surface,
+-                  borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+-                  border: Border(bottom: BorderSide(color: AppColors.border)),
+-                ),
+-                child: Row(
+-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+-                  children: [
+-                    IconButton(
+-                      onPressed: () => Navigator.of(context).pop(),
+-                      icon: const Icon(Icons.close_rounded, color: AppColors.textPrimary),
++          decoration: const BoxDecoration(color: AppColors.background),
++          child: SafeArea(
++            bottom: false,
++            child: Column(
++              children: [
++                const _CheckoutHeader(),
++                if (cartState.cart.isEmpty)
++                  const Expanded(
++                    child: Center(
++                      child: Text('Keranjang kosong', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.textMuted)),
+                     ),
+-                    const Text('Keranjang', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
+-                    const SizedBox(width: 48),
+-                  ],
+-                ),
+-              ),
+-              if (cartState.cart.isEmpty)
+-                const Expanded(
+-                  child: Center(
+-                    child: Text('Keranjang kosong', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.textMuted)),
+-                  ),
+-                )
+-              else
+-                Expanded(
+-                  child: ListView(
+-                    controller: scrollController,
+-                    padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.lg, AppSpacing.lg, AppSpacing.xxl),
+-                    children: [
+-                      _CustomerSection(cartState: cartState),
+-                      const SizedBox(height: AppSpacing.lg),
+-                      _OrderTypeSection(cartState: cartState, controller: cartController),
+-                      if (cartState.orderType == OrderType.delivery) ...[
++                  )
++                else
++                  Expanded(
++                    child: ListView(
++                      controller: scrollController,
++                      padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.lg, AppSpacing.lg, AppSpacing.xxl),
++                      children: [
++                        _CustomerSection(cartState: cartState),
+                         const SizedBox(height: AppSpacing.lg),
+-                        _DeliveryFeeField(cartState: cartState, controller: cartController),
+-                      ],
+-                      const SizedBox(height: AppSpacing.lg),
+-                      _CartItemsList(items: cartState.cart, controller: cartController),
+-                      if (!isOjol) ...[
++                        _OrderTypeSection(cartState: cartState, controller: cartController),
++                        if (cartState.orderType == OrderType.delivery) ...[
++                          const SizedBox(height: AppSpacing.lg),
++                          _DeliveryFeeField(cartState: cartState, controller: cartController),
++                        ],
+                         const SizedBox(height: AppSpacing.lg),
+-                        _VoucherAndDiscountSection(cartState: cartState, controller: cartController),
++                        _CartItemsList(items: cartState.cart, controller: cartController),
++                        const SizedBox(height: AppSpacing.lg),
++                        const _OpenBillToggle(), // visual-only for now, not wired to state
++                        if (!isOjol) ...[
++                          const SizedBox(height: AppSpacing.lg),
++                          const _PromoRow(), // visual-only shortcut row; existing voucher/discount section below still does the real work
++                          const SizedBox(height: AppSpacing.lg),
++                          _VoucherAndDiscountSection(cartState: cartState, controller: cartController),
++                        ],
++                        const SizedBox(height: AppSpacing.lg),
++                        _TotalsSummary(totals: totals),
+                       ],
+-                      const SizedBox(height: AppSpacing.lg),
+-                      _TotalsSummary(totals: totals),
+-                    ],
++                    ),
+                   ),
++                _BottomBar(
++                  total: totals.roundedTotal,
++                  enabled: cartState.cart.isNotEmpty,
++                  onCheckout: () {
++                    Navigator.of(context).pop();
++                    showModalBottomSheet(
++                      context: context,
++                      isScrollControlled: true,
++                      backgroundColor: Colors.transparent,
++                      builder: (_) => const PaymentModal(),
++                    );
++                  },
+                 ),
+-              _BottomBar(
+-                total: totals.roundedTotal,
+-                enabled: cartState.cart.isNotEmpty,
+-                onCheckout: () {
+-                  Navigator.of(context).pop();
+-                  showModalBottomSheet(
+-                    context: context,
+-                    isScrollControlled: true,
+-                    backgroundColor: Colors.transparent,
+-                    builder: (_) => const PaymentModal(),
+-                  );
+-                },
+-              ),
+-            ],
++              ],
++            ),
+           ),
+         );
+       },
+@@ -110,6 +100,79 @@ class CartDrawer extends ConsumerWidget {
+   }
+ }
+ 
++/// Checkout header — "close" (not a real back-navigation; this sheet is
++/// a layer over the POS screen, so it pops back to it) plus a centered
++/// title, matching the app's iOS-style header spacing/sizing without
++/// switching to a full page route.
++class _CheckoutHeader extends StatelessWidget {
++  const _CheckoutHeader();
++
++  @override
++  Widget build(BuildContext context) {
++    return Padding(
++      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
++      child: SizedBox(
++        height: 44,
++        child: Stack(
++          alignment: Alignment.center,
++          children: [
++            const Center(
++              child: Text('Checkout', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
++            ),
++            Align(
++              alignment: Alignment.centerLeft,
++              child: Material(
++                color: AppColors.surface,
++                shape: const CircleBorder(),
++                child: InkWell(
++                  onTap: () => Navigator.of(context).pop(),
++                  customBorder: const CircleBorder(),
++                  child: Container(
++                    width: 44,
++                    height: 44,
++                    decoration: BoxDecoration(
++                      shape: BoxShape.circle,
++                      boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 10, offset: const Offset(0, 2))],
++                    ),
++                    child: const Icon(Icons.close_rounded, size: 22, color: AppColors.textPrimary),
++                  ),
++                ),
++              ),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++/// Visual-only "Open Bill" toggle, per reference design. Not wired to
++/// [CartState] yet — Agung is iterating on UI first, functionality later.
++class _OpenBillToggle extends StatefulWidget {
++  const _OpenBillToggle();
++
++  @override
++  State<_OpenBillToggle> createState() => _OpenBillToggleState();
++}
++
++class _OpenBillToggleState extends State<_OpenBillToggle> {
++  bool _value = false;
++
++  @override
++  Widget build(BuildContext context) {
++    return _SectionCard(
++      child: Row(
++        children: [
++          const Expanded(
++            child: Text('Open Bill', style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
++          ),
++          Switch(value: _value, onChanged: (v) => setState(() => _value = v), activeColor: AppColors.brand),
++        ],
++      ),
++    );
++  }
++}
++
+ class _CustomerSection extends ConsumerWidget {
+   final CartState cartState;
+   const _CustomerSection({required this.cartState});
+@@ -312,8 +375,10 @@ class _CartItemTile extends StatelessWidget {
+       padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+       child: _SectionCard(
+         child: Row(
+-          crossAxisAlignment: CrossAxisAlignment.start,
++          crossAxisAlignment: CrossAxisAlignment.center,
+           children: [
++            const _ItemThumbnail(),
++            const SizedBox(width: AppSpacing.md),
+             Expanded(
+               child: Column(
+                 crossAxisAlignment: CrossAxisAlignment.start,
+@@ -324,14 +389,21 @@ class _CartItemTile extends StatelessWidget {
+                     Text(item.variantName!, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: AppColors.textSecondary)),
+                   ],
+                   const SizedBox(height: 4),
+-                  Text(formatRupiah(item.price), style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textMuted)),
++                  Text('${item.qty} x ${formatRupiah(item.price)}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textMuted)),
+                 ],
+               ),
+             ),
+-            _QtyStepper(
+-              qty: item.qty,
+-              onDecrement: () => controller.updateQty(item.cartItemId, -1),
+-              onIncrement: () => controller.updateQty(item.cartItemId, 1),
++            Column(
++              crossAxisAlignment: CrossAxisAlignment.end,
++              children: [
++                Text(formatRupiah(item.lineTotal), style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
++                const SizedBox(height: 6),
++                _QtyStepper(
++                  qty: item.qty,
++                  onDecrement: () => controller.updateQty(item.cartItemId, -1),
++                  onIncrement: () => controller.updateQty(item.cartItemId, 1),
++                ),
++              ],
+             ),
+           ],
+         ),
+@@ -340,6 +412,22 @@ class _CartItemTile extends StatelessWidget {
+   }
+ }
+ 
++/// Square thumbnail placeholder — the menu item model has no image field
++/// yet, so this shows a generic icon rather than a real product photo.
++class _ItemThumbnail extends StatelessWidget {
++  const _ItemThumbnail();
++
++  @override
++  Widget build(BuildContext context) {
++    return Container(
++      width: 44,
++      height: 44,
++      decoration: BoxDecoration(color: AppColors.background, borderRadius: BorderRadius.circular(AppRadius.md)),
++      child: const Icon(Icons.fastfood_rounded, size: 20, color: AppColors.textMuted),
++    );
++  }
++}
++
+ class _QtyStepper extends StatelessWidget {
+   final int qty;
+   final VoidCallback onDecrement;
+@@ -351,31 +439,61 @@ class _QtyStepper extends StatelessWidget {
+     return Row(
+       mainAxisSize: MainAxisSize.min,
+       children: [
+-        _StepperButton(icon: Icons.remove_rounded, onTap: onDecrement),
++        _StepperButton(icon: Icons.remove_rounded, onTap: onDecrement, filled: false),
+         SizedBox(
+-          width: 28,
+-          child: Text('$qty', textAlign: TextAlign.center, style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w800)),
++          width: 22,
++          child: Text('$qty', textAlign: TextAlign.center, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800)),
+         ),
+-        _StepperButton(icon: Icons.add_rounded, onTap: onIncrement),
++        _StepperButton(icon: Icons.add_rounded, onTap: onIncrement, filled: true),
+       ],
+     );
+   }
+ }
+ 
++/// Stepper button — hollow/neutral for decrement, filled brand-dark for
++/// increment, matching the reference design's asymmetric styling.
+ class _StepperButton extends StatelessWidget {
+   final IconData icon;
+   final VoidCallback onTap;
+-  const _StepperButton({required this.icon, required this.onTap});
++  final bool filled;
++  const _StepperButton({required this.icon, required this.onTap, required this.filled});
+ 
+   @override
+   Widget build(BuildContext context) {
+     return Material(
+-      color: AppColors.background,
++      color: filled ? AppColors.textPrimary : AppColors.background,
+       shape: const CircleBorder(),
+       child: InkWell(
+         onTap: onTap,
+         customBorder: const CircleBorder(),
+-        child: SizedBox(width: 28, height: 28, child: Icon(icon, size: 15, color: AppColors.textPrimary)),
++        child: SizedBox(
++          width: 24,
++          height: 24,
++          child: Icon(icon, size: 14, color: filled ? Colors.white : AppColors.textPrimary),
++        ),
++      ),
++    );
++  }
++}
++
++/// Visual-only "Terapkan Promosi" shortcut row, per reference design.
++/// Not wired to any action yet — the functional voucher/discount UI
++/// below it is unchanged.
++class _PromoRow extends StatelessWidget {
++  const _PromoRow();
++
++  @override
++  Widget build(BuildContext context) {
++    return _SectionCard(
++      child: Row(
++        children: [
++          const Icon(Icons.local_offer_outlined, size: 18, color: AppColors.textSecondary),
++          const SizedBox(width: AppSpacing.sm),
++          const Expanded(
++            child: Text('Terapkan Promosi', style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
++          ),
++          const Icon(Icons.chevron_right_rounded, color: AppColors.textMuted),
++        ],
+       ),
+     );
+   }
+diff --git a/lib/features/pos/presentation/widgets/payment_modal.dart b/lib/features/pos/presentation/widgets/payment_modal.dart
+index a04b645..ae933cb 100644
+--- a/lib/features/pos/presentation/widgets/payment_modal.dart
++++ b/lib/features/pos/presentation/widgets/payment_modal.dart
+@@ -108,98 +108,116 @@ class _PaymentModalState extends ConsumerState<PaymentModal> {
+             ? remaining <= 0 && paymentState.splitPayments.isNotEmpty
+             : paidSoFar >= totals.roundedTotal;
+ 
++    // Full-height, matching CartDrawer — still a modal layer (not a page
++    // route), just sized to read like the reference design's Checkout
++    // screen instead of a half-screen sheet.
+     return DraggableScrollableSheet(
+-      initialChildSize: 0.85,
+-      minChildSize: 0.5,
+-      maxChildSize: 0.95,
++      initialChildSize: 1,
++      minChildSize: 0.9,
++      maxChildSize: 1,
+       builder: (context, scrollController) {
+         return Container(
+-          decoration: const BoxDecoration(
+-            color: AppColors.background,
+-            borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+-          ),
+-          child: Column(
+-            children: [
+-              Container(
+-                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: AppSpacing.sm),
+-                decoration: const BoxDecoration(
+-                  color: AppColors.surface,
+-                  borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+-                  border: Border(bottom: BorderSide(color: AppColors.border)),
+-                ),
+-                child: Row(
+-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+-                  children: [
+-                    IconButton(
+-                      onPressed: () {
+-                        paymentController.close();
+-                        Navigator.of(context).pop();
+-                      },
+-                      icon: const Icon(Icons.close_rounded, color: AppColors.textPrimary),
++          decoration: const BoxDecoration(color: AppColors.background),
++          child: SafeArea(
++            bottom: false,
++            child: Column(
++              children: [
++                Padding(
++                  padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
++                  child: SizedBox(
++                    height: 44,
++                    child: Stack(
++                      alignment: Alignment.center,
++                      children: [
++                        const Center(
++                          child: Text('Pembayaran', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
++                        ),
++                        Align(
++                          alignment: Alignment.centerLeft,
++                          child: Material(
++                            color: AppColors.surface,
++                            shape: const CircleBorder(),
++                            child: InkWell(
++                              onTap: () {
++                                paymentController.close();
++                                Navigator.of(context).pop();
++                              },
++                              customBorder: const CircleBorder(),
++                              child: Container(
++                                width: 44,
++                                height: 44,
++                                decoration: BoxDecoration(
++                                  shape: BoxShape.circle,
++                                  boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 10, offset: const Offset(0, 2))],
++                                ),
++                                child: const Icon(Icons.close_rounded, size: 22, color: AppColors.textPrimary),
++                              ),
++                            ),
++                          ),
++                        ),
++                      ],
+                     ),
+-                    const Text('Pembayaran', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
+-                    const SizedBox(width: 48),
+-                  ],
++                  ),
+                 ),
+-              ),
+-              Expanded(
+-                child: ListView(
+-                  controller: scrollController,
+-                  padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.lg, AppSpacing.xl, 120),
+-                  children: [
+-                    _TotalDueCard(total: totals.roundedTotal),
+-                    const SizedBox(height: AppSpacing.xl),
+-                    if (isOjol)
+-                      _OjolSection(paymentState: paymentState, controller: paymentController)
+-                    else ...[
+-                      _SplitModeToggle(paymentState: paymentState, controller: paymentController),
+-                      const SizedBox(height: AppSpacing.lg),
+-                      if (paymentState.isSplitMode)
+-                        _SplitPaymentSection(
+-                          paymentState: paymentState,
+-                          controller: paymentController,
+-                          remaining: remaining,
+-                        )
+-                      else
+-                        _SinglePaymentSection(
+-                          paymentState: paymentState,
+-                          controller: paymentController,
+-                          total: totals.roundedTotal,
+-                        ),
+-                      const SizedBox(height: AppSpacing.lg),
+-                      if (change > 0) _ChangeCard(amount: change),
++                Expanded(
++                  child: ListView(
++                    controller: scrollController,
++                    padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.lg, AppSpacing.xl, 120),
++                    children: [
++                      _TotalDueCard(total: totals.roundedTotal),
++                      const SizedBox(height: AppSpacing.xl),
++                      if (isOjol)
++                        _OjolSection(paymentState: paymentState, controller: paymentController)
++                      else ...[
++                        _SplitModeToggle(paymentState: paymentState, controller: paymentController),
++                        const SizedBox(height: AppSpacing.lg),
++                        if (paymentState.isSplitMode)
++                          _SplitPaymentSection(
++                            paymentState: paymentState,
++                            controller: paymentController,
++                            remaining: remaining,
++                          )
++                        else
++                          _SinglePaymentSection(
++                            paymentState: paymentState,
++                            controller: paymentController,
++                            total: totals.roundedTotal,
++                          ),
++                        const SizedBox(height: AppSpacing.lg),
++                        if (change > 0) _ChangeCard(amount: change),
++                      ],
+                     ],
+-                  ],
+-                ),
+-              ),
+-              Container(
+-                padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.md, AppSpacing.xl, AppSpacing.xl),
+-                decoration: BoxDecoration(
+-                  color: AppColors.surface,
+-                  border: const Border(top: BorderSide(color: AppColors.border)),
+-                  boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 16, offset: const Offset(0, -4))],
++                  ),
+                 ),
+-                child: SizedBox(
+-                  width: double.infinity,
+-                  child: ElevatedButton(
+-                    onPressed: (!canConfirm || _isSaving)
+-                        ? null
+-                        : () => _finalizePayment(cartState: cartState, totals: totals, paymentState: paymentState),
+-                    style: ElevatedButton.styleFrom(
+-                      backgroundColor: AppColors.brand,
+-                      foregroundColor: Colors.white,
+-                      disabledBackgroundColor: AppColors.border,
+-                      padding: const EdgeInsets.symmetric(vertical: 15),
+-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
+-                      elevation: 0,
++                Container(
++                  padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.md, AppSpacing.xl, AppSpacing.xl),
++                  decoration: BoxDecoration(
++                    color: AppColors.surface,
++                    border: const Border(top: BorderSide(color: AppColors.border)),
++                    boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 16, offset: const Offset(0, -4))],
++                  ),
++                  child: SizedBox(
++                    width: double.infinity,
++                    child: ElevatedButton(
++                      onPressed: (!canConfirm || _isSaving)
++                          ? null
++                          : () => _finalizePayment(cartState: cartState, totals: totals, paymentState: paymentState),
++                      style: ElevatedButton.styleFrom(
++                        backgroundColor: AppColors.brand,
++                        foregroundColor: Colors.white,
++                        disabledBackgroundColor: AppColors.border,
++                        padding: const EdgeInsets.symmetric(vertical: 15),
++                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
++                        elevation: 0,
++                      ),
++                      child: _isSaving
++                          ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2.4, color: Colors.white))
++                          : const Text('Konfirmasi Pembayaran', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
+                     ),
+-                    child: _isSaving
+-                        ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2.4, color: Colors.white))
+-                        : const Text('Konfirmasi Pembayaran', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
+                   ),
+                 ),
+-              ),
+-            ],
++              ],
++            ),
+           ),
+         );
+       },
+@@ -232,6 +250,11 @@ class _TotalDueCard extends StatelessWidget {
+   }
+ }
+ 
++/// Payment method picker — full-width rows with a leading icon and
++/// trailing chevron, matching the reference design's method-list sheet,
++/// rather than the previous 3-up button row. Tapping a row still just
++/// calls [onChanged] immediately (no separate confirm step, since there's
++/// nothing further to configure per method today).
+ class _MethodSelector extends StatelessWidget {
+   final PaymentMethod selected;
+   final ValueChanged<PaymentMethod> onChanged;
+@@ -239,34 +262,80 @@ class _MethodSelector extends StatelessWidget {
+ 
+   static const _methods = [PaymentMethod.tunai, PaymentMethod.qris, PaymentMethod.transfer];
+ 
++  static IconData _iconFor(PaymentMethod m) {
++    switch (m) {
++      case PaymentMethod.tunai:
++        return Icons.payments_outlined;
++      case PaymentMethod.qris:
++        return Icons.qr_code_rounded;
++      case PaymentMethod.transfer:
++        return Icons.account_balance_outlined;
++      case PaymentMethod.ojol:
++        return Icons.moped_rounded; // unused here (Ojol has its own section) but keeps the switch exhaustive
++    }
++  }
++
+   @override
+   Widget build(BuildContext context) {
+-    return Row(
+-      children: _methods.map((m) {
+-        final isSelected = selected == m;
+-        return Expanded(
+-          child: Padding(
+-            padding: const EdgeInsets.only(right: AppSpacing.sm),
++    return Column(
++      children: [
++        // Visual-only per reference design — not wired to any action yet.
++        Padding(
++          padding: const EdgeInsets.only(bottom: AppSpacing.sm),
++          child: Container(
++            padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.md),
++            decoration: BoxDecoration(
++              color: AppColors.background,
++              borderRadius: BorderRadius.circular(AppRadius.md),
++              border: Border.all(color: AppColors.border),
++            ),
++            child: Row(
++              children: const [
++                Icon(Icons.add_circle_outline_rounded, size: 20, color: AppColors.textSecondary),
++                SizedBox(width: AppSpacing.sm),
++                Expanded(
++                  child: Text(
++                    'Tambah metode pembayaran baru / hapus metode pembayaran',
++                    style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: AppColors.textSecondary),
++                  ),
++                ),
++              ],
++            ),
++          ),
++        ),
++        ..._methods.map((m) {
++          final isSelected = selected == m;
++          return Padding(
++            padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+             child: InkWell(
+               onTap: () => onChanged(m),
+               borderRadius: BorderRadius.circular(AppRadius.md),
+               child: Container(
+-                padding: const EdgeInsets.symmetric(vertical: 12),
++                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.md),
+                 decoration: BoxDecoration(
+-                  color: isSelected ? AppColors.brand : AppColors.surface,
++                  color: AppColors.surface,
+                   borderRadius: BorderRadius.circular(AppRadius.md),
+-                  border: Border.all(color: isSelected ? AppColors.brand : AppColors.border),
++                  border: Border.all(color: isSelected ? AppColors.brand : AppColors.border, width: isSelected ? 1.5 : 1),
+                 ),
+-                child: Text(
+-                  m.label,
+-                  textAlign: TextAlign.center,
+-                  style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: isSelected ? Colors.white : AppColors.textPrimary),
++                child: Row(
++                  children: [
++                    Icon(_iconFor(m), size: 20, color: isSelected ? AppColors.brand : AppColors.textSecondary),
++                    const SizedBox(width: AppSpacing.sm),
++                    Expanded(
++                      child: Text(m.label, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
++                    ),
++                    Icon(
++                      isSelected ? Icons.radio_button_checked_rounded : Icons.chevron_right_rounded,
++                      size: isSelected ? 20 : 22,
++                      color: isSelected ? AppColors.brand : AppColors.textMuted,
++                    ),
++                  ],
+                 ),
+               ),
+             ),
+-          ),
+-        );
+-      }).toList(),
++          );
++        }),
++      ],
+     );
+   }
+ }
+diff --git a/lib/features/pos/presentation/widgets/variant_selection_modal.dart b/lib/features/pos/presentation/widgets/variant_selection_modal.dart
+index 6a08e0f..dc9f230 100644
+--- a/lib/features/pos/presentation/widgets/variant_selection_modal.dart
++++ b/lib/features/pos/presentation/widgets/variant_selection_modal.dart
+@@ -5,10 +5,20 @@ import '../../../../core/theme/app_spacing.dart';
+ import '../../../../core/utils/currency.dart';
+ import '../../../menu_management/domain/menu_management_models.dart';
+ 
++/// Result of [VariantSelectionModal] — selected options plus the chosen
++/// quantity (set via the modal's own stepper), so a single confirm tap
++/// can add more than one unit at once.
++class VariantSelectionResult {
++  final Map<String, List<String>> selectedOptions;
++  final int quantity;
++
++  const VariantSelectionResult({required this.selectedOptions, required this.quantity});
++}
++
+ /// Shown as a modal (bottom-up) when a tapped menu item has one or more
+-/// linked variant groups. Returns the selected options map (groupId ->
+-/// list of optionIds) via [Navigator.pop], or null if dismissed without
+-/// completing a required selection.
++/// linked variant groups. Returns a [VariantSelectionResult] via
++/// [Navigator.pop], or null if dismissed without completing a required
++/// selection.
+ class VariantSelectionModal extends StatefulWidget {
+   final MenuItem menu;
+   final List<VariantGroup> allGroups;
+@@ -21,6 +31,7 @@ class VariantSelectionModal extends StatefulWidget {
+ 
+ class _VariantSelectionModalState extends State<VariantSelectionModal> {
+   final Map<String, List<String>> _selected = {};
++  int _quantity = 1;
+ 
+   List<VariantGroup> get _relevantGroups =>
+       widget.allGroups.where((g) => widget.menu.variantGroupIds.contains(g.id) && g.isActive).toList();
+@@ -43,6 +54,10 @@ class _VariantSelectionModalState extends State<VariantSelectionModal> {
+     });
+   }
+ 
++  void _incrementQty() => setState(() => _quantity++);
++
++  void _decrementQty() => setState(() => _quantity = _quantity > 1 ? _quantity - 1 : 1);
++
+   int get _extraPriceTotal {
+     var total = 0;
+     for (final group in _relevantGroups) {
+@@ -64,6 +79,7 @@ class _VariantSelectionModalState extends State<VariantSelectionModal> {
+   @override
+   Widget build(BuildContext context) {
+     final groups = _relevantGroups;
++    final unitPrice = widget.menu.price + _extraPriceTotal;
+ 
+     return DraggableScrollableSheet(
+       initialChildSize: 0.75,
+@@ -79,42 +95,32 @@ class _VariantSelectionModalState extends State<VariantSelectionModal> {
+             children: [
+               Column(
+                 children: [
+-                  Container(
+-                    padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: AppSpacing.sm),
+-                    decoration: const BoxDecoration(
+-                      color: AppColors.surface,
+-                      borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+-                      border: Border(bottom: BorderSide(color: AppColors.border)),
+-                    ),
+-                    child: Row(
+-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+-                      children: [
+-                        IconButton(
+-                          onPressed: () => Navigator.of(context).pop(),
+-                          icon: const Icon(Icons.close_rounded, color: AppColors.textPrimary),
+-                        ),
+-                        Expanded(
+-                          child: Text(
+-                            widget.menu.name,
+-                            textAlign: TextAlign.center,
+-                            maxLines: 1,
+-                            overflow: TextOverflow.ellipsis,
+-                            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
+-                          ),
+-                        ),
+-                        const SizedBox(width: 48),
+-                      ],
++                  // Drag handle, replacing the old close-icon header bar —
++                  // this sheet now leads with the product card below
++                  // instead, matching the reference design.
++                  Padding(
++                    padding: const EdgeInsets.only(top: 14, bottom: 6),
++                    child: Container(
++                      width: 56,
++                      height: 5,
++                      decoration: BoxDecoration(color: AppColors.border, borderRadius: BorderRadius.circular(AppRadius.pill)),
+                     ),
+                   ),
+                   Expanded(
+                     child: ListView(
+                       controller: scrollController,
+-                      padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.lg, AppSpacing.xl, 100),
+-                      children: groups.map((group) => _VariantGroupSection(
+-                            group: group,
+-                            selectedIds: _selected[group.id] ?? [],
+-                            onToggle: (optionId) => _toggleOption(group, optionId),
+-                          )).toList(),
++                      padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.sm, AppSpacing.xl, 100),
++                      children: [
++                        _ProductHeaderCard(menu: widget.menu),
++                        const SizedBox(height: AppSpacing.xl),
++                        ...groups.map((group) => _VariantGroupSection(
++                              group: group,
++                              selectedIds: _selected[group.id] ?? [],
++                              onToggle: (optionId) => _toggleOption(group, optionId),
++                            )),
++                        const Divider(height: AppSpacing.xxl),
++                        _QtySelector(quantity: _quantity, onDecrement: _decrementQty, onIncrement: _incrementQty),
++                      ],
+                     ),
+                   ),
+                 ],
+@@ -132,23 +138,36 @@ class _VariantSelectionModalState extends State<VariantSelectionModal> {
+                       BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 16, offset: const Offset(0, -4)),
+                     ],
+                   ),
+-                  child: SizedBox(
+-                    width: double.infinity,
+-                    child: ElevatedButton(
+-                      onPressed: _canConfirm ? () => Navigator.of(context).pop(_selected) : null,
+-                      style: ElevatedButton.styleFrom(
+-                        backgroundColor: AppColors.brand,
+-                        foregroundColor: Colors.white,
+-                        disabledBackgroundColor: AppColors.border,
+-                        padding: const EdgeInsets.symmetric(vertical: 15),
+-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
+-                        elevation: 0,
++                  child: Row(
++                    children: [
++                      Column(
++                        crossAxisAlignment: CrossAxisAlignment.start,
++                        children: [
++                          const Text('Total', style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: AppColors.textMuted)),
++                          Text(
++                            formatRupiah(unitPrice * _quantity),
++                            style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
++                          ),
++                        ],
+                       ),
+-                      child: Text(
+-                        'Tambah • ${formatRupiah(widget.menu.price + _extraPriceTotal)}',
+-                        style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800),
++                      const SizedBox(width: AppSpacing.lg),
++                      Expanded(
++                        child: ElevatedButton(
++                          onPressed: _canConfirm
++                              ? () => Navigator.of(context).pop(VariantSelectionResult(selectedOptions: _selected, quantity: _quantity))
++                              : null,
++                          style: ElevatedButton.styleFrom(
++                            backgroundColor: AppColors.brand,
++                            foregroundColor: Colors.white,
++                            disabledBackgroundColor: AppColors.border,
++                            padding: const EdgeInsets.symmetric(vertical: 15),
++                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
++                            elevation: 0,
++                          ),
++                          child: const Text('Add to Cart', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
++                        ),
+                       ),
+-                    ),
++                    ],
+                   ),
+                 ),
+               ),
+@@ -160,6 +179,71 @@ class _VariantSelectionModalState extends State<VariantSelectionModal> {
+   }
+ }
+ 
++/// Product identity card at the top of the sheet — thumbnail, name,
++/// price, and a "Stok ∞" badge. The menu model has no image or stock
++/// field (this app has no stock-tracking feature at all — see product
++/// notes), so the thumbnail is a generic icon placeholder and the stock
++/// badge is a fixed decorative "∞", not real data.
++class _ProductHeaderCard extends StatelessWidget {
++  final MenuItem menu;
++  const _ProductHeaderCard({required this.menu});
++
++  @override
++  Widget build(BuildContext context) {
++    return Row(
++      crossAxisAlignment: CrossAxisAlignment.start,
++      children: [
++        Expanded(
++          child: Container(
++            padding: const EdgeInsets.all(AppSpacing.md),
++            decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.lg)),
++            child: Row(
++              children: [
++                Container(
++                  width: 52,
++                  height: 52,
++                  decoration: BoxDecoration(color: AppColors.background, borderRadius: BorderRadius.circular(AppRadius.md)),
++                  child: const Icon(Icons.fastfood_rounded, size: 24, color: AppColors.textMuted),
++                ),
++                const SizedBox(width: AppSpacing.md),
++                Expanded(
++                  child: Column(
++                    crossAxisAlignment: CrossAxisAlignment.start,
++                    mainAxisSize: MainAxisSize.min,
++                    children: [
++                      Text(
++                        menu.name,
++                        maxLines: 1,
++                        overflow: TextOverflow.ellipsis,
++                        style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
++                      ),
++                      const SizedBox(height: 2),
++                      Text(formatRupiah(menu.price), style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: AppColors.textSecondary)),
++                    ],
++                  ),
++                ),
++              ],
++            ),
++          ),
++        ),
++        const SizedBox(width: AppSpacing.sm),
++        Container(
++          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.md),
++          decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.lg)),
++          child: const Column(
++            mainAxisSize: MainAxisSize.min,
++            children: [
++              Text('Stok', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.textMuted)),
++              SizedBox(height: 2),
++              Icon(Icons.all_inclusive_rounded, size: 18, color: AppColors.textSecondary),
++            ],
++          ),
++        ),
++      ],
++    );
++  }
++}
++
+ class _VariantGroupSection extends StatelessWidget {
+   final VariantGroup group;
+   final List<String> selectedIds;
+@@ -200,34 +284,41 @@ class _VariantGroupSection extends StatelessWidget {
+               padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+               child: Material(
+                 color: AppColors.surface,
+-                borderRadius: BorderRadius.circular(AppRadius.md),
++                borderRadius: BorderRadius.circular(AppRadius.pill),
+                 child: InkWell(
+                   onTap: () => onToggle(option.id),
+-                  borderRadius: BorderRadius.circular(AppRadius.md),
++                  borderRadius: BorderRadius.circular(AppRadius.pill),
+                   child: Container(
+-                    padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.md),
++                    padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.md),
+                     decoration: BoxDecoration(
+-                      borderRadius: BorderRadius.circular(AppRadius.md),
++                      borderRadius: BorderRadius.circular(AppRadius.pill),
+                       border: Border.all(color: selected ? AppColors.brand : AppColors.border, width: selected ? 1.5 : 1),
+                     ),
+                     child: Row(
+                       children: [
+-                        Icon(
+-                          selected
+-                              ? (isSingleSelect ? Icons.radio_button_checked_rounded : Icons.check_box_rounded)
+-                              : (isSingleSelect ? Icons.radio_button_off_rounded : Icons.check_box_outline_blank_rounded),
+-                          size: 20,
+-                          color: selected ? AppColors.brand : AppColors.textMuted,
+-                        ),
+-                        const SizedBox(width: AppSpacing.sm),
++                        // Kept for multi-select groups so it's still clear
++                        // more than one option can be checked; single-select
++                        // groups (the common case, e.g. "Level Pedas") omit
++                        // it entirely to match the reference design's plain
++                        // pill-row look.
++                        if (!isSingleSelect) ...[
++                          Icon(
++                            selected ? Icons.check_box_rounded : Icons.check_box_outline_blank_rounded,
++                            size: 20,
++                            color: selected ? AppColors.brand : AppColors.textMuted,
++                          ),
++                          const SizedBox(width: AppSpacing.sm),
++                        ],
+                         Expanded(
+-                          child: Text(option.name, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+-                        ),
+-                        if (option.extraPrice > 0)
+-                          Text(
+-                            '+${formatRupiah(option.extraPrice)}',
+-                            style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: AppColors.textSecondary),
++                          child: Text(
++                            option.name,
++                            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: selected ? AppColors.brand : AppColors.textPrimary),
+                           ),
++                        ),
++                        Text(
++                          option.extraPrice > 0 ? '+${formatRupiah(option.extraPrice)}' : 'Free',
++                          style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: selected ? AppColors.brand : AppColors.textSecondary),
++                        ),
+                       ],
+                     ),
+                   ),
+@@ -240,3 +331,60 @@ class _VariantGroupSection extends StatelessWidget {
+     );
+   }
+ }
++
++/// Quantity stepper for the whole line — separate row below the variant
++/// groups (per reference design), distinct in style from the smaller
++/// per-cart-item stepper in [CartDrawer].
++class _QtySelector extends StatelessWidget {
++  final int quantity;
++  final VoidCallback onDecrement;
++  final VoidCallback onIncrement;
++  const _QtySelector({required this.quantity, required this.onDecrement, required this.onIncrement});
++
++  @override
++  Widget build(BuildContext context) {
++    return Row(
++      children: [
++        _CircleStepperButton(icon: Icons.remove_rounded, onTap: quantity > 1 ? onDecrement : null, filled: false),
++        Expanded(
++          child: Container(
++            margin: const EdgeInsets.symmetric(horizontal: AppSpacing.sm),
++            padding: const EdgeInsets.symmetric(vertical: AppSpacing.sm),
++            decoration: BoxDecoration(
++              color: AppColors.surface,
++              borderRadius: BorderRadius.circular(AppRadius.pill),
++              border: Border.all(color: AppColors.border),
++            ),
++            child: Text('$quantity', textAlign: TextAlign.center, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
++          ),
++        ),
++        _CircleStepperButton(icon: Icons.add_rounded, onTap: onIncrement, filled: true),
++      ],
++    );
++  }
++}
++
++class _CircleStepperButton extends StatelessWidget {
++  final IconData icon;
++  final VoidCallback? onTap;
++  final bool filled;
++  const _CircleStepperButton({required this.icon, required this.onTap, required this.filled});
++
++  @override
++  Widget build(BuildContext context) {
++    final isEnabled = onTap != null;
++    return Material(
++      color: filled ? AppColors.textPrimary : AppColors.background,
++      shape: const CircleBorder(),
++      child: InkWell(
++        onTap: onTap,
++        customBorder: const CircleBorder(),
++        child: SizedBox(
++          width: 40,
++          height: 40,
++          child: Icon(icon, size: 18, color: filled ? Colors.white : (isEnabled ? AppColors.textPrimary : AppColors.textMuted)),
++        ),
++      ),
++    );
++  }
++}

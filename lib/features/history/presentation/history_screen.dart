@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/navigation/app_nav.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_spacing.dart';
+import '../../../core/widgets/ios_page_header.dart';
 import '../../pos/domain/order_models.dart';
 import '../application/history_provider.dart';
 import '../domain/history_models.dart';
@@ -59,7 +60,7 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            const _Header(),
+            const IosPageHeader(title: Text('Riwayat')),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
               child: Row(
@@ -138,26 +139,6 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
             ),
           ],
         ),
-      ),
-    );
-  }
-}
-
-class _Header extends StatelessWidget {
-  const _Header();
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(AppSpacing.sm, AppSpacing.sm, AppSpacing.lg, AppSpacing.sm),
-      decoration: const BoxDecoration(color: AppColors.background, border: Border(bottom: BorderSide(color: AppColors.border))),
-      child: Row(
-        children: [
-          Builder(
-            builder: (context) => IconButton(onPressed: () => Navigator.of(context).pop(), icon: const Icon(Icons.arrow_back_rounded, color: AppColors.textPrimary)),
-          ),
-          const Text('Riwayat', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
-        ],
       ),
     );
   }

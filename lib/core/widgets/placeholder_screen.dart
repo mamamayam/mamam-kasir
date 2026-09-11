@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../theme/app_colors.dart';
 import '../theme/app_spacing.dart';
+import 'ios_page_header.dart';
 
 /// Generic placeholder screen for any feature not yet built out.
 ///
@@ -32,17 +33,7 @@ class PlaceholderScreen extends StatelessWidget {
       body: SafeArea(
         child: Column(
           children: [
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: AppSpacing.sm),
-              child: Row(
-                children: [
-                  IconButton(
-                    onPressed: () => Navigator.of(context).pop(),
-                    icon: const Icon(Icons.arrow_back_rounded, color: AppColors.textPrimary),
-                  ),
-                ],
-              ),
-            ),
+            IosPageHeader(title: Text(title)),
             Expanded(
               child: Center(
                 child: Column(
