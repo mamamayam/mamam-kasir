@@ -184,30 +184,104 @@ class _OrderTypeSection extends StatelessWidget {
   }
 }
 
-class _DeliveryFeeField extends StatelessWidget {
+/// Preset ongkir amounts shown as quick-pick chips. `null` here
+/// represents the "Custom" option (free-form amount via text field),
+/// distinct from 0 which is a real "Gratis" (free) delivery fee.
+const List<int?> _deliveryFeePresets = [0, 3000, 4000, 5000, null];
+
+class _DeliveryFeeField extends StatefulWidget {
   final CartState cartState;
   final CartController controller;
   const _DeliveryFeeField({required this.cartState, required this.controller});
 
   @override
+  State<_DeliveryFeeField> createState() => _DeliveryFeeFieldState();
+}
+
+class _DeliveryFeeFieldState extends State<_DeliveryFeeField> {
+  late final TextEditingController _customController;
+  // Starts true whenever the current fee doesn't match any preset, so a
+  // fee restored from a draft (or set before this widget existed) still
+  // shows correctly instead of silently snapping to a preset.
+  late bool _isCustom = !_deliveryFeePresets.contains(widget.cartState.deliveryFee);
+
+  @override
+  void initState() {
+    super.initState();
+    _customController = TextEditingController(
+      text: _isCustom && widget.cartState.deliveryFee > 0 ? widget.cartState.deliveryFee.toString() : '',
+    );
+  }
+
+  @override
+  void dispose() {
+    _customController.dispose();
+    super.dispose();
+  }
+
+  void _selectPreset(int? preset) {
+    if (preset == null) {
+      // "Custom" tapped — reveal the field; don't change the fee until
+      // the user actually types an amount.
+      setState(() => _isCustom = true);
+      return;
+    }
+    setState(() => _isCustom = false);
+    _customController.clear();
+    widget.controller.setDeliveryFee(preset);
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final currentFee = widget.cartState.deliveryFee;
+
     return _SectionCard(
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Icon(Icons.moped_rounded, size: 18, color: AppColors.textSecondary),
-          const SizedBox(width: AppSpacing.sm),
-          const Text('Ongkir', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
-          const Spacer(),
-          SizedBox(
-            width: 120,
-            child: TextField(
+          Row(
+            children: [
+              const Icon(Icons.moped_rounded, size: 18, color: AppColors.textSecondary),
+              const SizedBox(width: AppSpacing.sm),
+              const Text('Ongkir', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+            ],
+          ),
+          const SizedBox(height: AppSpacing.sm),
+          Wrap(
+            spacing: AppSpacing.sm,
+            runSpacing: AppSpacing.sm,
+            children: _deliveryFeePresets.map((preset) {
+              final selected = preset == null ? _isCustom : (!_isCustom && currentFee == preset);
+              final label = preset == null ? 'Custom' : (preset == 0 ? 'Gratis' : formatRupiah(preset));
+              return ChoiceChip(
+                label: Text(label),
+                selected: selected,
+                onSelected: (_) => _selectPreset(preset),
+                selectedColor: AppColors.brand,
+                labelStyle: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: selected ? Colors.white : AppColors.textSecondary),
+                backgroundColor: AppColors.background,
+                side: BorderSide(color: selected ? AppColors.brand : AppColors.border),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.pill)),
+              );
+            }).toList(),
+          ),
+          if (_isCustom) ...[
+            const SizedBox(height: AppSpacing.sm),
+            TextField(
+              controller: _customController,
               textAlign: TextAlign.right,
               keyboardType: TextInputType.number,
+              autofocus: true,
               style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary),
-              decoration: const InputDecoration(prefixText: 'Rp ', border: InputBorder.none, isDense: true),
-              onChanged: (v) => controller.setDeliveryFee(int.tryParse(v) ?? 0),
+              decoration: InputDecoration(
+                prefixText: 'Rp ',
+                isDense: true,
+                hintText: 'Jumlah ongkir',
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.sm)),
+              ),
+              onChanged: (v) => widget.controller.setDeliveryFee(int.tryParse(v) ?? 0),
             ),
-          ),
+          ],
         ],
       ),
     );

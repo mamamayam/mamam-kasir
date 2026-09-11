@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/theme/app_spacing.dart';
 import '../../../../core/utils/currency.dart';
+import '../../../pos/domain/order_models.dart';
 import '../../../pos/domain/transaction.dart';
 
 class TransactionCard extends StatelessWidget {

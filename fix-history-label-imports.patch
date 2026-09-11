@@ -1,0 +1,48 @@
+diff --git a/lib/features/history/presentation/history_screen.dart b/lib/features/history/presentation/history_screen.dart
+index 636aa5c..30d1781 100644
+--- a/lib/features/history/presentation/history_screen.dart
++++ b/lib/features/history/presentation/history_screen.dart
+@@ -6,6 +6,7 @@ import '../../../core/theme/app_colors.dart';
+ import '../../../core/theme/app_spacing.dart';
+ import '../../pos/domain/order_models.dart';
+ import '../application/history_provider.dart';
++import '../domain/history_models.dart';
+ import 'transaction_detail_screen.dart';
+ import 'widgets/date_filter_tabs.dart';
+ import 'widgets/payment_breakdown_card.dart';
+diff --git a/lib/features/history/presentation/transaction_detail_screen.dart b/lib/features/history/presentation/transaction_detail_screen.dart
+index 5be2daf..102c93f 100644
+--- a/lib/features/history/presentation/transaction_detail_screen.dart
++++ b/lib/features/history/presentation/transaction_detail_screen.dart
+@@ -5,6 +5,7 @@ import 'package:intl/intl.dart';
+ import '../../../core/theme/app_colors.dart';
+ import '../../../core/theme/app_spacing.dart';
+ import '../../../core/utils/currency.dart';
++import '../../pos/domain/order_models.dart';
+ import '../../pos/domain/transaction.dart';
+ import '../application/history_provider.dart';
+ 
+diff --git a/lib/features/history/presentation/widgets/transaction_card.dart b/lib/features/history/presentation/widgets/transaction_card.dart
+index 39d4931..9869959 100644
+--- a/lib/features/history/presentation/widgets/transaction_card.dart
++++ b/lib/features/history/presentation/widgets/transaction_card.dart
+@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
+ import '../../../../core/theme/app_colors.dart';
+ import '../../../../core/theme/app_spacing.dart';
+ import '../../../../core/utils/currency.dart';
++import '../../../pos/domain/order_models.dart';
+ import '../../../pos/domain/transaction.dart';
+ 
+ class TransactionCard extends StatelessWidget {
+diff --git a/lib/features/pos/presentation/widgets/receipt_modal.dart b/lib/features/pos/presentation/widgets/receipt_modal.dart
+index c4bd72c..72544d7 100644
+--- a/lib/features/pos/presentation/widgets/receipt_modal.dart
++++ b/lib/features/pos/presentation/widgets/receipt_modal.dart
+@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
+ import '../../../../core/theme/app_colors.dart';
+ import '../../../../core/theme/app_spacing.dart';
+ import '../../../../core/utils/currency.dart';
++import '../../domain/order_models.dart';
+ import '../../domain/transaction.dart';
+ 
+ /// Digital receipt, shown after a successful checkout. Physical

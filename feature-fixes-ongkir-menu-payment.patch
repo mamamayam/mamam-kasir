@@ -1,0 +1,222 @@
+diff --git a/lib/core/data/app_database.dart b/lib/core/data/app_database.dart
+index a1e5e80..0ed1994 100644
+--- a/lib/core/data/app_database.dart
++++ b/lib/core/data/app_database.dart
+@@ -26,7 +26,14 @@ class AppDatabase {
+   // delete for transactions (retention/permission is UNSPECIFIED there).
+   // Still pre-release, straight recreate via onCreate rather than a real
+   // migration — same rationale as the v1->v2 bump.
+-  static const _dbVersion = 3;
++  // v4: added "Nasi Goreng Spesial" dummy menu item + "Topping Nasi
++  // Goreng" variant group to _seedDemoData. NOTE: bumping this version
++  // alone does NOT retroactively seed the new row on a device that
++  // already has the app installed — onCreate only runs when no db file
++  // exists yet, and _onUpgrade here is still a no-op. On a device with
++  // an existing install, uninstall the app (or clear its storage) first
++  // so onCreate runs fresh and the new item appears.
++  static const _dbVersion = 4;
+ 
+   // TODO(security-foundation): replace with a key generated once and
+   // stored via flutter_secure_storage, per AGENTS.md.
+@@ -236,6 +243,7 @@ class AppDatabase {
+       {'id': 'menu-4', 'category_id': 'cat-makanan-utama', 'name': 'Ayam Bakar Madu', 'price': 17000, 'unit': 'porsi'},
+       {'id': 'menu-5', 'category_id': 'cat-minuman', 'name': 'Es Teh Manis', 'price': 5000, 'unit': 'gelas'},
+       {'id': 'menu-6', 'category_id': 'cat-minuman', 'name': 'Es Jeruk', 'price': 7000, 'unit': 'gelas'},
++      {'id': 'menu-7', 'category_id': 'cat-makanan-utama', 'name': 'Nasi Goreng Spesial', 'price': 22000, 'unit': 'porsi'},
+     ];
+ 
+     for (final item in menuItems) {
+@@ -280,6 +288,17 @@ class AppDatabase {
+           {'name': 'Kremes', 'extraPrice': 3000},
+         ],
+       },
++      'vg-4': {
++        'name': 'Topping Nasi Goreng',
++        'isRequired': 1,
++        'maxSelection': 1,
++        'options': [
++          {'name': 'Telur Mata Sapi', 'extraPrice': 3000},
++          {'name': 'Telur Dadar', 'extraPrice': 3000},
++          {'name': 'Ayam Suwir', 'extraPrice': 5000},
++          {'name': 'Tanpa Topping', 'extraPrice': 0},
++        ],
++      },
+     };
+ 
+     for (final entry in variantGroups.entries) {
+@@ -312,6 +331,12 @@ class AppDatabase {
+     await db.insert('menu_item_variant_groups', {'menu_item_id': 'menu-4', 'variant_group_id': 'vg-1'});
+     await db.insert('menu_item_variant_groups', {'menu_item_id': 'menu-4', 'variant_group_id': 'vg-3'});
+ 
++    // New dummy item — required topping choice plus the shared Ekstra
++    // Topping group (multi-select), so it exercises a menu item with
++    // two variant groups at once.
++    await db.insert('menu_item_variant_groups', {'menu_item_id': 'menu-7', 'variant_group_id': 'vg-4'});
++    await db.insert('menu_item_variant_groups', {'menu_item_id': 'menu-7', 'variant_group_id': 'vg-3'});
++
+     await db.insert('customers', {
+       'id': 'cust-1',
+       'name': 'Budi Santoso',
+diff --git a/lib/features/pos/application/payment_modal_provider.dart b/lib/features/pos/application/payment_modal_provider.dart
+index dc133d4..db0ce07 100644
+--- a/lib/features/pos/application/payment_modal_provider.dart
++++ b/lib/features/pos/application/payment_modal_provider.dart
+@@ -21,8 +21,19 @@ class PaymentModalController extends StateNotifier<PaymentModalState> {
+     state = PaymentModalState.closed;
+   }
+ 
+-  void setMethod(PaymentMethod method) {
+-    state = state.copyWith(method: method, status: PaymentStatus.pending);
++  /// Sets the selected payment method. When [total] is passed (i.e. this
++  /// is the single, non-split payment section) and [method] is QRIS or
++  /// Transfer, the amount field is auto-filled with the full [total] —
++  /// those methods are assumed paid in full up front, unlike Tunai which
++  /// still needs a typed/quick-cash amount. Split-payment legs call this
++  /// without [total], so auto-fill never applies there.
++  void setMethod(PaymentMethod method, {int? total}) {
++    final shouldAutoFillFull = total != null && (method == PaymentMethod.qris || method == PaymentMethod.transfer);
++    state = state.copyWith(
++      method: method,
++      status: PaymentStatus.pending,
++      amountPaidText: shouldAutoFillFull ? total.toString() : state.amountPaidText,
++    );
+   }
+ 
+   void setAmountPaidText(String text) {
+diff --git a/lib/features/pos/presentation/widgets/cart_drawer.dart b/lib/features/pos/presentation/widgets/cart_drawer.dart
+index f48d1ab..4aab3ce 100644
+--- a/lib/features/pos/presentation/widgets/cart_drawer.dart
++++ b/lib/features/pos/presentation/widgets/cart_drawer.dart
+@@ -184,30 +184,104 @@ class _OrderTypeSection extends StatelessWidget {
+   }
+ }
+ 
+-class _DeliveryFeeField extends StatelessWidget {
++/// Preset ongkir amounts shown as quick-pick chips. `null` here
++/// represents the "Custom" option (free-form amount via text field),
++/// distinct from 0 which is a real "Gratis" (free) delivery fee.
++const List<int?> _deliveryFeePresets = [0, 3000, 4000, 5000, null];
++
++class _DeliveryFeeField extends StatefulWidget {
+   final CartState cartState;
+   final CartController controller;
+   const _DeliveryFeeField({required this.cartState, required this.controller});
+ 
++  @override
++  State<_DeliveryFeeField> createState() => _DeliveryFeeFieldState();
++}
++
++class _DeliveryFeeFieldState extends State<_DeliveryFeeField> {
++  late final TextEditingController _customController;
++  // Starts true whenever the current fee doesn't match any preset, so a
++  // fee restored from a draft (or set before this widget existed) still
++  // shows correctly instead of silently snapping to a preset.
++  late bool _isCustom = !_deliveryFeePresets.contains(widget.cartState.deliveryFee);
++
++  @override
++  void initState() {
++    super.initState();
++    _customController = TextEditingController(
++      text: _isCustom && widget.cartState.deliveryFee > 0 ? widget.cartState.deliveryFee.toString() : '',
++    );
++  }
++
++  @override
++  void dispose() {
++    _customController.dispose();
++    super.dispose();
++  }
++
++  void _selectPreset(int? preset) {
++    if (preset == null) {
++      // "Custom" tapped — reveal the field; don't change the fee until
++      // the user actually types an amount.
++      setState(() => _isCustom = true);
++      return;
++    }
++    setState(() => _isCustom = false);
++    _customController.clear();
++    widget.controller.setDeliveryFee(preset);
++  }
++
+   @override
+   Widget build(BuildContext context) {
++    final currentFee = widget.cartState.deliveryFee;
++
+     return _SectionCard(
+-      child: Row(
++      child: Column(
++        crossAxisAlignment: CrossAxisAlignment.start,
+         children: [
+-          const Icon(Icons.moped_rounded, size: 18, color: AppColors.textSecondary),
+-          const SizedBox(width: AppSpacing.sm),
+-          const Text('Ongkir', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+-          const Spacer(),
+-          SizedBox(
+-            width: 120,
+-            child: TextField(
++          Row(
++            children: [
++              const Icon(Icons.moped_rounded, size: 18, color: AppColors.textSecondary),
++              const SizedBox(width: AppSpacing.sm),
++              const Text('Ongkir', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
++            ],
++          ),
++          const SizedBox(height: AppSpacing.sm),
++          Wrap(
++            spacing: AppSpacing.sm,
++            runSpacing: AppSpacing.sm,
++            children: _deliveryFeePresets.map((preset) {
++              final selected = preset == null ? _isCustom : (!_isCustom && currentFee == preset);
++              final label = preset == null ? 'Custom' : (preset == 0 ? 'Gratis' : formatRupiah(preset));
++              return ChoiceChip(
++                label: Text(label),
++                selected: selected,
++                onSelected: (_) => _selectPreset(preset),
++                selectedColor: AppColors.brand,
++                labelStyle: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: selected ? Colors.white : AppColors.textSecondary),
++                backgroundColor: AppColors.background,
++                side: BorderSide(color: selected ? AppColors.brand : AppColors.border),
++                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.pill)),
++              );
++            }).toList(),
++          ),
++          if (_isCustom) ...[
++            const SizedBox(height: AppSpacing.sm),
++            TextField(
++              controller: _customController,
+               textAlign: TextAlign.right,
+               keyboardType: TextInputType.number,
++              autofocus: true,
+               style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary),
+-              decoration: const InputDecoration(prefixText: 'Rp ', border: InputBorder.none, isDense: true),
+-              onChanged: (v) => controller.setDeliveryFee(int.tryParse(v) ?? 0),
++              decoration: InputDecoration(
++                prefixText: 'Rp ',
++                isDense: true,
++                hintText: 'Jumlah ongkir',
++                border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.sm)),
++              ),
++              onChanged: (v) => widget.controller.setDeliveryFee(int.tryParse(v) ?? 0),
+             ),
+-          ),
++          ],
+         ],
+       ),
+     );
+diff --git a/lib/features/pos/presentation/widgets/payment_modal.dart b/lib/features/pos/presentation/widgets/payment_modal.dart
+index f18a587..a04b645 100644
+--- a/lib/features/pos/presentation/widgets/payment_modal.dart
++++ b/lib/features/pos/presentation/widgets/payment_modal.dart
+@@ -314,7 +314,10 @@ class _SinglePaymentSectionState extends State<_SinglePaymentSection> {
+       children: [
+         const Text('Metode Pembayaran', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.textSecondary)),
+         const SizedBox(height: AppSpacing.sm),
+-        _MethodSelector(selected: widget.paymentState.method, onChanged: widget.controller.setMethod),
++        _MethodSelector(
++          selected: widget.paymentState.method,
++          onChanged: (method) => widget.controller.setMethod(method, total: widget.total),
++        ),
+         const SizedBox(height: AppSpacing.lg),
+         const Text('Jumlah Dibayar', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.textSecondary)),
+         const SizedBox(height: AppSpacing.sm),

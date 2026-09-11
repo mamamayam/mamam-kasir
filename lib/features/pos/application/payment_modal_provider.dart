@@ -21,8 +21,19 @@ class PaymentModalController extends StateNotifier<PaymentModalState> {
     state = PaymentModalState.closed;
   }
 
-  void setMethod(PaymentMethod method) {
-    state = state.copyWith(method: method, status: PaymentStatus.pending);
+  /// Sets the selected payment method. When [total] is passed (i.e. this
+  /// is the single, non-split payment section) and [method] is QRIS or
+  /// Transfer, the amount field is auto-filled with the full [total] —
+  /// those methods are assumed paid in full up front, unlike Tunai which
+  /// still needs a typed/quick-cash amount. Split-payment legs call this
+  /// without [total], so auto-fill never applies there.
+  void setMethod(PaymentMethod method, {int? total}) {
+    final shouldAutoFillFull = total != null && (method == PaymentMethod.qris || method == PaymentMethod.transfer);
+    state = state.copyWith(
+      method: method,
+      status: PaymentStatus.pending,
+      amountPaidText: shouldAutoFillFull ? total.toString() : state.amountPaidText,
+    );
   }
 
   void setAmountPaidText(String text) {

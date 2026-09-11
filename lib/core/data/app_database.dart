@@ -26,7 +26,14 @@ class AppDatabase {
   // delete for transactions (retention/permission is UNSPECIFIED there).
   // Still pre-release, straight recreate via onCreate rather than a real
   // migration — same rationale as the v1->v2 bump.
-  static const _dbVersion = 3;
+  // v4: added "Nasi Goreng Spesial" dummy menu item + "Topping Nasi
+  // Goreng" variant group to _seedDemoData. NOTE: bumping this version
+  // alone does NOT retroactively seed the new row on a device that
+  // already has the app installed — onCreate only runs when no db file
+  // exists yet, and _onUpgrade here is still a no-op. On a device with
+  // an existing install, uninstall the app (or clear its storage) first
+  // so onCreate runs fresh and the new item appears.
+  static const _dbVersion = 4;
 
   // TODO(security-foundation): replace with a key generated once and
   // stored via flutter_secure_storage, per AGENTS.md.
@@ -236,6 +243,7 @@ class AppDatabase {
       {'id': 'menu-4', 'category_id': 'cat-makanan-utama', 'name': 'Ayam Bakar Madu', 'price': 17000, 'unit': 'porsi'},
       {'id': 'menu-5', 'category_id': 'cat-minuman', 'name': 'Es Teh Manis', 'price': 5000, 'unit': 'gelas'},
       {'id': 'menu-6', 'category_id': 'cat-minuman', 'name': 'Es Jeruk', 'price': 7000, 'unit': 'gelas'},
+      {'id': 'menu-7', 'category_id': 'cat-makanan-utama', 'name': 'Nasi Goreng Spesial', 'price': 22000, 'unit': 'porsi'},
     ];
 
     for (final item in menuItems) {
@@ -280,6 +288,17 @@ class AppDatabase {
           {'name': 'Kremes', 'extraPrice': 3000},
         ],
       },
+      'vg-4': {
+        'name': 'Topping Nasi Goreng',
+        'isRequired': 1,
+        'maxSelection': 1,
+        'options': [
+          {'name': 'Telur Mata Sapi', 'extraPrice': 3000},
+          {'name': 'Telur Dadar', 'extraPrice': 3000},
+          {'name': 'Ayam Suwir', 'extraPrice': 5000},
+          {'name': 'Tanpa Topping', 'extraPrice': 0},
+        ],
+      },
     };
 
     for (final entry in variantGroups.entries) {
@@ -311,6 +330,12 @@ class AppDatabase {
     await db.insert('menu_item_variant_groups', {'menu_item_id': 'menu-3', 'variant_group_id': 'vg-1'});
     await db.insert('menu_item_variant_groups', {'menu_item_id': 'menu-4', 'variant_group_id': 'vg-1'});
     await db.insert('menu_item_variant_groups', {'menu_item_id': 'menu-4', 'variant_group_id': 'vg-3'});
+
+    // New dummy item — required topping choice plus the shared Ekstra
+    // Topping group (multi-select), so it exercises a menu item with
+    // two variant groups at once.
+    await db.insert('menu_item_variant_groups', {'menu_item_id': 'menu-7', 'variant_group_id': 'vg-4'});
+    await db.insert('menu_item_variant_groups', {'menu_item_id': 'menu-7', 'variant_group_id': 'vg-3'});
 
     await db.insert('customers', {
       'id': 'cust-1',

@@ -6,6 +6,7 @@ import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_spacing.dart';
 import '../../pos/domain/order_models.dart';
 import '../application/history_provider.dart';
+import '../domain/history_models.dart';
 import 'transaction_detail_screen.dart';
 import 'widgets/date_filter_tabs.dart';
 import 'widgets/payment_breakdown_card.dart';

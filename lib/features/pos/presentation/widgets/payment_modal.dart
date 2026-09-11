@@ -314,7 +314,10 @@ class _SinglePaymentSectionState extends State<_SinglePaymentSection> {
       children: [
         const Text('Metode Pembayaran', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.textSecondary)),
         const SizedBox(height: AppSpacing.sm),
-        _MethodSelector(selected: widget.paymentState.method, onChanged: widget.controller.setMethod),
+        _MethodSelector(
+          selected: widget.paymentState.method,
+          onChanged: (method) => widget.controller.setMethod(method, total: widget.total),
+        ),
         const SizedBox(height: AppSpacing.lg),
         const Text('Jumlah Dibayar', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.textSecondary)),
         const SizedBox(height: AppSpacing.sm),
