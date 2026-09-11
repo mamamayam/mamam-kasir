@@ -1,0 +1,806 @@
+From b07e671afd3a524297561b60adab72267706632d Mon Sep 17 00:00:00 2001
+From: Claude <claude@anthropic.local>
+Date: Fri, 11 Sep 2026 08:48:21 +0000
+Subject: [PATCH] feat(kasir): iOS-style header, category filter sheet, 2/3
+ grid toggle (persisted), animated search bar
+
+- New IosPageHeader on Kasir screen (was a plain bordered header)
+- Toolbar order: Filter -> Grid toggle -> Search, right-aligned circular
+  buttons; category chips row removed entirely, filter now lives in a
+  bottom sheet (CategoryFilterSheet) reached via the filter icon, with
+  a small active-filter badge dot when a category is selected
+- Grid column count (2 or 3) toggled via the grid icon; persisted across
+  app restarts through a new KasirGridColumnsController backed by
+  shared_preferences (added as a new dependency in pubspec.yaml) -- a
+  pure UI preference, not app/business data, so it intentionally does
+  not use the encrypted SQLite store or secure storage
+- Search bar animates from a 44px circle into a full-width bar growing
+  from the left edge; Filter and Grid icons collapse out of the way via
+  AnimatedSize; a separate solid dark (AppColors.textPrimary) circular
+  close button appears at the right once expanded, distinct from the
+  bar's white surface, matching the approved reference screenshot
+- Menu grid cards reworked: muted 4-shape (triangle/heart/circle/square)
+  placeholder thumbnail standing in for a future product photo, price
+  now shown as "<price> / <unit>" using MenuItem.unit, and a dark
+  rounded qty badge shown when the item already has quantity in the
+  cart (summed across any variant-distinct cart lines for that
+  menuItemId) -- replaces the old plain restaurant icon + no-badge card.
+  A compact variant (smaller paddings/radii/badge/font) is used at 3
+  columns.
+
+Note: not run through flutter analyze/pub get in this environment (no
+Flutter/Dart SDK available here) -- please verify with
+'flutter pub get && flutter analyze' before merging.
+---
+ .../application/kasir_grid_pref_provider.dart |  33 ++
+ lib/features/pos/presentation/pos_screen.dart | 484 +++++++++++++++---
+ .../widgets/category_filter_sheet.dart        | 105 ++++
+ pubspec.yaml                                  |   4 +
+ 4 files changed, 541 insertions(+), 85 deletions(-)
+ create mode 100644 lib/features/pos/application/kasir_grid_pref_provider.dart
+ create mode 100644 lib/features/pos/presentation/widgets/category_filter_sheet.dart
+
+diff --git a/lib/features/pos/application/kasir_grid_pref_provider.dart b/lib/features/pos/application/kasir_grid_pref_provider.dart
+new file mode 100644
+index 0000000..2591b1d
+--- /dev/null
++++ b/lib/features/pos/application/kasir_grid_pref_provider.dart
+@@ -0,0 +1,33 @@
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++import 'package:shared_preferences/shared_preferences.dart';
++
++/// Persists the user's chosen menu-grid column count (2 or 3) for the
++/// Kasir screen across app restarts. This is a pure UI preference (not
++/// app/business data), so plain `shared_preferences` is used rather than
++/// the encrypted SQLite store or secure storage used elsewhere.
++const _prefKey = 'kasir_grid_columns';
++const _defaultColumns = 2;
++
++final kasirGridColumnsProvider = StateNotifierProvider<KasirGridColumnsController, int>((ref) {
++  return KasirGridColumnsController();
++});
++
++class KasirGridColumnsController extends StateNotifier<int> {
++  KasirGridColumnsController() : super(_defaultColumns) {
++    _load();
++  }
++
++  Future<void> _load() async {
++    final prefs = await SharedPreferences.getInstance();
++    final saved = prefs.getInt(_prefKey);
++    if (saved == 2 || saved == 3) {
++      state = saved!;
++    }
++  }
++
++  Future<void> toggle() async {
++    state = state == 2 ? 3 : 2;
++    final prefs = await SharedPreferences.getInstance();
++    await prefs.setInt(_prefKey, state);
++  }
++}
+diff --git a/lib/features/pos/presentation/pos_screen.dart b/lib/features/pos/presentation/pos_screen.dart
+index 29488b8..03ad103 100644
+--- a/lib/features/pos/presentation/pos_screen.dart
++++ b/lib/features/pos/presentation/pos_screen.dart
+@@ -4,10 +4,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ import '../../../core/theme/app_colors.dart';
+ import '../../../core/theme/app_spacing.dart';
+ import '../../../core/utils/currency.dart';
++import '../../../core/widgets/ios_page_header.dart';
+ import '../../menu_management/domain/menu_management_models.dart';
+ import '../application/cart_provider.dart';
++import '../application/kasir_grid_pref_provider.dart';
+ import '../application/pos_catalog_provider.dart';
+ import 'widgets/cart_drawer.dart';
++import 'widgets/category_filter_sheet.dart';
+ import 'widgets/variant_selection_modal.dart';
+ 
+ /// Kasir (POS) screen. Reached via [AppNav.push] from the dashboard's
+@@ -22,15 +25,51 @@ class PosScreen extends ConsumerStatefulWidget {
+ 
+ class _PosScreenState extends ConsumerState<PosScreen> {
+   final _searchController = TextEditingController();
++  final _searchFocusNode = FocusNode();
+   String _searchQuery = '';
+   String? _selectedCategory; // null = "Semua"
++  bool _isSearching = false;
+ 
+   @override
+   void dispose() {
+     _searchController.dispose();
++    _searchFocusNode.dispose();
+     super.dispose();
+   }
+ 
++  void _openSearch() {
++    setState(() => _isSearching = true);
++    // Wait for the expand animation to be underway before requesting
++    // focus, so the keyboard doesn't jump the layout mid-animation.
++    Future.delayed(const Duration(milliseconds: 180), () {
++      if (mounted) _searchFocusNode.requestFocus();
++    });
++  }
++
++  void _closeSearch() {
++    setState(() {
++      _isSearching = false;
++      _searchQuery = '';
++      _searchController.clear();
++    });
++    _searchFocusNode.unfocus();
++  }
++
++  Future<void> _openCategoryFilter(List<String> categoryNames) async {
++    final result = await showModalBottomSheet<String>(
++      context: context,
++      backgroundColor: Colors.transparent,
++      builder: (_) => CategoryFilterSheet(categories: categoryNames, selectedCategory: _selectedCategory),
++    );
++    // The sheet only pops a value from an explicit row tap ("Semua" pops
++    // null, a named category pops its name); dismissing without tapping
++    // a row also resolves to null here, which is indistinguishable from
++    // explicitly choosing "Semua" — acceptable since both leave the grid
++    // unfiltered.
++    if (!mounted) return;
++    setState(() => _selectedCategory = result);
++  }
++
+   Future<void> _handleMenuTap(MenuItem menu, PosCatalogState catalog) async {
+     final cartController = ref.read(cartProvider.notifier);
+ 
+@@ -55,8 +94,16 @@ class _PosScreenState extends ConsumerState<PosScreen> {
+   Widget build(BuildContext context) {
+     final catalog = ref.watch(posCatalogProvider);
+     final cartState = ref.watch(cartProvider);
++    final gridColumns = ref.watch(kasirGridColumnsProvider);
+     final cartCount = cartState.cart.fold<int>(0, (sum, item) => sum + item.qty);
+ 
++    // Quantity currently in the cart per menu item id, summed across any
++    // variant-distinct cart lines — drives the dark badge on each card.
++    final qtyByMenuId = <String, int>{};
++    for (final line in cartState.cart) {
++      qtyByMenuId[line.menuItemId] = (qtyByMenuId[line.menuItemId] ?? 0) + line.qty;
++    }
++
+     final filteredItems = catalog.menuItems.where((item) {
+       final matchesSearch = _searchQuery.isEmpty || item.name.toLowerCase().contains(_searchQuery.toLowerCase());
+       final matchesCategory = _selectedCategory == null || item.categoryName == _selectedCategory;
+@@ -70,58 +117,41 @@ class _PosScreenState extends ConsumerState<PosScreen> {
+           children: [
+             Column(
+               children: [
+-                const _Header(),
+-                Padding(
+-                  padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
+-                  child: TextField(
+-                    controller: _searchController,
+-                    onChanged: (v) => setState(() => _searchQuery = v),
+-                    decoration: InputDecoration(
+-                      hintText: 'Cari menu...',
+-                      hintStyle: const TextStyle(fontSize: 13.5, color: AppColors.textMuted, fontWeight: FontWeight.w500),
+-                      prefixIcon: const Icon(Icons.search_rounded, size: 19, color: AppColors.textMuted),
+-                      filled: true,
+-                      fillColor: AppColors.surface,
+-                      isDense: true,
+-                      contentPadding: const EdgeInsets.symmetric(vertical: 13),
+-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.lg), borderSide: const BorderSide(color: AppColors.border)),
+-                    ),
+-                  ),
++                const IosPageHeader(title: Text('Kasir')),
++                _KasirToolbar(
++                  isSearching: _isSearching,
++                  searchController: _searchController,
++                  searchFocusNode: _searchFocusNode,
++                  onSearchChanged: (v) => setState(() => _searchQuery = v),
++                  onOpenSearch: _openSearch,
++                  onCloseSearch: _closeSearch,
++                  isFilterActive: _selectedCategory != null,
++                  onFilterTap: catalog.isLoading ? null : () => _openCategoryFilter(catalog.categoryNames),
++                  gridColumns: gridColumns,
++                  onGridToggle: () => ref.read(kasirGridColumnsProvider.notifier).toggle(),
+                 ),
+-                if (!catalog.isLoading)
+-                  SizedBox(
+-                    height: 40,
+-                    child: ListView(
+-                      scrollDirection: Axis.horizontal,
+-                      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
+-                      children: [
+-                        _CategoryChip(label: 'Semua', selected: _selectedCategory == null, onTap: () => setState(() => _selectedCategory = null)),
+-                        const SizedBox(width: AppSpacing.sm),
+-                        ...catalog.categoryNames.map((cat) => Padding(
+-                              padding: const EdgeInsets.only(right: AppSpacing.sm),
+-                              child: _CategoryChip(label: cat, selected: _selectedCategory == cat, onTap: () => setState(() => _selectedCategory = cat)),
+-                            )),
+-                      ],
+-                    ),
+-                  ),
+-                const SizedBox(height: AppSpacing.sm),
+                 Expanded(
+                   child: catalog.isLoading
+                       ? const Center(child: CircularProgressIndicator(color: AppColors.brand))
+                       : filteredItems.isEmpty
+                           ? const Center(child: Text('Menu tidak ditemukan.', style: TextStyle(fontSize: 13, color: AppColors.textMuted)))
+                           : GridView.builder(
+-                              padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, 110),
+-                              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+-                                crossAxisCount: 2,
+-                                mainAxisSpacing: AppSpacing.md,
+-                                crossAxisSpacing: AppSpacing.md,
+-                                childAspectRatio: 0.85,
++                              padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.xs, AppSpacing.lg, 110),
++                              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
++                                crossAxisCount: gridColumns,
++                                mainAxisSpacing: gridColumns == 3 ? AppSpacing.sm : AppSpacing.md,
++                                crossAxisSpacing: gridColumns == 3 ? AppSpacing.sm : AppSpacing.md,
++                                childAspectRatio: gridColumns == 3 ? 0.72 : 0.85,
+                               ),
+                               itemCount: filteredItems.length,
+                               itemBuilder: (context, index) {
+                                 final item = filteredItems[index];
+-                                return _MenuGridCard(item: item, onTap: () => _handleMenuTap(item, catalog));
++                                return _MenuGridCard(
++                                  item: item,
++                                  qtyInCart: qtyByMenuId[item.id] ?? 0,
++                                  compact: gridColumns == 3,
++                                  onTap: () => _handleMenuTap(item, catalog),
++                                );
+                               },
+                             ),
+                 ),
+@@ -150,90 +180,316 @@ class _PosScreenState extends ConsumerState<PosScreen> {
+   }
+ }
+ 
+-class _Header extends StatelessWidget {
+-  const _Header();
++/// The row beneath the header: Filter -> Grid toggle -> Search, in that
++/// fixed order. Idle state shows all three as equal circular buttons,
++/// right-aligned. Tapping search expands it into a full-width bar that
++/// grows from the left edge — Filter and Grid collapse out of the way —
++/// with a separate solid dark close button appearing at the right, per
++/// the approved reference design.
++class _KasirToolbar extends StatelessWidget {
++  final bool isSearching;
++  final TextEditingController searchController;
++  final FocusNode searchFocusNode;
++  final ValueChanged<String> onSearchChanged;
++  final VoidCallback onOpenSearch;
++  final VoidCallback onCloseSearch;
++  final bool isFilterActive;
++  final VoidCallback? onFilterTap;
++  final int gridColumns;
++  final VoidCallback onGridToggle;
++
++  const _KasirToolbar({
++    required this.isSearching,
++    required this.searchController,
++    required this.searchFocusNode,
++    required this.onSearchChanged,
++    required this.onOpenSearch,
++    required this.onCloseSearch,
++    required this.isFilterActive,
++    required this.onFilterTap,
++    required this.gridColumns,
++    required this.onGridToggle,
++  });
++
++  static const _animDuration = Duration(milliseconds: 300);
++  static const _animCurve = Curves.easeOutCubic;
+ 
+   @override
+   Widget build(BuildContext context) {
+-    return Container(
+-      padding: const EdgeInsets.fromLTRB(AppSpacing.sm, AppSpacing.sm, AppSpacing.lg, AppSpacing.sm),
+-      decoration: const BoxDecoration(color: AppColors.background, border: Border(bottom: BorderSide(color: AppColors.border))),
+-      child: Row(
+-        children: [
+-          Builder(
+-            builder: (context) => IconButton(
+-              onPressed: () => Navigator.of(context).pop(),
+-              icon: const Icon(Icons.arrow_back_rounded, color: AppColors.textPrimary),
++    return Padding(
++      padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 4, AppSpacing.lg, AppSpacing.md),
++      child: SizedBox(
++        height: 44,
++        child: Row(
++          children: [
++            // Filter icon — collapses to zero width while searching.
++            _CollapsibleIcon(
++              visible: !isSearching,
++              child: _ToolCircleButton(
++                onTap: onFilterTap,
++                active: isFilterActive,
++                child: Stack(
++                  clipBehavior: Clip.none,
++                  children: [
++                    const Icon(Icons.tune_rounded, size: 20),
++                    if (isFilterActive)
++                      Positioned(
++                        top: -3,
++                        right: -3,
++                        child: Container(
++                          width: 14,
++                          height: 14,
++                          decoration: const BoxDecoration(color: Colors.white, shape: BoxShape.circle),
++                          child: Center(
++                            child: Container(
++                              width: 8,
++                              height: 8,
++                              decoration: const BoxDecoration(color: AppColors.brand, shape: BoxShape.circle),
++                            ),
++                          ),
++                        ),
++                      ),
++                  ],
++                ),
++              ),
+             ),
+-          ),
+-          const Text('Kasir', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
+-        ],
++            _CollapsibleIcon(visible: !isSearching, child: const SizedBox(width: AppSpacing.sm)),
++
++            // Grid toggle — collapses to zero width while searching.
++            _CollapsibleIcon(
++              visible: !isSearching,
++              child: _ToolCircleButton(
++                onTap: onGridToggle,
++                child: AnimatedSwitcher(
++                  duration: const Duration(milliseconds: 200),
++                  transitionBuilder: (child, anim) => ScaleTransition(scale: anim, child: child),
++                  child: Icon(
++                    gridColumns == 2 ? Icons.grid_view_rounded : Icons.apps_rounded,
++                    key: ValueKey(gridColumns),
++                    size: 19,
++                  ),
++                ),
++              ),
++            ),
++            _CollapsibleIcon(visible: !isSearching, child: const SizedBox(width: AppSpacing.sm)),
++
++            // Search bar — grows to fill the remaining row width.
++            Expanded(
++              child: AnimatedContainer(
++                duration: _animDuration,
++                curve: _animCurve,
++                height: 44,
++                decoration: BoxDecoration(
++                  color: AppColors.surface,
++                  borderRadius: BorderRadius.circular(22),
++                  boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 10, offset: const Offset(0, 2))],
++                ),
++                child: Row(
++                  children: [
++                    SizedBox(
++                      width: 44,
++                      height: 44,
++                      child: IconButton(
++                        padding: EdgeInsets.zero,
++                        onPressed: isSearching ? null : onOpenSearch,
++                        icon: Icon(Icons.search_rounded, size: 20, color: isSearching ? AppColors.textPrimary : AppColors.textMuted),
++                      ),
++                    ),
++                    Expanded(
++                      child: AnimatedOpacity(
++                        duration: const Duration(milliseconds: 180),
++                        opacity: isSearching ? 1 : 0,
++                        child: IgnorePointer(
++                          ignoring: !isSearching,
++                          child: TextField(
++                            controller: searchController,
++                            focusNode: searchFocusNode,
++                            onChanged: onSearchChanged,
++                            style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w500, color: AppColors.textPrimary),
++                            decoration: const InputDecoration(
++                              hintText: 'Cari produk...',
++                              hintStyle: TextStyle(fontSize: 14.5, color: AppColors.textMuted, fontWeight: FontWeight.w500),
++                              border: InputBorder.none,
++                              isDense: true,
++                              contentPadding: EdgeInsets.only(right: 12),
++                            ),
++                          ),
++                        ),
++                      ),
++                    ),
++                  ],
++                ),
++              ),
++            ),
++
++            // Close button — a separate solid-dark circle, distinct from
++            // the search bar's white surface, appearing only once the
++            // bar has expanded.
++            _CollapsibleIcon(
++              visible: isSearching,
++              leftGap: true,
++              child: Material(
++                color: AppColors.textPrimary,
++                shape: const CircleBorder(),
++                child: InkWell(
++                  onTap: onCloseSearch,
++                  customBorder: const CircleBorder(),
++                  child: const SizedBox(
++                    width: 44,
++                    height: 44,
++                    child: Icon(Icons.close_rounded, size: 20, color: Colors.white),
++                  ),
++                ),
++              ),
++            ),
++          ],
++        ),
+       ),
+     );
+   }
+ }
+ 
+-class _CategoryChip extends StatelessWidget {
+-  final String label;
+-  final bool selected;
+-  final VoidCallback onTap;
+-  const _CategoryChip({required this.label, required this.selected, required this.onTap});
++/// Animates a child's width between its natural size and zero, used to
++/// slide the filter/grid icons out of the way (or the close button into
++/// place) as the search bar expands/collapses.
++class _CollapsibleIcon extends StatelessWidget {
++  final bool visible;
++  final Widget child;
++  final bool leftGap;
++
++  const _CollapsibleIcon({required this.visible, required this.child, this.leftGap = false});
+ 
+   @override
+   Widget build(BuildContext context) {
+-    return InkWell(
+-      onTap: onTap,
+-      borderRadius: BorderRadius.circular(AppRadius.pill),
+-      child: Container(
+-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+-        decoration: BoxDecoration(
+-          color: selected ? AppColors.brand : AppColors.surface,
+-          borderRadius: BorderRadius.circular(AppRadius.pill),
+-          border: Border.all(color: selected ? AppColors.brand : AppColors.border),
+-        ),
+-        child: Text(
+-          label,
+-          style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: selected ? Colors.white : AppColors.textSecondary),
++    return AnimatedSize(
++      duration: const Duration(milliseconds: 280),
++      curve: Curves.easeOutCubic,
++      child: !visible
++          ? const SizedBox(width: 0, height: 44)
++          : Row(
++              mainAxisSize: MainAxisSize.min,
++              children: [
++                if (leftGap) const SizedBox(width: AppSpacing.sm),
++                child,
++              ],
++            ),
++    );
++  }
++}
++
++class _ToolCircleButton extends StatelessWidget {
++  final VoidCallback? onTap;
++  final bool active;
++  final Widget child;
++
++  const _ToolCircleButton({required this.onTap, required this.child, this.active = false});
++
++  @override
++  Widget build(BuildContext context) {
++    return Material(
++      color: active ? AppColors.brand : AppColors.surface,
++      shape: const CircleBorder(),
++      elevation: 0,
++      child: InkWell(
++        onTap: onTap,
++        customBorder: const CircleBorder(),
++        child: Container(
++          width: 44,
++          height: 44,
++          decoration: BoxDecoration(
++            shape: BoxShape.circle,
++            boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 10, offset: const Offset(0, 2))],
++          ),
++          child: IconTheme(
++            data: IconThemeData(color: active ? Colors.white : AppColors.textPrimary),
++            child: Center(child: child),
++          ),
+         ),
+       ),
+     );
+   }
+ }
+ 
++/// Menu grid card. Shows a placeholder thumbnail (four muted geometric
++/// shapes, standing in for a future product photo), the item name and
++/// price, and — when the item already has quantity in the cart — a dark
++/// rounded badge with the count, matching the approved reference design.
+ class _MenuGridCard extends StatelessWidget {
+   final MenuItem item;
++  final int qtyInCart;
++  final bool compact;
+   final VoidCallback onTap;
+-  const _MenuGridCard({required this.item, required this.onTap});
++
++  const _MenuGridCard({required this.item, required this.qtyInCart, required this.compact, required this.onTap});
+ 
+   @override
+   Widget build(BuildContext context) {
+     return Material(
+       color: AppColors.surface,
+-      borderRadius: BorderRadius.circular(AppRadius.lg),
++      borderRadius: BorderRadius.circular(compact ? AppRadius.md : AppRadius.lg),
+       child: InkWell(
+         onTap: onTap,
+-        borderRadius: BorderRadius.circular(AppRadius.lg),
++        borderRadius: BorderRadius.circular(compact ? AppRadius.md : AppRadius.lg),
+         child: Container(
+-          padding: const EdgeInsets.all(AppSpacing.sm),
+-          decoration: BoxDecoration(borderRadius: BorderRadius.circular(AppRadius.lg), border: Border.all(color: AppColors.border)),
++          padding: EdgeInsets.all(compact ? AppSpacing.xs : AppSpacing.sm),
++          decoration: BoxDecoration(
++            borderRadius: BorderRadius.circular(compact ? AppRadius.md : AppRadius.lg),
++            border: Border.all(color: AppColors.border),
++          ),
+           child: Column(
+             crossAxisAlignment: CrossAxisAlignment.stretch,
+             children: [
+               Expanded(
+-                child: Container(
+-                  decoration: BoxDecoration(color: AppColors.background, borderRadius: BorderRadius.circular(AppRadius.md)),
+-                  child: const Icon(Icons.restaurant_rounded, size: 28, color: AppColors.textMuted),
++                child: Stack(
++                  children: [
++                    Container(
++                      decoration: BoxDecoration(
++                        color: AppColors.background,
++                        borderRadius: BorderRadius.circular(compact ? AppRadius.sm : AppRadius.md),
++                      ),
++                      child: Center(child: _PlaceholderThumb(compact: compact)),
++                    ),
++                    if (qtyInCart > 0)
++                      Positioned(
++                        top: compact ? 5 : 8,
++                        right: compact ? 5 : 8,
++                        child: Container(
++                          constraints: BoxConstraints(minWidth: compact ? 20 : 26, minHeight: compact ? 20 : 26),
++                          padding: const EdgeInsets.symmetric(horizontal: 6),
++                          decoration: BoxDecoration(color: AppColors.textPrimary, borderRadius: BorderRadius.circular(compact ? 10 : 13)),
++                          child: Center(
++                            child: Text(
++                              '$qtyInCart',
++                              style: TextStyle(fontSize: compact ? 10 : 12, fontWeight: FontWeight.w800, color: Colors.white),
++                            ),
++                          ),
++                        ),
++                      ),
++                  ],
+                 ),
+               ),
+-              const SizedBox(height: AppSpacing.sm),
++              SizedBox(height: compact ? AppSpacing.xs : AppSpacing.sm),
+               Text(
+                 item.name,
+                 maxLines: 2,
+                 overflow: TextOverflow.ellipsis,
+-                style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800, color: AppColors.textPrimary, height: 1.2),
++                style: TextStyle(fontSize: compact ? 11 : 12.5, fontWeight: FontWeight.w800, color: AppColors.textPrimary, height: 1.2),
++              ),
++              const SizedBox(height: 2),
++              RichText(
++                text: TextSpan(
++                  children: [
++                    TextSpan(
++                      text: formatRupiah(item.price),
++                      style: TextStyle(fontSize: compact ? 10.5 : 12.5, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
++                    ),
++                    TextSpan(
++                      text: ' / ${item.unit}',
++                      style: TextStyle(fontSize: compact ? 9.5 : 11.5, fontWeight: FontWeight.w600, color: AppColors.textMuted),
++                    ),
++                  ],
++                ),
+               ),
+-              const SizedBox(height: 4),
+-              Text(formatRupiah(item.price), style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.brand)),
+             ],
+           ),
+         ),
+@@ -242,6 +498,64 @@ class _MenuGridCard extends StatelessWidget {
+   }
+ }
+ 
++/// Four muted geometric shapes (triangle, heart, circle, square) standing
++/// in for a product photo — matches the reference design's icon-grid
++/// placeholder look until real menu photos exist.
++class _PlaceholderThumb extends StatelessWidget {
++  final bool compact;
++  const _PlaceholderThumb({required this.compact});
++
++  @override
++  Widget build(BuildContext context) {
++    final size = compact ? 8.0 : 11.0;
++    final gap = compact ? 3.0 : 4.0;
++    Widget shape(Widget child) => SizedBox(width: size, height: size, child: child);
++    const color = Color(0xFFC9CFDA);
++
++    return Column(
++      mainAxisSize: MainAxisSize.min,
++      children: [
++        Row(
++          mainAxisSize: MainAxisSize.min,
++          children: [
++            shape(CustomPaint(painter: _TrianglePainter(color: color))),
++            SizedBox(width: gap),
++            shape(const Icon(Icons.favorite_rounded, color: color, size: 999)),
++          ],
++        ),
++        SizedBox(height: gap),
++        Row(
++          mainAxisSize: MainAxisSize.min,
++          children: [
++            shape(const DecoratedBox(decoration: BoxDecoration(color: color, shape: BoxShape.circle))),
++            SizedBox(width: gap),
++            shape(DecoratedBox(decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(2)))),
++          ],
++        ),
++      ],
++    );
++  }
++}
++
++class _TrianglePainter extends CustomPainter {
++  final Color color;
++  const _TrianglePainter({required this.color});
++
++  @override
++  void paint(Canvas canvas, Size size) {
++    final paint = Paint()..color = color;
++    final path = Path()
++      ..moveTo(size.width / 2, 0)
++      ..lineTo(0, size.height)
++      ..lineTo(size.width, size.height)
++      ..close();
++    canvas.drawPath(path, paint);
++  }
++
++  @override
++  bool shouldRepaint(covariant _TrianglePainter oldDelegate) => oldDelegate.color != color;
++}
++
+ class _CartFab extends StatelessWidget {
+   final int itemCount;
+   final int total;
+diff --git a/lib/features/pos/presentation/widgets/category_filter_sheet.dart b/lib/features/pos/presentation/widgets/category_filter_sheet.dart
+new file mode 100644
+index 0000000..ec33a81
+--- /dev/null
++++ b/lib/features/pos/presentation/widgets/category_filter_sheet.dart
+@@ -0,0 +1,105 @@
++import 'package:flutter/material.dart';
++
++import '../../../../core/theme/app_colors.dart';
++import '../../../../core/theme/app_spacing.dart';
++
++/// Bottom sheet listing all categories (plus "Semua") as a checklist.
++/// Returns the selected category name via [Navigator.pop], or `null`
++/// for "Semua". Presented from the Kasir toolbar's filter icon.
++class CategoryFilterSheet extends StatelessWidget {
++  final List<String> categories;
++  final String? selectedCategory;
++
++  const CategoryFilterSheet({
++    super.key,
++    required this.categories,
++    required this.selectedCategory,
++  });
++
++  @override
++  Widget build(BuildContext context) {
++    return SafeArea(
++      top: false,
++      child: Container(
++        padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, AppSpacing.xl),
++        decoration: const BoxDecoration(
++          color: AppColors.surface,
++          borderRadius: BorderRadius.vertical(top: Radius.circular(AppRadius.xl)),
++        ),
++        child: Column(
++          mainAxisSize: MainAxisSize.min,
++          crossAxisAlignment: CrossAxisAlignment.start,
++          children: [
++            Center(
++              child: Container(
++                width: 36,
++                height: 4,
++                margin: const EdgeInsets.only(bottom: AppSpacing.lg),
++                decoration: BoxDecoration(color: AppColors.border, borderRadius: BorderRadius.circular(2)),
++              ),
++            ),
++            const Text(
++              'Filter Kategori',
++              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
++            ),
++            const SizedBox(height: AppSpacing.sm),
++            _CategoryRow(
++              label: 'Semua',
++              selected: selectedCategory == null,
++              onTap: () => Navigator.of(context).pop(),
++            ),
++            ...categories.map(
++              (cat) => _CategoryRow(
++                label: cat,
++                selected: selectedCategory == cat,
++                onTap: () => Navigator.of(context).pop(cat),
++              ),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++class _CategoryRow extends StatelessWidget {
++  final String label;
++  final bool selected;
++  final VoidCallback onTap;
++
++  const _CategoryRow({required this.label, required this.selected, required this.onTap});
++
++  @override
++  Widget build(BuildContext context) {
++    return InkWell(
++      onTap: onTap,
++      child: Container(
++        padding: const EdgeInsets.symmetric(vertical: AppSpacing.md, horizontal: 4),
++        decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: AppColors.border))),
++        child: Row(
++          mainAxisAlignment: MainAxisAlignment.spaceBetween,
++          children: [
++            Text(
++              label,
++              style: TextStyle(
++                fontSize: 14.5,
++                fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
++                color: selected ? AppColors.brand : AppColors.textPrimary,
++              ),
++            ),
++            Container(
++              width: 20,
++              height: 20,
++              decoration: BoxDecoration(
++                shape: BoxShape.circle,
++                color: selected ? AppColors.brand : Colors.transparent,
++                border: Border.all(color: selected ? AppColors.brand : AppColors.border, width: 1.5),
++              ),
++              child: selected ? const Icon(Icons.check_rounded, size: 13, color: Colors.white) : null,
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
+diff --git a/pubspec.yaml b/pubspec.yaml
+index fe46a02..3b4855f 100644
+--- a/pubspec.yaml
++++ b/pubspec.yaml
+@@ -25,6 +25,10 @@ dependencies:
+   # Secure key storage (OS keystore/keychain, per AGENTS.md security rules)
+   flutter_secure_storage: ^9.2.2
+ 
++  # Lightweight local UI-preference persistence (non-sensitive settings
++  # only, e.g. Kasir grid column count) — not for secrets or app data.
++  shared_preferences: ^2.3.2
++
+   # IDs or exact-money-safe formatting
+   uuid: ^4.4.0
+   intl: ^0.19.0
+-- 
+2.43.0
+

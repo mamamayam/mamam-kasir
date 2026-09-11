@@ -1,0 +1,199 @@
+From 4e5ab326b6bff4910b64f4f42f9b8ffd7a855c16 Mon Sep 17 00:00:00 2001
+From: Claude <claude@anthropic.local>
+Date: Fri, 11 Sep 2026 09:04:47 +0000
+Subject: [PATCH] fix(kasir): actually right-align the toolbar icons (previous
+ commit was broken)
+
+The previous commit left Filter/Grid pinned to the left edge with the
+search bar stretched out next to them, because the search bar was
+wrapped in Expanded unconditionally -- with no Spacer before Filter/Grid,
+there was nothing pushing the cluster to the right. Screenshot from the
+device confirmed this: icons crammed left, big blank white search pill
+taking the rest of the row.
+
+Fix:
+- Add a Spacer() before Filter/Grid/Search when NOT searching, so the
+  three idle icons form a tight right-aligned cluster (verified against
+  a Playwright screenshot of the approved HTML reference, which used
+  the same flex-filler approach and was correct all along)
+- Search control extracted into _SearchBarSurface: idle renders as a
+  plain 44x44 circle (identical size/shadow to Filter/Grid, holding only
+  the search glyph, no visible TextField); searching wraps it in
+  Expanded so it grows from the left edge once Filter/Grid/Spacer have
+  collapsed away. Previously the search 'circle' was actually always a
+  full Expanded pill with an invisible-but-present TextField squeezed
+  next to the icon, which is why it rendered oddly at idle.
+- Removed now-dead _animDuration/_animCurve fields on _KasirToolbar.
+---
+ lib/features/pos/presentation/pos_screen.dart | 134 +++++++++++-------
+ 1 file changed, 84 insertions(+), 50 deletions(-)
+
+diff --git a/lib/features/pos/presentation/pos_screen.dart b/lib/features/pos/presentation/pos_screen.dart
+index 93f94a5..00446ee 100644
+--- a/lib/features/pos/presentation/pos_screen.dart
++++ b/lib/features/pos/presentation/pos_screen.dart
+@@ -198,9 +198,6 @@ class _KasirToolbar extends StatelessWidget {
+     required this.onGridToggle,
+   });
+ 
+-  static const _animDuration = Duration(milliseconds: 300);
+-  static const _animCurve = Curves.easeOutCubic;
+-
+   @override
+   Widget build(BuildContext context) {
+     return Padding(
+@@ -209,6 +206,10 @@ class _KasirToolbar extends StatelessWidget {
+         height: 44,
+         child: Row(
+           children: [
++            // Idle: this filler pushes Filter/Grid/Search into a tight
++            // right-aligned cluster. Searching: it collapses to zero so
++            // the search bar (now Expanded) can grow from the left edge.
++            if (!isSearching) const Spacer(),
+             _CollapsibleIcon(
+               visible: !isSearching,
+               child: _ToolCircleButton(
+@@ -256,53 +257,15 @@ class _KasirToolbar extends StatelessWidget {
+               ),
+             ),
+             _CollapsibleIcon(visible: !isSearching, child: const SizedBox(width: AppSpacing.sm)),
+-            Expanded(
+-              child: AnimatedContainer(
+-                duration: _animDuration,
+-                curve: _animCurve,
+-                height: 44,
+-                decoration: BoxDecoration(
+-                  color: AppColors.surface,
+-                  borderRadius: BorderRadius.circular(22),
+-                  boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 10, offset: const Offset(0, 2))],
+-                ),
+-                child: Row(
+-                  children: [
+-                    SizedBox(
+-                      width: 44,
+-                      height: 44,
+-                      child: IconButton(
+-                        padding: EdgeInsets.zero,
+-                        onPressed: isSearching ? null : onOpenSearch,
+-                        icon: Icon(Icons.search_rounded, size: 20, color: isSearching ? AppColors.textPrimary : AppColors.textMuted),
+-                      ),
+-                    ),
+-                    Expanded(
+-                      child: AnimatedOpacity(
+-                        duration: const Duration(milliseconds: 180),
+-                        opacity: isSearching ? 1 : 0,
+-                        child: IgnorePointer(
+-                          ignoring: !isSearching,
+-                          child: TextField(
+-                            controller: searchController,
+-                            focusNode: searchFocusNode,
+-                            onChanged: onSearchChanged,
+-                            style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w500, color: AppColors.textPrimary),
+-                            decoration: const InputDecoration(
+-                              hintText: 'Cari produk...',
+-                              hintStyle: TextStyle(fontSize: 14.5, color: AppColors.textMuted, fontWeight: FontWeight.w500),
+-                              border: InputBorder.none,
+-                              isDense: true,
+-                              contentPadding: EdgeInsets.only(right: 12),
+-                            ),
+-                          ),
+-                        ),
+-                      ),
+-                    ),
+-                  ],
+-                ),
+-              ),
+-            ),
++
++            // Search bar. Idle: a fixed 44x44 circle (rightmost of the
++            // three icons). Searching: becomes Expanded so it grows to
++            // fill the row from the left edge, since Filter/Grid/Spacer
++            // have all collapsed away above.
++            isSearching
++                ? Expanded(child: _SearchBarSurface(isSearching: true, controller: searchController, focusNode: searchFocusNode, onChanged: onSearchChanged, onOpenSearch: onOpenSearch))
++                : _SearchBarSurface(isSearching: false, controller: searchController, focusNode: searchFocusNode, onChanged: onSearchChanged, onOpenSearch: onOpenSearch),
++
+             _CollapsibleIcon(
+               visible: isSearching,
+               leftGap: true,
+@@ -327,6 +290,77 @@ class _KasirToolbar extends StatelessWidget {
+   }
+ }
+ 
++/// The search control's visual surface. Idle: a plain 44x44 circular
++/// button — same size and shadow as the Filter/Grid buttons beside it —
++/// showing only the search glyph. Searching: an expanded rounded bar
++/// (same surface color/shadow) containing the search glyph followed by
++/// a live [TextField]. Kept as one widget so [AnimatedContainer] can
++/// morph smoothly between the two shapes (circle -> pill) instead of
++/// swapping between unrelated widgets.
++class _SearchBarSurface extends StatelessWidget {
++  final bool isSearching;
++  final TextEditingController controller;
++  final FocusNode focusNode;
++  final ValueChanged<String> onChanged;
++  final VoidCallback onOpenSearch;
++
++  const _SearchBarSurface({
++    required this.isSearching,
++    required this.controller,
++    required this.focusNode,
++    required this.onChanged,
++    required this.onOpenSearch,
++  });
++
++  @override
++  Widget build(BuildContext context) {
++    return GestureDetector(
++      onTap: isSearching ? null : onOpenSearch,
++      child: AnimatedContainer(
++        duration: const Duration(milliseconds: 300),
++        curve: Curves.easeOutCubic,
++        width: isSearching ? null : 44,
++        height: 44,
++        decoration: BoxDecoration(
++          color: AppColors.surface,
++          borderRadius: BorderRadius.circular(22),
++          boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 10, offset: const Offset(0, 2))],
++        ),
++        child: Row(
++          mainAxisSize: isSearching ? MainAxisSize.max : MainAxisSize.min,
++          children: [
++            SizedBox(
++              width: 44,
++              height: 44,
++              child: Icon(Icons.search_rounded, size: 19, color: isSearching ? AppColors.textPrimary : AppColors.textMuted),
++            ),
++            if (isSearching)
++              Expanded(
++                child: AnimatedOpacity(
++                  duration: const Duration(milliseconds: 180),
++                  opacity: isSearching ? 1 : 0,
++                  child: TextField(
++                    controller: controller,
++                    focusNode: focusNode,
++                    onChanged: onChanged,
++                    style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w500, color: AppColors.textPrimary),
++                    decoration: const InputDecoration(
++                      hintText: 'Cari produk...',
++                      hintStyle: TextStyle(fontSize: 14.5, color: AppColors.textMuted, fontWeight: FontWeight.w500),
++                      border: InputBorder.none,
++                      isDense: true,
++                      contentPadding: EdgeInsets.only(right: 12),
++                    ),
++                  ),
++                ),
++              ),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
+ class _CollapsibleIcon extends StatelessWidget {
+   final bool visible;
+   final Widget child;
+-- 
+2.43.0
+
