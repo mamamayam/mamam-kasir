@@ -1,0 +1,33 @@
+From 7a2f46c874752b1869aaf8dbfe6cbdb1e6dff67b Mon Sep 17 00:00:00 2001
+From: Mamam Kasir Dev <dev@mamamayam.local>
+Date: Sun, 13 Sep 2026 08:03:28 +0000
+Subject: [PATCH] fix: remove unused orderType argument from _OjolSection call
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+_OjolSection's constructor was never updated to accept orderType when
+the CashLocationPicker was added to _SinglePaymentSection — Ojol
+deliberately never shows that picker (settlement goes through the
+delivery platform, not this app's own cash ledger), so the fix is
+removing the stray argument rather than adding an unused field.
+---
+ lib/features/pos/presentation/widgets/payment_modal.dart | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/lib/features/pos/presentation/widgets/payment_modal.dart b/lib/features/pos/presentation/widgets/payment_modal.dart
+index b7ceb97..84f7419 100644
+--- a/lib/features/pos/presentation/widgets/payment_modal.dart
++++ b/lib/features/pos/presentation/widgets/payment_modal.dart
+@@ -174,7 +174,7 @@ class _PaymentModalState extends ConsumerState<PaymentModal> {
+                       _TotalDueCard(total: totals.roundedTotal),
+                       const SizedBox(height: AppSpacing.xl),
+                       if (isOjol)
+-                        _OjolSection(paymentState: paymentState, controller: paymentController, orderType: cartState.orderType)
++                        _OjolSection(paymentState: paymentState, controller: paymentController)
+                       else ...[
+                         _SplitModeToggle(paymentState: paymentState, controller: paymentController),
+                         const SizedBox(height: AppSpacing.lg),
+-- 
+2.43.0
+

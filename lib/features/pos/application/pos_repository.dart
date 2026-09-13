@@ -4,6 +4,7 @@ import 'package:sqflite_sqlcipher/sqflite.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../../core/data/app_database.dart';
+import '../../dompet/application/dompet_repository.dart';
 import '../../menu_management/application/menu_management_repository.dart';
 import '../../menu_management/domain/menu_management_models.dart';
 import '../domain/cart_item.dart';
@@ -15,6 +16,7 @@ import '../domain/voucher.dart';
 class PosRepository {
   final _uuid = const Uuid();
   final MenuManagementRepository _menuRepository = MenuManagementRepository();
+  final DompetRepository _dompetRepository = DompetRepository();
 
   Future<Database> get _db => AppDatabase.instance.database;
 
@@ -85,6 +87,13 @@ class PosRepository {
   /// Persists a completed transaction and its line items. `id` and
   /// `displayNumber` are generated here so the caller (checkout flow)
   /// doesn't need its own ID scheme.
+  ///
+  /// `cashLocationId`: when the payment is cash (fully or in part —
+  /// callers pass this only for the cash portion), this records where
+  /// that cash physically ended up (Store Cash, or a specific courier
+  /// for Delivery/Ojol) as a Dompet ledger movement — see
+  /// [[dompet-prd]]. Left null for non-cash payments, where there is no
+  /// physical cash to track.
   Future<txn.Transaction> saveTransaction({
     required txn.TransactionStatus status,
     required OrderType orderType,
@@ -108,6 +117,7 @@ class PosRepository {
     int? amountPaid,
     int? changeAmount,
     List<SplitPaymentEntry> splitPayments = const [],
+    String? cashLocationId,
   }) async {
     final db = await _db;
     final now = DateTime.now();
@@ -161,6 +171,21 @@ class PosRepository {
         'qty': item.qty,
         'note': item.note.isEmpty ? null : item.note,
       });
+    }
+
+    // Dompet ledger entry — per [[dompet-prd]], a Paid status does not
+    // by itself mean the cash is in Store Cash; the cash amount goes to
+    // wherever the cashier recorded it (Store Cash or a courier). Only
+    // recorded for paid, cash-involving checkouts where a location was
+    // actually chosen — non-cash payments have no physical cash to
+    // track, and this repository has no opinion on where cash "should"
+    // go by default.
+    if (cashLocationId != null && status == txn.TransactionStatus.paid && amountPaid != null && amountPaid > 0) {
+      await _dompetRepository.recordCashSale(
+        toLocationId: cashLocationId,
+        amount: amountPaid,
+        transactionId: id,
+      );
     }
 
     return txn.Transaction(

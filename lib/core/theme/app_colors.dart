@@ -2,12 +2,12 @@ import 'package:flutter/material.dart';
 
 /// Central color tokens for Mamam Kasir.
 ///
-/// Design direction (per UI/UX reference pack): clean, modern, operational,
-/// slightly premium — avoid excessive gradients / card-heavy decoration.
-/// The hero "Total Penjualan Hari Ini" card keeps a dark gradient as an
-/// accent focal point; the swipe-up menu's 3x3 icon grid and the quick
-/// action cards (Kasir/Riwayat) both use solid, vivid per-item colors
-/// (not muted) — see tile palette below.
+/// Brand color matches the "Leci" reference app's sampled navy
+/// (#0A2540, pulled directly from its primary button/header pixels),
+/// applied everywhere brand color is used EXCEPT the dashboard hero
+/// sales card, which keeps its existing dark gradient rather than
+/// becoming solid navy (explicit user decision — the gradient stays as
+/// an intentional accent).
 class AppColors {
   AppColors._();
 
@@ -19,22 +19,25 @@ class AppColors {
   static const Color textSecondary = Color(0xFF6B7280);
   static const Color textMuted = Color(0xFF9CA3AF);
 
-  // Brand
-  static const Color brand = Color(0xFFFF6B2C);
-  static const Color brandDark = Color(0xFFE85A1F);
+  // Brand — sampled from Leci reference (primary button fill / header
+  // title text): #0A2540.
+  static const Color brand = Color(0xFF0A2540);
+  static const Color brandDark = Color(0xFF071A2E);
 
-  // Hero card gradient (the one intentional gradient in the app)
+  // Hero card gradient (the one intentional gradient in the app —
+  // deliberately NOT replaced with solid brand navy, per explicit
+  // decision when the Leci theme was adopted)
   static const List<Color> heroGradient = [Color(0xFF1F2230), Color(0xFF14161F)];
 
   // Status
   static const Color success = Color(0xFF2FA36B);
   static const Color danger = Color(0xFFE0554A);
   static const Color warning = Color(0xFFD9A441);
-  static const Color info = Color(0xFF3B7DD9);
+  static const Color info = Color(0xFF3B7DD9); // matches Leci's sampled chart/amount blue exactly
 
   // Menu-tile palette — vivid/solid tones matching the saturation level of
-  // the Kasir/Riwayat quick-action colors (brand orange, info blue), not
-  // the earlier muted set. Each item keeps its own hue for recognition.
+  // the Kasir/Riwayat quick-action colors, not a muted set. Each item
+  // keeps its own hue for recognition.
   static const Color tileDompet = Color(0xFF7C5FC7); // purple
   static const Color tileMenu = Color(0xFF3B7DD9); // blue (matches info)
   static const Color tileLabaRugi = Color(0xFF2FA36B); // green (matches success)

@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../../core/navigation/app_nav.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/widgets/placeholder_screen.dart';
+import '../../dompet/presentation/dompet_screen.dart';
 import '../../menu_management/presentation/menu_management_screen.dart';
 
 /// One tile in the swipe-up menu's 3x3 grid.
@@ -60,7 +61,12 @@ List<MenuGridItem> buildMenuGridItems({
   }
 
   return [
-    placeholderTile(label: 'Dompet', icon: Icons.account_balance_wallet_rounded, color: AppColors.tileDompet),
+    MenuGridItem(
+      label: 'Dompet',
+      icon: Icons.account_balance_wallet_rounded,
+      color: AppColors.tileDompet,
+      onTap: () => pushDestination((_) => const DompetScreen()),
+    ),
     MenuGridItem(
       label: 'Menu',
       icon: Icons.inventory_2_rounded,

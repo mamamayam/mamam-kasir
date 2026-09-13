@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/theme/app_spacing.dart';
 import '../../../../core/utils/currency.dart';
+import '../../../dompet/presentation/widgets/cash_location_picker.dart';
 import '../../application/cart_provider.dart';
 import '../../application/payment_modal_provider.dart';
 import '../../domain/cart_state.dart';
@@ -71,6 +72,9 @@ class _PaymentModalState extends ConsumerState<PaymentModal> {
       amountPaid: totalPaid,
       changeAmount: change,
       splitPayments: isSplit ? paymentState.splitPayments : const [],
+      cashLocationId: (cartState.orderType == OrderType.delivery && paymentState.method == PaymentMethod.tunai)
+          ? paymentState.cashLocationId
+          : null,
     );
 
     if (!mounted) return;
@@ -102,11 +106,14 @@ class _PaymentModalState extends ConsumerState<PaymentModal> {
     final remaining = totals.roundedTotal - paidSoFar;
     final change = paidSoFar > totals.roundedTotal ? paidSoFar - totals.roundedTotal : 0;
 
+    final requiresCashLocation =
+        cartState.orderType == OrderType.delivery && !paymentState.isSplitMode && paymentState.method == PaymentMethod.tunai;
+
     final canConfirm = isOjol
         ? true
         : paymentState.isSplitMode
             ? remaining <= 0 && paymentState.splitPayments.isNotEmpty
-            : paidSoFar >= totals.roundedTotal;
+            : paidSoFar >= totals.roundedTotal && (!requiresCashLocation || paymentState.cashLocationId != null);
 
     // Full-height, matching CartDrawer — still a modal layer (not a page
     // route), just sized to read like the reference design's Checkout
@@ -182,6 +189,7 @@ class _PaymentModalState extends ConsumerState<PaymentModal> {
                             paymentState: paymentState,
                             controller: paymentController,
                             total: totals.roundedTotal,
+                            orderType: cartState.orderType,
                           ),
                         const SizedBox(height: AppSpacing.lg),
                         if (change > 0) _ChangeCard(amount: change),
@@ -344,7 +352,8 @@ class _SinglePaymentSection extends StatefulWidget {
   final PaymentModalState paymentState;
   final PaymentModalController controller;
   final int total;
-  const _SinglePaymentSection({required this.paymentState, required this.controller, required this.total});
+  final OrderType orderType;
+  const _SinglePaymentSection({required this.paymentState, required this.controller, required this.total, required this.orderType});
 
   @override
   State<_SinglePaymentSection> createState() => _SinglePaymentSectionState();
@@ -416,6 +425,13 @@ class _SinglePaymentSectionState extends State<_SinglePaymentSection> {
                     ))
                 .toList(),
           ),
+          if (widget.orderType == OrderType.delivery) ...[
+            const SizedBox(height: AppSpacing.lg),
+            CashLocationPicker(
+              selectedLocationId: widget.paymentState.cashLocationId,
+              onChanged: widget.controller.setCashLocation,
+            ),
+          ],
         ],
       ],
     );

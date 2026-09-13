@@ -1,0 +1,1687 @@
+From e5d18e11546e551832d317c8e6d2db0a4e33e411 Mon Sep 17 00:00:00 2001
+From: Mamam Kasir Dev <dev@mamamayam.local>
+Date: Sat, 12 Sep 2026 03:11:03 +0000
+Subject: [PATCH 1/2] feat: Dompet ledger core (Cash Location + Cash Movement)
+ per PRD
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Scope per user decision: full core ledger (Cash Location, Cash Movement,
+checkout-side cash location picker, Dompet page, courier outstanding +
+Sudah Disetor/Jadikan Kasbon) WITHOUT closing/shift blocking — Shift
+itself isn't built yet, so 'Tutup Dompet' enforcement is deferred until
+it exists. Couriers are manual/dummy cash_locations (Budi, Andi seeded)
+since the Staff module doesn't exist yet to source a real courier list —
+staff_id columns are reserved and NULL until it does.
+
+Core principle from the PRD, followed throughout: a Paid transaction
+status does not by itself mean cash is in Store Cash — cash location is
+tracked separately via an append-only ledger, never a mutated balance
+field. Every location's balance is always computed as SUM(movements in)
+- SUM(movements out) at read time (DompetRepository.getLocationBalance),
+not stored.
+
+DB (v5): cash_locations (store/courier), cash_movements (immutable
+ledger rows with audit-trail fields: type, from/to location, amount,
+reference transaction/kasbon, reason, created_at/by), kasbon (staff
+debt, shaped for future payroll integration), kasbon_repayments
+(repayment history — remaining_balance/status only change via explicit
+repayment records, never auto-marked paid).
+
+Checkout integration: PosRepository.saveTransaction gains an optional
+cashLocationId param; when provided (paid + cash amount > 0), it calls
+DompetRepository.recordCashSale after the transaction/items are saved.
+PaymentModal: when order type is Delivery and method is Tunai, shows
+CashLocationPicker ('Uang Diterima Oleh' — Dompet Toko or a courier);
+confirming payment is blocked until a location is picked in that case.
+Deliberately NOT added to the Ojol payment path — Ojol settlement goes
+through the delivery platform, not this app's own courier cash ledger.
+
+New Dompet feature module:
+- Domain: CashLocation/CashLocationType, CashMovement/CashMovementType,
+  Kasbon/KasbonStatus/KasbonRepayment, CashLocationBalance, DompetSummary
+  (three categories per PRD §23 — Uang di Dompet / Uang di Kurir /
+  Kasbon Staff — deliberately never summed into one figure)
+- Application: DompetRepository (all balance reads computed from
+  movements, recordCashSale/recordCourierDeposit/convertToKasbon/
+  recordKasbonRepayment), DompetProvider/DompetState/DompetController
+- Presentation: DompetScreen (saldo card, three-category ringkasan,
+  courier outstanding list, aktivitas cash in plain cashier language per
+  PRD §20), CourierOutstandingCard (Sudah Disetor with partial-amount
+  support per PRD §10, Jadikan Kasbon with confirmation dialog),
+  CashMovementTile, CashLocationPicker (the checkout-side picker)
+
+Wired: swipe-up menu's 'Dompet' tile now pushes DompetScreen (was a
+placeholder).
+
+Explicitly NOT in this pass (see docs/dompet-prd for full scope):
+closing/'Tutup Dompet' blocking logic, shift integration, real
+staff-sourced courier list, payroll deduction integration, audit trail
+created_by (reserved column, NULL until Auth exists), overdue-closing
+handling.
+---
+ lib/core/data/app_database.dart               | 138 +++++++-
+ .../dompet/application/dompet_provider.dart   | 107 +++++++
+ .../dompet/application/dompet_repository.dart | 298 ++++++++++++++++++
+ lib/features/dompet/domain/dompet_models.dart | 136 ++++++++
+ .../dompet/presentation/dompet_screen.dart    | 211 +++++++++++++
+ .../widgets/cash_location_picker.dart         |  85 +++++
+ .../widgets/cash_movement_tile.dart           |  91 ++++++
+ .../widgets/courier_outstanding_card.dart     | 149 +++++++++
+ .../presentation/menu_grid_items.dart         |   8 +-
+ .../application/payment_modal_provider.dart   |   8 +
+ .../pos/application/pos_repository.dart       |  25 ++
+ .../pos/domain/payment_modal_state.dart       |  11 +
+ .../presentation/widgets/payment_modal.dart   |  22 +-
+ 13 files changed, 1284 insertions(+), 5 deletions(-)
+ create mode 100644 lib/features/dompet/application/dompet_provider.dart
+ create mode 100644 lib/features/dompet/application/dompet_repository.dart
+ create mode 100644 lib/features/dompet/domain/dompet_models.dart
+ create mode 100644 lib/features/dompet/presentation/dompet_screen.dart
+ create mode 100644 lib/features/dompet/presentation/widgets/cash_location_picker.dart
+ create mode 100644 lib/features/dompet/presentation/widgets/cash_movement_tile.dart
+ create mode 100644 lib/features/dompet/presentation/widgets/courier_outstanding_card.dart
+
+diff --git a/lib/core/data/app_database.dart b/lib/core/data/app_database.dart
+index 0ed1994..2c6bf73 100644
+--- a/lib/core/data/app_database.dart
++++ b/lib/core/data/app_database.dart
+@@ -33,7 +33,15 @@ class AppDatabase {
+   // exists yet, and _onUpgrade here is still a no-op. On a device with
+   // an existing install, uninstall the app (or clear its storage) first
+   // so onCreate runs fresh and the new item appears.
+-  static const _dbVersion = 4;
++  // v5: added the Dompet ledger core — cash_locations (Store
++  // Cash/Dompet + per-courier, courier rows are manual/dummy since the
++  // Staff module doesn't exist yet), cash_movements (immutable
++  // ledger entries with audit-trail fields per the Dompet PRD — never a
++  // simple balance mutation; every location's balance is always SUM of
++  // its movements, computed on read), and kasbon (staff debt records
++  // created by "Jadikan Kasbon"). Closing/shift-block logic is
++  // explicitly NOT part of this pass — see [[dompet-prd]] notes.
++  static const _dbVersion = 5;
+ 
+   // TODO(security-foundation): replace with a key generated once and
+   // stored via flutter_secure_storage, per AGENTS.md.
+@@ -203,6 +211,86 @@ class AppDatabase {
+       )
+     ''');
+ 
++    // --- Dompet ledger (see docs/dompet-prd for the full spec) ---
++    //
++    // Cash locations: Store Cash/Dompet plus one row per courier.
++    // Couriers are manual/dummy entries for now (type='courier', no
++    // staff_id link) since the Staff module doesn't exist yet — once it
++    // does, staff_id gets backfilled and courier locations are sourced
++    // from real staff records instead of being created ad hoc here.
++    await db.execute('''
++      CREATE TABLE cash_locations (
++        id TEXT PRIMARY KEY,
++        type TEXT NOT NULL, -- 'store' | 'courier'
++        name TEXT NOT NULL, -- 'Dompet Toko' for store, courier's display name otherwise
++        staff_id TEXT, -- NULL until the Staff module exists; reserved for backfill
++        is_active INTEGER NOT NULL DEFAULT 1,
++        created_at TEXT NOT NULL,
++        updated_at TEXT NOT NULL
++      )
++    ''');
++
++    // Every cash movement is an immutable ledger entry — a location's
++    // balance is always SUM(amount) of movements where it's the
++    // to_location, minus SUM(amount) where it's the from_location.
++    // Never mutate a location's balance directly; never edit or delete
++    // a movement row after it's written (corrections are new adjustment
++    // movements with their own audit trail, per PRD §26).
++    await db.execute('''
++      CREATE TABLE cash_movements (
++        id TEXT PRIMARY KEY,
++        type TEXT NOT NULL, -- 'cash_sale' | 'courier_deposit' | 'convert_to_kasbon' | 'expense' | 'adjustment' | 'opening'
++        from_location_id TEXT, -- NULL for movements that originate cash (e.g. a cash sale entering Store Cash or a courier location)
++        to_location_id TEXT, -- NULL for movements that remove cash (e.g. convert_to_kasbon leaves the cash ledger for Staff Debt)
++        amount INTEGER NOT NULL,
++        reference_transaction_id TEXT, -- links to transactions.id when the movement originates from a sale
++        reference_kasbon_id TEXT, -- links to kasbon.id when the movement is a kasbon conversion
++        reason TEXT,
++        created_at TEXT NOT NULL,
++        created_by TEXT, -- NULL until Auth exists; reserved for the acting user's id/name
++        FOREIGN KEY (from_location_id) REFERENCES cash_locations (id),
++        FOREIGN KEY (to_location_id) REFERENCES cash_locations (id),
++        FOREIGN KEY (reference_transaction_id) REFERENCES transactions (id)
++      )
++    ''');
++
++    // Staff debt created by "Jadikan Kasbon". Per PRD §9: never
++    // auto-marked paid just by being referenced in payroll — status and
++    // remaining_balance only change via explicit repayment records.
++    // Payroll integration itself is out of scope until a Payroll module
++    // exists; this table is shaped to support it later (source fields).
++    await db.execute('''
++      CREATE TABLE kasbon (
++        id TEXT PRIMARY KEY,
++        staff_id TEXT, -- NULL until Staff module exists; courier_location_id identifies who for now
++        courier_location_id TEXT NOT NULL,
++        staff_name TEXT NOT NULL, -- denormalized display name, since staff_id may be NULL
++        amount INTEGER NOT NULL,
++        remaining_balance INTEGER NOT NULL,
++        source TEXT NOT NULL DEFAULT 'Unsettled Courier Cash',
++        status TEXT NOT NULL DEFAULT 'outstanding', -- 'outstanding' | 'partially_paid' | 'paid'
++        created_at TEXT NOT NULL,
++        created_by TEXT,
++        FOREIGN KEY (courier_location_id) REFERENCES cash_locations (id)
++      )
++    ''');
++
++    // Repayment history for kasbon — kept separate from the kasbon row
++    // itself so remaining_balance is always derivable/auditable rather
++    // than a mutated field with no history, per PRD §9's repayment-
++    // history requirement.
++    await db.execute('''
++      CREATE TABLE kasbon_repayments (
++        id TEXT PRIMARY KEY,
++        kasbon_id TEXT NOT NULL,
++        amount INTEGER NOT NULL,
++        note TEXT,
++        created_at TEXT NOT NULL,
++        created_by TEXT,
++        FOREIGN KEY (kasbon_id) REFERENCES kasbon (id)
++      )
++    ''');
++
+     await _seedDemoData(db);
+   }
+ 
+@@ -356,5 +444,53 @@ class AppDatabase {
+       'created_at': now,
+       'updated_at': now,
+     });
++
++    // --- Dompet ledger seed ---
++    // Store Cash location plus two dummy courier locations (manual
++    // stand-ins until the Staff module provides real courier/staff
++    // records — see docs/dompet-prd).
++    await db.insert('cash_locations', {
++      'id': 'loc-store',
++      'type': 'store',
++      'name': 'Dompet Toko',
++      'staff_id': null,
++      'is_active': 1,
++      'created_at': now,
++      'updated_at': now,
++    });
++    await db.insert('cash_locations', {
++      'id': 'loc-courier-budi',
++      'type': 'courier',
++      'name': 'Budi',
++      'staff_id': null,
++      'is_active': 1,
++      'created_at': now,
++      'updated_at': now,
++    });
++    await db.insert('cash_locations', {
++      'id': 'loc-courier-andi',
++      'type': 'courier',
++      'name': 'Andi',
++      'staff_id': null,
++      'is_active': 1,
++      'created_at': now,
++      'updated_at': now,
++    });
++
++    // Opening balance for Store Cash so the Dompet page isn't empty on
++    // first run — a movement with no from_location (cash entering the
++    // ledger), same shape a real "opening shift" entry would use later.
++    await db.insert('cash_movements', {
++      'id': 'cm-opening-store',
++      'type': 'opening',
++      'from_location_id': null,
++      'to_location_id': 'loc-store',
++      'amount': 200000,
++      'reference_transaction_id': null,
++      'reference_kasbon_id': null,
++      'reason': 'Saldo awal (demo)',
++      'created_at': now,
++      'created_by': null,
++    });
+   }
+ }
+diff --git a/lib/features/dompet/application/dompet_provider.dart b/lib/features/dompet/application/dompet_provider.dart
+new file mode 100644
+index 0000000..423c5a6
+--- /dev/null
++++ b/lib/features/dompet/application/dompet_provider.dart
+@@ -0,0 +1,107 @@
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../domain/dompet_models.dart';
++import 'dompet_repository.dart';
++
++final dompetRepositoryProvider = Provider<DompetRepository>((ref) => DompetRepository());
++
++/// All active cash locations (Store Cash + couriers) — used by the
++/// checkout-side [CashLocationPicker] as well as the Dompet page.
++final cashLocationsProvider = FutureProvider.autoDispose<List<CashLocation>>((ref) async {
++  return ref.watch(dompetRepositoryProvider).getCashLocations();
++});
++
++/// Dompet page state: summary + recent movements + outstanding kasbon,
++/// loaded together so the page can show everything without juggling
++/// several separate async providers with independent loading states.
++class DompetState {
++  final DompetSummary? summary;
++  final List<CashMovement> recentMovements;
++  final List<Kasbon> outstandingKasbon;
++  final bool isLoading;
++  final String? errorMessage;
++
++  const DompetState({
++    this.summary,
++    this.recentMovements = const [],
++    this.outstandingKasbon = const [],
++    this.isLoading = true,
++    this.errorMessage,
++  });
++
++  DompetState copyWith({
++    DompetSummary? summary,
++    List<CashMovement>? recentMovements,
++    List<Kasbon>? outstandingKasbon,
++    bool? isLoading,
++    String? errorMessage,
++  }) {
++    return DompetState(
++      summary: summary ?? this.summary,
++      recentMovements: recentMovements ?? this.recentMovements,
++      outstandingKasbon: outstandingKasbon ?? this.outstandingKasbon,
++      isLoading: isLoading ?? this.isLoading,
++      errorMessage: errorMessage,
++    );
++  }
++}
++
++final dompetProvider = StateNotifierProvider.autoDispose<DompetController, DompetState>((ref) {
++  return DompetController(ref.watch(dompetRepositoryProvider));
++});
++
++class DompetController extends StateNotifier<DompetState> {
++  final DompetRepository _repository;
++
++  DompetController(this._repository) : super(const DompetState()) {
++    load();
++  }
++
++  Future<void> load() async {
++    state = state.copyWith(isLoading: true, errorMessage: null);
++    try {
++      final summary = await _repository.getSummary();
++      final movements = await _repository.getMovements();
++      final kasbon = await _repository.getKasbonList();
++      final outstandingKasbon = kasbon.where((k) => k.status != KasbonStatus.paid).toList();
++
++      state = state.copyWith(
++        summary: summary,
++        recentMovements: movements,
++        outstandingKasbon: outstandingKasbon,
++        isLoading: false,
++      );
++    } catch (e) {
++      state = state.copyWith(isLoading: false, errorMessage: 'Gagal memuat data Dompet: $e');
++    }
++  }
++
++  /// "Sudah Disetor" — see [[dompet-prd]] §5/§7A.
++  Future<void> recordCourierDeposit({required String courierLocationId, required int amount}) async {
++    try {
++      await _repository.recordCourierDeposit(courierLocationId: courierLocationId, amount: amount);
++      await load();
++    } catch (e) {
++      state = state.copyWith(errorMessage: 'Gagal mencatat setoran: $e');
++    }
++  }
++
++  /// "Jadikan Kasbon" — see [[dompet-prd]] §7B.
++  Future<void> convertToKasbon({required String courierLocationId, required String courierName, required int amount}) async {
++    try {
++      await _repository.convertToKasbon(courierLocationId: courierLocationId, courierName: courierName, amount: amount);
++      await load();
++    } catch (e) {
++      state = state.copyWith(errorMessage: 'Gagal mengkonversi ke kasbon: $e');
++    }
++  }
++
++  Future<void> recordKasbonRepayment({required String kasbonId, required int amount, String? note}) async {
++    try {
++      await _repository.recordKasbonRepayment(kasbonId: kasbonId, amount: amount, note: note);
++      await load();
++    } catch (e) {
++      state = state.copyWith(errorMessage: 'Gagal mencatat pembayaran kasbon: $e');
++    }
++  }
++}
+diff --git a/lib/features/dompet/application/dompet_repository.dart b/lib/features/dompet/application/dompet_repository.dart
+new file mode 100644
+index 0000000..58600f8
+--- /dev/null
++++ b/lib/features/dompet/application/dompet_repository.dart
+@@ -0,0 +1,298 @@
++import 'package:sqflite_sqlcipher/sqflite.dart';
++import 'package:uuid/uuid.dart';
++
++import '../../../core/data/app_database.dart';
++import '../domain/dompet_models.dart';
++
++class DompetRepository {
++  final _uuid = const Uuid();
++
++  Future<Database> get _db => AppDatabase.instance.database;
++
++  // --- Cash locations ---
++
++  Future<List<CashLocation>> getCashLocations({CashLocationType? type}) async {
++    final db = await _db;
++    final rows = await db.query(
++      'cash_locations',
++      where: type == null ? 'is_active = 1' : 'is_active = 1 AND type = ?',
++      whereArgs: type == null ? null : [type.name],
++      orderBy: 'created_at ASC',
++    );
++    return rows.map(_locationFromRow).toList();
++  }
++
++  Future<CashLocation?> getCashLocation(String id) async {
++    final db = await _db;
++    final rows = await db.query('cash_locations', where: 'id = ?', whereArgs: [id], limit: 1);
++    if (rows.isEmpty) return null;
++    return _locationFromRow(rows.first);
++  }
++
++  CashLocation _locationFromRow(Map<String, Object?> row) {
++    return CashLocation(
++      id: row['id'] as String,
++      type: (row['type'] as String) == 'store' ? CashLocationType.store : CashLocationType.courier,
++      name: row['name'] as String,
++      staffId: row['staff_id'] as String?,
++      isActive: (row['is_active'] as int) == 1,
++    );
++  }
++
++  /// Balance is always computed as SUM(amount) where this location is
++  /// the destination, minus SUM(amount) where it's the source — never a
++  /// stored/mutated field. This is the ledger principle the Dompet PRD
++  /// requires (§26: "Jangan membuat modul Dompet sebagai sistem saldo
++  /// sederhana... balance += cash").
++  Future<int> getLocationBalance(String locationId) async {
++    final db = await _db;
++
++    final inResult = await db.rawQuery(
++      'SELECT COALESCE(SUM(amount), 0) as total FROM cash_movements WHERE to_location_id = ?',
++      [locationId],
++    );
++    final outResult = await db.rawQuery(
++      'SELECT COALESCE(SUM(amount), 0) as total FROM cash_movements WHERE from_location_id = ?',
++      [locationId],
++    );
++
++    final inTotal = inResult.first['total'] as int;
++    final outTotal = outResult.first['total'] as int;
++    return inTotal - outTotal;
++  }
++
++  Future<List<CashLocationBalance>> getCourierBalancesWithOutstanding() async {
++    final couriers = await getCashLocations(type: CashLocationType.courier);
++    final balances = <CashLocationBalance>[];
++    for (final courier in couriers) {
++      final balance = await getLocationBalance(courier.id);
++      if (balance > 0) {
++        balances.add(CashLocationBalance(location: courier, balance: balance));
++      }
++    }
++    return balances;
++  }
++
++  Future<DompetSummary> getSummary() async {
++    final storeBalance = await getLocationBalance('loc-store');
++    final courierBalances = await getCourierBalancesWithOutstanding();
++    final totalCourierOutstanding = courierBalances.fold<int>(0, (sum, b) => sum + b.balance);
++    final totalKasbon = await getTotalOutstandingKasbon();
++
++    return DompetSummary(
++      storeCashBalance: storeBalance,
++      totalCourierOutstanding: totalCourierOutstanding,
++      totalKasbonOutstanding: totalKasbon,
++      courierBalances: courierBalances,
++    );
++  }
++
++  // --- Cash movements ---
++
++  Future<List<CashMovement>> getMovements({String? locationId, int limit = 100}) async {
++    final db = await _db;
++    final rows = await db.query(
++      'cash_movements',
++      where: locationId == null ? null : 'from_location_id = ? OR to_location_id = ?',
++      whereArgs: locationId == null ? null : [locationId, locationId],
++      orderBy: 'created_at DESC',
++      limit: limit,
++    );
++    return rows.map(_movementFromRow).toList();
++  }
++
++  CashMovement _movementFromRow(Map<String, Object?> row) {
++    return CashMovement(
++      id: row['id'] as String,
++      type: CashMovementType.values.firstWhere((t) => t.name == row['type'], orElse: () => CashMovementType.adjustment),
++      fromLocationId: row['from_location_id'] as String?,
++      toLocationId: row['to_location_id'] as String?,
++      amount: row['amount'] as int,
++      referenceTransactionId: row['reference_transaction_id'] as String?,
++      referenceKasbonId: row['reference_kasbon_id'] as String?,
++      reason: row['reason'] as String?,
++      createdAt: DateTime.parse(row['created_at'] as String),
++      createdBy: row['created_by'] as String?,
++    );
++  }
++
++  /// Records a cash sale entering a location's ledger (Store Cash for
++  /// non-delivery/non-cash payments and dine-in/takeaway cash, or a
++  /// courier location when the cashier records that a courier is
++  /// holding the cash for a delivery/Ojol cash payment). Called from
++  /// checkout — see PosRepository.saveTransaction, which calls this
++  /// after the transaction itself is saved.
++  Future<void> recordCashSale({
++    required String toLocationId,
++    required int amount,
++    required String transactionId,
++  }) async {
++    final db = await _db;
++    await db.insert('cash_movements', {
++      'id': _uuid.v4(),
++      'type': CashMovementType.cashSale.name,
++      'from_location_id': null,
++      'to_location_id': toLocationId,
++      'amount': amount,
++      'reference_transaction_id': transactionId,
++      'reference_kasbon_id': null,
++      'reason': null,
++      'created_at': DateTime.now().toIso8601String(),
++      'created_by': null,
++    });
++  }
++
++  /// "Sudah Disetor" — courier hands cash to the store. Per PRD §5,
++  /// this is a cash movement only, never a new sales transaction.
++  /// Supports partial settlement (PRD §10): amount may be less than the
++  /// courier's full outstanding balance.
++  Future<void> recordCourierDeposit({
++    required String courierLocationId,
++    required int amount,
++  }) async {
++    final db = await _db;
++    await db.insert('cash_movements', {
++      'id': _uuid.v4(),
++      'type': CashMovementType.courierDeposit.name,
++      'from_location_id': courierLocationId,
++      'to_location_id': 'loc-store',
++      'amount': amount,
++      'reference_transaction_id': null,
++      'reference_kasbon_id': null,
++      'reason': 'Setoran kurir',
++      'created_at': DateTime.now().toIso8601String(),
++      'created_by': null,
++    });
++  }
++
++  // --- Kasbon ---
++
++  Future<List<Kasbon>> getKasbonList({KasbonStatus? status}) async {
++    final db = await _db;
++    final rows = await db.query(
++      'kasbon',
++      where: status == null ? null : 'status = ?',
++      whereArgs: status == null ? null : [status.name],
++      orderBy: 'created_at DESC',
++    );
++
++    final list = <Kasbon>[];
++    for (final row in rows) {
++      final repaymentRows = await db.query('kasbon_repayments', where: 'kasbon_id = ?', whereArgs: [row['id']], orderBy: 'created_at ASC');
++      list.add(_kasbonFromRow(row, repaymentRows));
++    }
++    return list;
++  }
++
++  Kasbon _kasbonFromRow(Map<String, Object?> row, List<Map<String, Object?>> repaymentRows) {
++    return Kasbon(
++      id: row['id'] as String,
++      staffId: row['staff_id'] as String?,
++      courierLocationId: row['courier_location_id'] as String,
++      staffName: row['staff_name'] as String,
++      amount: row['amount'] as int,
++      remainingBalance: row['remaining_balance'] as int,
++      source: row['source'] as String,
++      status: KasbonStatus.values.firstWhere((s) => s.name == row['status'], orElse: () => KasbonStatus.outstanding),
++      createdAt: DateTime.parse(row['created_at'] as String),
++      createdBy: row['created_by'] as String?,
++      repayments: repaymentRows
++          .map((r) => KasbonRepayment(
++                id: r['id'] as String,
++                kasbonId: r['kasbon_id'] as String,
++                amount: r['amount'] as int,
++                note: r['note'] as String?,
++                createdAt: DateTime.parse(r['created_at'] as String),
++                createdBy: r['created_by'] as String?,
++              ))
++          .toList(),
++    );
++  }
++
++  Future<int> getTotalOutstandingKasbon() async {
++    final db = await _db;
++    final result = await db.rawQuery(
++      "SELECT COALESCE(SUM(remaining_balance), 0) as total FROM kasbon WHERE status != 'paid'",
++    );
++    return result.first['total'] as int;
++  }
++
++  /// "Jadikan Kasbon" — converts a courier's outstanding cash into a
++  /// Staff Debt record. Per PRD §7/§13, this creates a cash_movement
++  /// (courier -> nowhere, cash leaves the courier's ledger balance) AND
++  /// a kasbon record, but never touches the original sales
++  /// transaction(s) that produced the outstanding cash.
++  Future<Kasbon> convertToKasbon({
++    required String courierLocationId,
++    required String courierName,
++    required int amount,
++  }) async {
++    final db = await _db;
++    final kasbonId = _uuid.v4();
++    final now = DateTime.now().toIso8601String();
++
++    await db.insert('kasbon', {
++      'id': kasbonId,
++      'staff_id': null,
++      'courier_location_id': courierLocationId,
++      'staff_name': courierName,
++      'amount': amount,
++      'remaining_balance': amount,
++      'source': 'Unsettled Courier Cash',
++      'status': KasbonStatus.outstanding.name,
++      'created_at': now,
++      'created_by': null,
++    });
++
++    await db.insert('cash_movements', {
++      'id': _uuid.v4(),
++      'type': CashMovementType.convertToKasbon.name,
++      'from_location_id': courierLocationId,
++      'to_location_id': null,
++      'amount': amount,
++      'reference_transaction_id': null,
++      'reference_kasbon_id': kasbonId,
++      'reason': 'Konversi outstanding kurir menjadi kasbon',
++      'created_at': now,
++      'created_by': null,
++    });
++
++    return (await getKasbonList()).firstWhere((k) => k.id == kasbonId);
++  }
++
++  /// Records a repayment against a kasbon (e.g. a payroll deduction,
++  /// once a Payroll module exists, or a manual repayment now). Updates
++  /// remaining_balance/status derived from the repayment history, per
++  /// PRD §9 — never silently marks paid.
++  Future<void> recordKasbonRepayment({
++    required String kasbonId,
++    required int amount,
++    String? note,
++  }) async {
++    final db = await _db;
++    final kasbonRows = await db.query('kasbon', where: 'id = ?', whereArgs: [kasbonId], limit: 1);
++    if (kasbonRows.isEmpty) return;
++
++    final currentRemaining = kasbonRows.first['remaining_balance'] as int;
++    final newRemaining = (currentRemaining - amount).clamp(0, currentRemaining);
++    final newStatus = newRemaining == 0
++        ? KasbonStatus.paid.name
++        : (newRemaining < (kasbonRows.first['amount'] as int) ? KasbonStatus.partiallyPaid.name : KasbonStatus.outstanding.name);
++
++    await db.insert('kasbon_repayments', {
++      'id': _uuid.v4(),
++      'kasbon_id': kasbonId,
++      'amount': amount,
++      'note': note,
++      'created_at': DateTime.now().toIso8601String(),
++      'created_by': null,
++    });
++
++    await db.update(
++      'kasbon',
++      {'remaining_balance': newRemaining, 'status': newStatus},
++      where: 'id = ?',
++      whereArgs: [kasbonId],
++    );
++  }
++}
+diff --git a/lib/features/dompet/domain/dompet_models.dart b/lib/features/dompet/domain/dompet_models.dart
+new file mode 100644
+index 0000000..0e4a1cb
+--- /dev/null
++++ b/lib/features/dompet/domain/dompet_models.dart
+@@ -0,0 +1,136 @@
++/// A cash location — Store Cash/Dompet, or a courier. Per PRD §3,
++/// Kasbon/Staff Debt is deliberately NOT a cash location; it's a staff
++/// liability tracked separately in [Kasbon].
++enum CashLocationType { store, courier }
++
++class CashLocation {
++  final String id;
++  final CashLocationType type;
++  final String name;
++  final String? staffId; // null until the Staff module exists
++  final bool isActive;
++
++  const CashLocation({
++    required this.id,
++    required this.type,
++    required this.name,
++    this.staffId,
++    required this.isActive,
++  });
++}
++
++/// Ledger entry types. Matches the PRD's cash-movement vocabulary —
++/// note there is deliberately no "will deposit later" type (PRD §17).
++enum CashMovementType {
++  opening,
++  cashSale, // Store Cash or a courier location receiving payment from a sale
++  courierDeposit, // Courier -> Store Cash ("Sudah Disetor")
++  convertToKasbon, // Courier -> leaves the cash ledger, becomes Staff Debt
++  expense,
++  adjustment,
++}
++
++/// One immutable cash-movement ledger row. Never edited or deleted —
++/// corrections are new adjustment movements, per PRD §26.
++class CashMovement {
++  final String id;
++  final CashMovementType type;
++  final String? fromLocationId; // null = cash entering the ledger (e.g. opening, a sale)
++  final String? toLocationId; // null = cash leaving the ledger (e.g. convert_to_kasbon)
++  final int amount;
++  final String? referenceTransactionId;
++  final String? referenceKasbonId;
++  final String? reason;
++  final DateTime createdAt;
++  final String? createdBy; // null until Auth exists
++
++  const CashMovement({
++    required this.id,
++    required this.type,
++    this.fromLocationId,
++    this.toLocationId,
++    required this.amount,
++    this.referenceTransactionId,
++    this.referenceKasbonId,
++    this.reason,
++    required this.createdAt,
++    this.createdBy,
++  });
++}
++
++enum KasbonStatus { outstanding, partiallyPaid, paid }
++
++/// Staff debt created by "Jadikan Kasbon". Per PRD §9, status/
++/// remaining balance only change via explicit repayment records — never
++/// auto-marked paid just by being referenced elsewhere.
++class Kasbon {
++  final String id;
++  final String? staffId; // null until Staff module exists
++  final String courierLocationId;
++  final String staffName;
++  final int amount;
++  final int remainingBalance;
++  final String source;
++  final KasbonStatus status;
++  final DateTime createdAt;
++  final String? createdBy;
++  final List<KasbonRepayment> repayments;
++
++  const Kasbon({
++    required this.id,
++    this.staffId,
++    required this.courierLocationId,
++    required this.staffName,
++    required this.amount,
++    required this.remainingBalance,
++    required this.source,
++    required this.status,
++    required this.createdAt,
++    this.createdBy,
++    this.repayments = const [],
++  });
++}
++
++class KasbonRepayment {
++  final String id;
++  final String kasbonId;
++  final int amount;
++  final String? note;
++  final DateTime createdAt;
++  final String? createdBy;
++
++  const KasbonRepayment({
++    required this.id,
++    required this.kasbonId,
++    required this.amount,
++    this.note,
++    required this.createdAt,
++    this.createdBy,
++  });
++}
++
++/// A cash location with its computed balance (SUM of movements — never
++/// a stored/mutated field, per PRD's core ledger principle).
++class CashLocationBalance {
++  final CashLocation location;
++  final int balance;
++
++  const CashLocationBalance({required this.location, required this.balance});
++}
++
++/// Top-level Dompet summary shown on the main page: Uang di Dompet /
++/// Uang di Kurir / Kasbon Staff — kept as three separate figures per
++/// PRD §23 ("Jangan menjumlahkan kategori tersebut secara sembarangan").
++class DompetSummary {
++  final int storeCashBalance;
++  final int totalCourierOutstanding;
++  final int totalKasbonOutstanding;
++  final List<CashLocationBalance> courierBalances;
++
++  const DompetSummary({
++    required this.storeCashBalance,
++    required this.totalCourierOutstanding,
++    required this.totalKasbonOutstanding,
++    required this.courierBalances,
++  });
++}
+diff --git a/lib/features/dompet/presentation/dompet_screen.dart b/lib/features/dompet/presentation/dompet_screen.dart
+new file mode 100644
+index 0000000..17e2052
+--- /dev/null
++++ b/lib/features/dompet/presentation/dompet_screen.dart
+@@ -0,0 +1,211 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../../../core/theme/app_colors.dart';
++import '../../../core/theme/app_spacing.dart';
++import '../../../core/utils/currency.dart';
++import '../../../core/widgets/ios_page_header.dart';
++import '../application/dompet_provider.dart';
++import '../domain/dompet_models.dart';
++import 'widgets/cash_movement_tile.dart';
++import 'widgets/courier_outstanding_card.dart';
++
++/// Dompet (cash ledger) page — reached via the swipe-up menu's "Dompet"
++/// tile. Shows saldo, the PRD-mandated three-category summary (Uang di
++/// Dompet / Uang di Kurir / Kasbon Staff, deliberately never summed
++/// together — PRD §23), outstanding courier cash needing resolution,
++/// and recent cash activity.
++///
++/// Closing/"Tutup Dompet" is NOT part of this screen — that lands once
++/// Shift exists, see [[dompet-prd]].
++class DompetScreen extends ConsumerWidget {
++  const DompetScreen({super.key});
++
++  @override
++  Widget build(BuildContext context, WidgetRef ref) {
++    final state = ref.watch(dompetProvider);
++    final controller = ref.read(dompetProvider.notifier);
++
++    ref.listen(dompetProvider, (previous, next) {
++      if (next.errorMessage != null && next.errorMessage != previous?.errorMessage) {
++        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(next.errorMessage!), backgroundColor: AppColors.danger));
++      }
++    });
++
++    return Scaffold(
++      backgroundColor: AppColors.background,
++      appBar: IosPageHeader(title: const Text('Dompet')),
++      body: SafeArea(
++        top: false,
++        child: state.isLoading
++            ? const Center(child: CircularProgressIndicator(color: AppColors.brand))
++            : RefreshIndicator(
++                color: AppColors.brand,
++                onRefresh: controller.load,
++                child: ListView(
++                  padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.xxl),
++                  children: [
++                    _SaldoCard(summary: state.summary),
++                    const SizedBox(height: AppSpacing.lg),
++                    _RingkasanRow(summary: state.summary),
++                    if (state.summary != null && state.summary!.courierBalances.isNotEmpty) ...[
++                      const SizedBox(height: AppSpacing.xl),
++                      const _SectionLabel(text: 'UANG DI KURIR'),
++                      const SizedBox(height: AppSpacing.sm),
++                      ...state.summary!.courierBalances.map((balance) => Padding(
++                            padding: const EdgeInsets.only(bottom: AppSpacing.sm),
++                            child: CourierOutstandingCard(
++                              balance: balance,
++                              onDeposit: (amount) => controller.recordCourierDeposit(
++                                courierLocationId: balance.location.id,
++                                amount: amount,
++                              ),
++                              onConvertToKasbon: () => controller.convertToKasbon(
++                                courierLocationId: balance.location.id,
++                                courierName: balance.location.name,
++                                amount: balance.balance,
++                              ),
++                            ),
++                          )),
++                    ],
++                    const SizedBox(height: AppSpacing.xl),
++                    const _SectionLabel(text: 'AKTIVITAS CASH'),
++                    const SizedBox(height: AppSpacing.sm),
++                    if (state.recentMovements.isEmpty)
++                      const Padding(
++                        padding: EdgeInsets.symmetric(vertical: AppSpacing.lg),
++                        child: Center(
++                          child: Text('Belum ada aktivitas.', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w500, color: AppColors.textMuted)),
++                        ),
++                      )
++                    else
++                      Container(
++                        padding: const EdgeInsets.all(AppSpacing.md),
++                        decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.lg), border: Border.all(color: AppColors.border)),
++                        child: Column(
++                          children: state.recentMovements
++                              .map((m) => CashMovementTile(movement: m, locationNames: _locationNameLookup(state.summary)))
++                              .toList(),
++                        ),
++                      ),
++                  ],
++                ),
++              ),
++      ),
++    );
++  }
++
++  Map<String, String> _locationNameLookup(DompetSummary? summary) {
++    if (summary == null) return {'loc-store': 'Dompet Toko'};
++    final map = <String, String>{'loc-store': 'Dompet Toko'};
++    for (final b in summary.courierBalances) {
++      map[b.location.id] = b.location.name;
++    }
++    return map;
++  }
++}
++
++class _SaldoCard extends StatelessWidget {
++  final DompetSummary? summary;
++  const _SaldoCard({required this.summary});
++
++  @override
++  Widget build(BuildContext context) {
++    return Container(
++      width: double.infinity,
++      padding: const EdgeInsets.all(AppSpacing.lg),
++      decoration: BoxDecoration(
++        gradient: const LinearGradient(colors: AppColors.heroGradient, begin: Alignment.topLeft, end: Alignment.bottomRight),
++        borderRadius: BorderRadius.circular(AppRadius.xl),
++      ),
++      child: Column(
++        crossAxisAlignment: CrossAxisAlignment.start,
++        children: [
++          Text('SALDO DOMPET', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 1, color: Colors.white.withValues(alpha: 0.55))),
++          const SizedBox(height: 6),
++          Text(formatRupiah(summary?.storeCashBalance ?? 0), style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w800, color: Colors.white)),
++        ],
++      ),
++    );
++  }
++}
++
++class _RingkasanRow extends StatelessWidget {
++  final DompetSummary? summary;
++  const _RingkasanRow({required this.summary});
++
++  @override
++  Widget build(BuildContext context) {
++    return Row(
++      children: [
++        Expanded(
++          child: _RingkasanChip(
++            icon: Icons.storefront_rounded,
++            label: 'Di Dompet',
++            value: summary?.storeCashBalance ?? 0,
++            color: AppColors.success,
++          ),
++        ),
++        const SizedBox(width: AppSpacing.sm),
++        Expanded(
++          child: _RingkasanChip(
++            icon: Icons.moped_rounded,
++            label: 'Di Kurir',
++            value: summary?.totalCourierOutstanding ?? 0,
++            color: AppColors.warning,
++          ),
++        ),
++        const SizedBox(width: AppSpacing.sm),
++        Expanded(
++          child: _RingkasanChip(
++            icon: Icons.receipt_long_rounded,
++            label: 'Kasbon',
++            value: summary?.totalKasbonOutstanding ?? 0,
++            color: AppColors.danger,
++          ),
++        ),
++      ],
++    );
++  }
++}
++
++class _RingkasanChip extends StatelessWidget {
++  final IconData icon;
++  final String label;
++  final int value;
++  final Color color;
++  const _RingkasanChip({required this.icon, required this.label, required this.value, required this.color});
++
++  @override
++  Widget build(BuildContext context) {
++    return Container(
++      padding: const EdgeInsets.all(AppSpacing.sm),
++      decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.md), border: Border.all(color: AppColors.border)),
++      child: Column(
++        crossAxisAlignment: CrossAxisAlignment.start,
++        children: [
++          Icon(icon, size: 15, color: color),
++          const SizedBox(height: 6),
++          Text(label, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: AppColors.textMuted)),
++          const SizedBox(height: 2),
++          Text(
++            formatRupiah(value),
++            maxLines: 1,
++            overflow: TextOverflow.ellipsis,
++            style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800, color: color),
++          ),
++        ],
++      ),
++    );
++  }
++}
++
++class _SectionLabel extends StatelessWidget {
++  final String text;
++  const _SectionLabel({required this.text});
++
++  @override
++  Widget build(BuildContext context) {
++    return Text(text, style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w800, color: AppColors.textMuted, letterSpacing: 0.5));
++  }
++}
+diff --git a/lib/features/dompet/presentation/widgets/cash_location_picker.dart b/lib/features/dompet/presentation/widgets/cash_location_picker.dart
+new file mode 100644
+index 0000000..74d6932
+--- /dev/null
++++ b/lib/features/dompet/presentation/widgets/cash_location_picker.dart
+@@ -0,0 +1,85 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../../../../core/theme/app_colors.dart';
++import '../../../../core/theme/app_spacing.dart';
++import '../../application/dompet_provider.dart';
++import '../../domain/dompet_models.dart';
++
++/// Checkout-side entry point into the Dompet ledger (see
++/// [[dompet-prd]]): when an order is Delivery/Ojol and paid in cash,
++/// the cashier must say where that cash physically is — handed
++/// straight to the store, or held by a specific courier. This is what
++/// [PosRepository.saveTransaction] uses as `cashLocationId` to record
++/// the resulting cash movement.
++///
++/// Courier options are read from [CashLocationType.courier] cash
++/// locations, which are manual/dummy entries for now — see
++/// [[dompet-prd]] on why (no Staff module yet to source a real list).
++class CashLocationPicker extends ConsumerWidget {
++  final String? selectedLocationId;
++  final ValueChanged<String> onChanged;
++
++  const CashLocationPicker({super.key, required this.selectedLocationId, required this.onChanged});
++
++  @override
++  Widget build(BuildContext context, WidgetRef ref) {
++    final locationsAsync = ref.watch(cashLocationsProvider);
++
++    return locationsAsync.when(
++      loading: () => const SizedBox(height: 44, child: Center(child: CircularProgressIndicator(strokeWidth: 2))),
++      error: (_, __) => const SizedBox.shrink(),
++      data: (locations) {
++        if (locations.isEmpty) return const SizedBox.shrink();
++
++        return Column(
++          crossAxisAlignment: CrossAxisAlignment.start,
++          children: [
++            const Text('Uang Diterima Oleh', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.textSecondary)),
++            const SizedBox(height: 4),
++            const Text(
++              'Untuk pengiriman cash, catat siapa yang memegang uang ini.',
++              style: TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: AppColors.textMuted),
++            ),
++            const SizedBox(height: AppSpacing.sm),
++            Wrap(
++              spacing: AppSpacing.sm,
++              runSpacing: AppSpacing.sm,
++              children: locations.map((loc) {
++                final isSelected = selectedLocationId == loc.id;
++                final isStore = loc.type == CashLocationType.store;
++                return InkWell(
++                  onTap: () => onChanged(loc.id),
++                  borderRadius: BorderRadius.circular(AppRadius.md),
++                  child: Container(
++                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
++                    decoration: BoxDecoration(
++                      color: isSelected ? AppColors.brand.withValues(alpha: 0.08) : AppColors.surface,
++                      borderRadius: BorderRadius.circular(AppRadius.md),
++                      border: Border.all(color: isSelected ? AppColors.brand : AppColors.border, width: isSelected ? 1.5 : 1),
++                    ),
++                    child: Row(
++                      mainAxisSize: MainAxisSize.min,
++                      children: [
++                        Icon(
++                          isStore ? Icons.storefront_rounded : Icons.moped_rounded,
++                          size: 16,
++                          color: isSelected ? AppColors.brand : AppColors.textSecondary,
++                        ),
++                        const SizedBox(width: 6),
++                        Text(
++                          loc.name,
++                          style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: isSelected ? AppColors.brand : AppColors.textPrimary),
++                        ),
++                      ],
++                    ),
++                  ),
++                );
++              }).toList(),
++            ),
++          ],
++        );
++      },
++    );
++  }
++}
+diff --git a/lib/features/dompet/presentation/widgets/cash_movement_tile.dart b/lib/features/dompet/presentation/widgets/cash_movement_tile.dart
+new file mode 100644
+index 0000000..4877069
+--- /dev/null
++++ b/lib/features/dompet/presentation/widgets/cash_movement_tile.dart
+@@ -0,0 +1,91 @@
++import 'package:flutter/material.dart';
++import 'package:intl/intl.dart';
++
++import '../../../../core/theme/app_colors.dart';
++import '../../../../core/theme/app_spacing.dart';
++import '../../../../core/utils/currency.dart';
++import '../../domain/dompet_models.dart';
++
++/// One cash-movement row, described in plain cashier-facing language
++/// per PRD §20 ("Gunakan istilah yang mudah dipahami kasir") rather
++/// than raw ledger jargon.
++class CashMovementTile extends StatelessWidget {
++  final CashMovement movement;
++  final Map<String, String> locationNames; // id -> display name, for from/to labels
++
++  const CashMovementTile({super.key, required this.movement, required this.locationNames});
++
++  String get _title {
++    switch (movement.type) {
++      case CashMovementType.opening:
++        return 'Saldo Awal';
++      case CashMovementType.cashSale:
++        final to = locationNames[movement.toLocationId] ?? 'Dompet';
++        return movement.toLocationId == 'loc-store' ? 'Penjualan Cash' : 'Penjualan Cash · $to';
++      case CashMovementType.courierDeposit:
++        final from = locationNames[movement.fromLocationId] ?? 'Kurir';
++        return 'Setoran dari $from';
++      case CashMovementType.convertToKasbon:
++        final from = locationNames[movement.fromLocationId] ?? 'Kurir';
++        return 'Konversi Kasbon · $from';
++      case CashMovementType.expense:
++        return 'Pengeluaran';
++      case CashMovementType.adjustment:
++        return 'Penyesuaian';
++    }
++  }
++
++  IconData get _icon {
++    switch (movement.type) {
++      case CashMovementType.opening:
++        return Icons.wallet_rounded;
++      case CashMovementType.cashSale:
++        return Icons.point_of_sale_rounded;
++      case CashMovementType.courierDeposit:
++        return Icons.arrow_downward_rounded;
++      case CashMovementType.convertToKasbon:
++        return Icons.receipt_long_rounded;
++      case CashMovementType.expense:
++        return Icons.arrow_upward_rounded;
++      case CashMovementType.adjustment:
++        return Icons.tune_rounded;
++    }
++  }
++
++  bool get _isOutflowFromStore => movement.fromLocationId == 'loc-store';
++
++  @override
++  Widget build(BuildContext context) {
++    final isPositiveForStore = movement.toLocationId == 'loc-store' || (movement.toLocationId == null && movement.fromLocationId != 'loc-store');
++    final color = _isOutflowFromStore ? AppColors.danger : (isPositiveForStore ? AppColors.success : AppColors.textSecondary);
++    final sign = _isOutflowFromStore ? '-' : (isPositiveForStore ? '+' : '');
++
++    return Padding(
++      padding: const EdgeInsets.only(bottom: AppSpacing.sm),
++      child: Row(
++        children: [
++          Container(
++            width: 34,
++            height: 34,
++            decoration: BoxDecoration(color: color.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(AppRadius.sm)),
++            child: Icon(_icon, size: 16, color: color),
++          ),
++          const SizedBox(width: AppSpacing.sm),
++          Expanded(
++            child: Column(
++              crossAxisAlignment: CrossAxisAlignment.start,
++              children: [
++                Text(_title, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
++                Text(
++                  DateFormat('d MMM, HH:mm', 'id_ID').format(movement.createdAt),
++                  style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.w500, color: AppColors.textMuted),
++                ),
++              ],
++            ),
++          ),
++          Text('$sign${formatRupiah(movement.amount)}', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: color)),
++        ],
++      ),
++    );
++  }
++}
+diff --git a/lib/features/dompet/presentation/widgets/courier_outstanding_card.dart b/lib/features/dompet/presentation/widgets/courier_outstanding_card.dart
+new file mode 100644
+index 0000000..83eaa20
+--- /dev/null
++++ b/lib/features/dompet/presentation/widgets/courier_outstanding_card.dart
+@@ -0,0 +1,149 @@
++import 'package:flutter/material.dart';
++
++import '../../../../core/theme/app_colors.dart';
++import '../../../../core/theme/app_spacing.dart';
++import '../../../../core/utils/currency.dart';
++import '../../domain/dompet_models.dart';
++
++/// One courier's outstanding cash, with the two PRD-mandated resolution
++/// actions — "Sudah Disetor" and "Jadikan Kasbon". No "will deposit
++/// later" option exists here, per PRD §17.
++class CourierOutstandingCard extends StatelessWidget {
++  final CashLocationBalance balance;
++  final ValueChanged<int> onDeposit; // amount actually handed over (supports partial, PRD §10)
++  final VoidCallback onConvertToKasbon;
++
++  const CourierOutstandingCard({
++    super.key,
++    required this.balance,
++    required this.onDeposit,
++    required this.onConvertToKasbon,
++  });
++
++  Future<void> _showDepositDialog(BuildContext context) async {
++    final controller = TextEditingController(text: balance.balance.toString());
++
++    final amount = await showDialog<int>(
++      context: context,
++      builder: (context) => AlertDialog(
++        title: Text('Setoran ${balance.location.name}'),
++        content: Column(
++          mainAxisSize: MainAxisSize.min,
++          crossAxisAlignment: CrossAxisAlignment.start,
++          children: [
++            Text('Outstanding saat ini: ${formatRupiah(balance.balance)}', style: const TextStyle(fontSize: 12.5, color: AppColors.textMuted)),
++            const SizedBox(height: AppSpacing.md),
++            TextField(
++              controller: controller,
++              keyboardType: TextInputType.number,
++              autofocus: true,
++              decoration: const InputDecoration(prefixText: 'Rp ', labelText: 'Jumlah disetor', border: OutlineInputBorder()),
++            ),
++          ],
++        ),
++        actions: [
++          TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Batal')),
++          TextButton(
++            onPressed: () {
++              final value = int.tryParse(controller.text.trim()) ?? 0;
++              if (value > 0 && value <= balance.balance) {
++                Navigator.of(context).pop(value);
++              }
++            },
++            child: const Text('Konfirmasi'),
++          ),
++        ],
++      ),
++    );
++
++    if (amount != null) onDeposit(amount);
++  }
++
++  Future<void> _showKasbonConfirm(BuildContext context) async {
++    final confirmed = await showDialog<bool>(
++      context: context,
++      builder: (context) => AlertDialog(
++        title: const Text('Jadikan Kasbon?'),
++        content: Text(
++          '${formatRupiah(balance.balance)} milik ${balance.location.name} akan dikonversi menjadi kasbon/hutang staff. '
++          'Tidak mengubah transaksi penjualan yang sudah ada.',
++          style: const TextStyle(fontSize: 13),
++        ),
++        actions: [
++          TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Batal')),
++          TextButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('Ya, Jadikan Kasbon')),
++        ],
++      ),
++    );
++
++    if (confirmed == true) onConvertToKasbon();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    return Container(
++      padding: const EdgeInsets.all(AppSpacing.md),
++      decoration: BoxDecoration(
++        color: AppColors.surface,
++        borderRadius: BorderRadius.circular(AppRadius.lg),
++        border: Border.all(color: AppColors.warning.withValues(alpha: 0.3)),
++      ),
++      child: Column(
++        crossAxisAlignment: CrossAxisAlignment.start,
++        children: [
++          Row(
++            children: [
++              Container(
++                width: 36,
++                height: 36,
++                decoration: BoxDecoration(color: AppColors.warning.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(AppRadius.sm)),
++                child: const Icon(Icons.moped_rounded, size: 18, color: AppColors.warning),
++              ),
++              const SizedBox(width: AppSpacing.sm),
++              Expanded(
++                child: Column(
++                  crossAxisAlignment: CrossAxisAlignment.start,
++                  children: [
++                    Text(balance.location.name, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
++                    const Text('Belum disetor', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: AppColors.textMuted)),
++                  ],
++                ),
++              ),
++              Text(formatRupiah(balance.balance), style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: AppColors.warning)),
++            ],
++          ),
++          const SizedBox(height: AppSpacing.md),
++          Row(
++            children: [
++              Expanded(
++                child: OutlinedButton(
++                  onPressed: () => _showDepositDialog(context),
++                  style: OutlinedButton.styleFrom(
++                    foregroundColor: AppColors.success,
++                    side: const BorderSide(color: AppColors.success),
++                    padding: const EdgeInsets.symmetric(vertical: 10),
++                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
++                  ),
++                  child: const Text('Sudah Disetor', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800)),
++                ),
++              ),
++              const SizedBox(width: AppSpacing.sm),
++              Expanded(
++                child: OutlinedButton(
++                  onPressed: () => _showKasbonConfirm(context),
++                  style: OutlinedButton.styleFrom(
++                    foregroundColor: AppColors.danger,
++                    side: const BorderSide(color: AppColors.danger),
++                    padding: const EdgeInsets.symmetric(vertical: 10),
++                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
++                  ),
++                  child: const Text('Jadikan Kasbon', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800)),
++                ),
++              ),
++            ],
++          ),
++        ],
++      ),
++    );
++  }
++}
+diff --git a/lib/features/menu_shell/presentation/menu_grid_items.dart b/lib/features/menu_shell/presentation/menu_grid_items.dart
+index 86d0a66..4f8b1d0 100644
+--- a/lib/features/menu_shell/presentation/menu_grid_items.dart
++++ b/lib/features/menu_shell/presentation/menu_grid_items.dart
+@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
+ import '../../../core/navigation/app_nav.dart';
+ import '../../../core/theme/app_colors.dart';
+ import '../../../core/widgets/placeholder_screen.dart';
++import '../../dompet/presentation/dompet_screen.dart';
+ import '../../menu_management/presentation/menu_management_screen.dart';
+ 
+ /// One tile in the swipe-up menu's 3x3 grid.
+@@ -60,7 +61,12 @@ List<MenuGridItem> buildMenuGridItems({
+   }
+ 
+   return [
+-    placeholderTile(label: 'Dompet', icon: Icons.account_balance_wallet_rounded, color: AppColors.tileDompet),
++    MenuGridItem(
++      label: 'Dompet',
++      icon: Icons.account_balance_wallet_rounded,
++      color: AppColors.tileDompet,
++      onTap: () => pushDestination((_) => const DompetScreen()),
++    ),
+     MenuGridItem(
+       label: 'Menu',
+       icon: Icons.inventory_2_rounded,
+diff --git a/lib/features/pos/application/payment_modal_provider.dart b/lib/features/pos/application/payment_modal_provider.dart
+index db0ce07..20f7f81 100644
+--- a/lib/features/pos/application/payment_modal_provider.dart
++++ b/lib/features/pos/application/payment_modal_provider.dart
+@@ -48,6 +48,14 @@ class PaymentModalController extends StateNotifier<PaymentModalState> {
+     state = state.copyWith(orderNumber: number);
+   }
+ 
++  /// Records which Dompet cash location is holding the cash for this
++  /// payment (Store Cash, or a specific courier) — see
++  /// [[dompet-prd]]. Only meaningful for cash payments on Delivery/Ojol
++  /// orders; the UI only shows this picker in that case.
++  void setCashLocation(String locationId) {
++    state = state.copyWith(cashLocationId: locationId);
++  }
++
+   void markCompleted() {
+     state = state.copyWith(status: PaymentStatus.completed);
+   }
+diff --git a/lib/features/pos/application/pos_repository.dart b/lib/features/pos/application/pos_repository.dart
+index f950aca..b4cdc65 100644
+--- a/lib/features/pos/application/pos_repository.dart
++++ b/lib/features/pos/application/pos_repository.dart
+@@ -4,6 +4,7 @@ import 'package:sqflite_sqlcipher/sqflite.dart';
+ import 'package:uuid/uuid.dart';
+ 
+ import '../../../core/data/app_database.dart';
++import '../../dompet/application/dompet_repository.dart';
+ import '../../menu_management/application/menu_management_repository.dart';
+ import '../../menu_management/domain/menu_management_models.dart';
+ import '../domain/cart_item.dart';
+@@ -15,6 +16,7 @@ import '../domain/voucher.dart';
+ class PosRepository {
+   final _uuid = const Uuid();
+   final MenuManagementRepository _menuRepository = MenuManagementRepository();
++  final DompetRepository _dompetRepository = DompetRepository();
+ 
+   Future<Database> get _db => AppDatabase.instance.database;
+ 
+@@ -85,6 +87,13 @@ class PosRepository {
+   /// Persists a completed transaction and its line items. `id` and
+   /// `displayNumber` are generated here so the caller (checkout flow)
+   /// doesn't need its own ID scheme.
++  ///
++  /// `cashLocationId`: when the payment is cash (fully or in part —
++  /// callers pass this only for the cash portion), this records where
++  /// that cash physically ended up (Store Cash, or a specific courier
++  /// for Delivery/Ojol) as a Dompet ledger movement — see
++  /// [[dompet-prd]]. Left null for non-cash payments, where there is no
++  /// physical cash to track.
+   Future<txn.Transaction> saveTransaction({
+     required txn.TransactionStatus status,
+     required OrderType orderType,
+@@ -108,6 +117,7 @@ class PosRepository {
+     int? amountPaid,
+     int? changeAmount,
+     List<SplitPaymentEntry> splitPayments = const [],
++    String? cashLocationId,
+   }) async {
+     final db = await _db;
+     final now = DateTime.now();
+@@ -163,6 +173,21 @@ class PosRepository {
+       });
+     }
+ 
++    // Dompet ledger entry — per [[dompet-prd]], a Paid status does not
++    // by itself mean the cash is in Store Cash; the cash amount goes to
++    // wherever the cashier recorded it (Store Cash or a courier). Only
++    // recorded for paid, cash-involving checkouts where a location was
++    // actually chosen — non-cash payments have no physical cash to
++    // track, and this repository has no opinion on where cash "should"
++    // go by default.
++    if (cashLocationId != null && status == txn.TransactionStatus.paid && amountPaid != null && amountPaid > 0) {
++      await _dompetRepository.recordCashSale(
++        toLocationId: cashLocationId,
++        amount: amountPaid,
++        transactionId: id,
++      );
++    }
++
+     return txn.Transaction(
+       id: id,
+       displayNumber: displayNumber,
+diff --git a/lib/features/pos/domain/payment_modal_state.dart b/lib/features/pos/domain/payment_modal_state.dart
+index 0cb3e2a..cf25985 100644
+--- a/lib/features/pos/domain/payment_modal_state.dart
++++ b/lib/features/pos/domain/payment_modal_state.dart
+@@ -16,6 +16,14 @@ class PaymentModalState {
+   final OjolPlatform? ojolPlatform;
+   final String orderNumber;
+ 
++  /// Which Dompet cash location is holding the cash for this payment —
++  /// shown only when order type is Delivery/Ojol and the method is
++  /// Tunai (see [[dompet-prd]]: a cash delivery payment is Paid
++  /// immediately but the cash itself may sit with a courier rather than
++  /// Store Cash). Null for non-cash methods or non-delivery orders,
++  /// where there is nothing to record.
++  final String? cashLocationId;
++
+   const PaymentModalState({
+     this.isOpen = false,
+     this.isSplitMode = false,
+@@ -25,6 +33,7 @@ class PaymentModalState {
+     this.status = PaymentStatus.pending,
+     this.ojolPlatform,
+     this.orderNumber = '',
++    this.cashLocationId,
+   });
+ 
+   int get amountPaid => int.tryParse(amountPaidText) ?? 0;
+@@ -38,6 +47,7 @@ class PaymentModalState {
+     PaymentStatus? status,
+     OjolPlatform? ojolPlatform,
+     String? orderNumber,
++    String? cashLocationId,
+   }) {
+     return PaymentModalState(
+       isOpen: isOpen ?? this.isOpen,
+@@ -48,6 +58,7 @@ class PaymentModalState {
+       status: status ?? this.status,
+       ojolPlatform: ojolPlatform ?? this.ojolPlatform,
+       orderNumber: orderNumber ?? this.orderNumber,
++      cashLocationId: cashLocationId ?? this.cashLocationId,
+     );
+   }
+ 
+diff --git a/lib/features/pos/presentation/widgets/payment_modal.dart b/lib/features/pos/presentation/widgets/payment_modal.dart
+index ae933cb..b7ceb97 100644
+--- a/lib/features/pos/presentation/widgets/payment_modal.dart
++++ b/lib/features/pos/presentation/widgets/payment_modal.dart
+@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ import '../../../../core/theme/app_colors.dart';
+ import '../../../../core/theme/app_spacing.dart';
+ import '../../../../core/utils/currency.dart';
++import '../../../dompet/presentation/widgets/cash_location_picker.dart';
+ import '../../application/cart_provider.dart';
+ import '../../application/payment_modal_provider.dart';
+ import '../../domain/cart_state.dart';
+@@ -71,6 +72,9 @@ class _PaymentModalState extends ConsumerState<PaymentModal> {
+       amountPaid: totalPaid,
+       changeAmount: change,
+       splitPayments: isSplit ? paymentState.splitPayments : const [],
++      cashLocationId: (cartState.orderType == OrderType.delivery && paymentState.method == PaymentMethod.tunai)
++          ? paymentState.cashLocationId
++          : null,
+     );
+ 
+     if (!mounted) return;
+@@ -102,11 +106,14 @@ class _PaymentModalState extends ConsumerState<PaymentModal> {
+     final remaining = totals.roundedTotal - paidSoFar;
+     final change = paidSoFar > totals.roundedTotal ? paidSoFar - totals.roundedTotal : 0;
+ 
++    final requiresCashLocation =
++        cartState.orderType == OrderType.delivery && !paymentState.isSplitMode && paymentState.method == PaymentMethod.tunai;
++
+     final canConfirm = isOjol
+         ? true
+         : paymentState.isSplitMode
+             ? remaining <= 0 && paymentState.splitPayments.isNotEmpty
+-            : paidSoFar >= totals.roundedTotal;
++            : paidSoFar >= totals.roundedTotal && (!requiresCashLocation || paymentState.cashLocationId != null);
+ 
+     // Full-height, matching CartDrawer — still a modal layer (not a page
+     // route), just sized to read like the reference design's Checkout
+@@ -167,7 +174,7 @@ class _PaymentModalState extends ConsumerState<PaymentModal> {
+                       _TotalDueCard(total: totals.roundedTotal),
+                       const SizedBox(height: AppSpacing.xl),
+                       if (isOjol)
+-                        _OjolSection(paymentState: paymentState, controller: paymentController)
++                        _OjolSection(paymentState: paymentState, controller: paymentController, orderType: cartState.orderType)
+                       else ...[
+                         _SplitModeToggle(paymentState: paymentState, controller: paymentController),
+                         const SizedBox(height: AppSpacing.lg),
+@@ -182,6 +189,7 @@ class _PaymentModalState extends ConsumerState<PaymentModal> {
+                             paymentState: paymentState,
+                             controller: paymentController,
+                             total: totals.roundedTotal,
++                            orderType: cartState.orderType,
+                           ),
+                         const SizedBox(height: AppSpacing.lg),
+                         if (change > 0) _ChangeCard(amount: change),
+@@ -344,7 +352,8 @@ class _SinglePaymentSection extends StatefulWidget {
+   final PaymentModalState paymentState;
+   final PaymentModalController controller;
+   final int total;
+-  const _SinglePaymentSection({required this.paymentState, required this.controller, required this.total});
++  final OrderType orderType;
++  const _SinglePaymentSection({required this.paymentState, required this.controller, required this.total, required this.orderType});
+ 
+   @override
+   State<_SinglePaymentSection> createState() => _SinglePaymentSectionState();
+@@ -416,6 +425,13 @@ class _SinglePaymentSectionState extends State<_SinglePaymentSection> {
+                     ))
+                 .toList(),
+           ),
++          if (widget.orderType == OrderType.delivery) ...[
++            const SizedBox(height: AppSpacing.lg),
++            CashLocationPicker(
++              selectedLocationId: widget.paymentState.cashLocationId,
++              onChanged: widget.controller.setCashLocation,
++            ),
++          ],
+         ],
+       ],
+     );
+-- 
+2.43.0
+
+
+From 0b892fb7f781a2ed54a82270461ccd6c4b5d1584 Mon Sep 17 00:00:00 2001
+From: Mamam Kasir Dev <dev@mamamayam.local>
+Date: Sat, 12 Sep 2026 08:27:23 +0000
+Subject: [PATCH 2/2] style: adopt Leci reference app's navy brand color
+ (#0A2540, replacing orange #FF6B2C)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Colors sampled directly from pixels in the user's Leci screenshots
+(primary button fill, header title text). AppColors.brand is the single
+source of truth for this across the app, so every screen using it
+(primary buttons, header icons, badges, chips, etc.) picks up the new
+navy automatically — no other files needed touching, confirmed no
+hardcoded #FF6B2C remained anywhere.
+
+Explicit exception per user decision: the dashboard hero sales card
+keeps its existing dark gradient rather than becoming solid navy —
+verified unchanged (still uses AppColors.heroGradient, not
+AppColors.brand).
+
+AppColors.info (#3B7DD9) already matched Leci's sampled chart/amount
+blue exactly — no change needed there.
+---
+ lib/core/theme/app_colors.dart | 29 ++++++++++++++++-------------
+ 1 file changed, 16 insertions(+), 13 deletions(-)
+
+diff --git a/lib/core/theme/app_colors.dart b/lib/core/theme/app_colors.dart
+index 25b6550..d44a4d1 100644
+--- a/lib/core/theme/app_colors.dart
++++ b/lib/core/theme/app_colors.dart
+@@ -2,12 +2,12 @@ import 'package:flutter/material.dart';
+ 
+ /// Central color tokens for Mamam Kasir.
+ ///
+-/// Design direction (per UI/UX reference pack): clean, modern, operational,
+-/// slightly premium — avoid excessive gradients / card-heavy decoration.
+-/// The hero "Total Penjualan Hari Ini" card keeps a dark gradient as an
+-/// accent focal point; the swipe-up menu's 3x3 icon grid and the quick
+-/// action cards (Kasir/Riwayat) both use solid, vivid per-item colors
+-/// (not muted) — see tile palette below.
++/// Brand color matches the "Leci" reference app's sampled navy
++/// (#0A2540, pulled directly from its primary button/header pixels),
++/// applied everywhere brand color is used EXCEPT the dashboard hero
++/// sales card, which keeps its existing dark gradient rather than
++/// becoming solid navy (explicit user decision — the gradient stays as
++/// an intentional accent).
+ class AppColors {
+   AppColors._();
+ 
+@@ -19,22 +19,25 @@ class AppColors {
+   static const Color textSecondary = Color(0xFF6B7280);
+   static const Color textMuted = Color(0xFF9CA3AF);
+ 
+-  // Brand
+-  static const Color brand = Color(0xFFFF6B2C);
+-  static const Color brandDark = Color(0xFFE85A1F);
++  // Brand — sampled from Leci reference (primary button fill / header
++  // title text): #0A2540.
++  static const Color brand = Color(0xFF0A2540);
++  static const Color brandDark = Color(0xFF071A2E);
+ 
+-  // Hero card gradient (the one intentional gradient in the app)
++  // Hero card gradient (the one intentional gradient in the app —
++  // deliberately NOT replaced with solid brand navy, per explicit
++  // decision when the Leci theme was adopted)
+   static const List<Color> heroGradient = [Color(0xFF1F2230), Color(0xFF14161F)];
+ 
+   // Status
+   static const Color success = Color(0xFF2FA36B);
+   static const Color danger = Color(0xFFE0554A);
+   static const Color warning = Color(0xFFD9A441);
+-  static const Color info = Color(0xFF3B7DD9);
++  static const Color info = Color(0xFF3B7DD9); // matches Leci's sampled chart/amount blue exactly
+ 
+   // Menu-tile palette — vivid/solid tones matching the saturation level of
+-  // the Kasir/Riwayat quick-action colors (brand orange, info blue), not
+-  // the earlier muted set. Each item keeps its own hue for recognition.
++  // the Kasir/Riwayat quick-action colors, not a muted set. Each item
++  // keeps its own hue for recognition.
+   static const Color tileDompet = Color(0xFF7C5FC7); // purple
+   static const Color tileMenu = Color(0xFF3B7DD9); // blue (matches info)
+   static const Color tileLabaRugi = Color(0xFF2FA36B); // green (matches success)
+-- 
+2.43.0
+

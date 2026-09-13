@@ -48,6 +48,14 @@ class PaymentModalController extends StateNotifier<PaymentModalState> {
     state = state.copyWith(orderNumber: number);
   }
 
+  /// Records which Dompet cash location is holding the cash for this
+  /// payment (Store Cash, or a specific courier) — see
+  /// [[dompet-prd]]. Only meaningful for cash payments on Delivery/Ojol
+  /// orders; the UI only shows this picker in that case.
+  void setCashLocation(String locationId) {
+    state = state.copyWith(cashLocationId: locationId);
+  }
+
   void markCompleted() {
     state = state.copyWith(status: PaymentStatus.completed);
   }

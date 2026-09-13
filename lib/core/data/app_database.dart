@@ -33,7 +33,15 @@ class AppDatabase {
   // exists yet, and _onUpgrade here is still a no-op. On a device with
   // an existing install, uninstall the app (or clear its storage) first
   // so onCreate runs fresh and the new item appears.
-  static const _dbVersion = 4;
+  // v5: added the Dompet ledger core — cash_locations (Store
+  // Cash/Dompet + per-courier, courier rows are manual/dummy since the
+  // Staff module doesn't exist yet), cash_movements (immutable
+  // ledger entries with audit-trail fields per the Dompet PRD — never a
+  // simple balance mutation; every location's balance is always SUM of
+  // its movements, computed on read), and kasbon (staff debt records
+  // created by "Jadikan Kasbon"). Closing/shift-block logic is
+  // explicitly NOT part of this pass — see [[dompet-prd]] notes.
+  static const _dbVersion = 5;
 
   // TODO(security-foundation): replace with a key generated once and
   // stored via flutter_secure_storage, per AGENTS.md.
@@ -203,6 +211,86 @@ class AppDatabase {
       )
     ''');
 
+    // --- Dompet ledger (see docs/dompet-prd for the full spec) ---
+    //
+    // Cash locations: Store Cash/Dompet plus one row per courier.
+    // Couriers are manual/dummy entries for now (type='courier', no
+    // staff_id link) since the Staff module doesn't exist yet — once it
+    // does, staff_id gets backfilled and courier locations are sourced
+    // from real staff records instead of being created ad hoc here.
+    await db.execute('''
+      CREATE TABLE cash_locations (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL, -- 'store' | 'courier'
+        name TEXT NOT NULL, -- 'Dompet Toko' for store, courier's display name otherwise
+        staff_id TEXT, -- NULL until the Staff module exists; reserved for backfill
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    ''');
+
+    // Every cash movement is an immutable ledger entry — a location's
+    // balance is always SUM(amount) of movements where it's the
+    // to_location, minus SUM(amount) where it's the from_location.
+    // Never mutate a location's balance directly; never edit or delete
+    // a movement row after it's written (corrections are new adjustment
+    // movements with their own audit trail, per PRD §26).
+    await db.execute('''
+      CREATE TABLE cash_movements (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL, -- 'cash_sale' | 'courier_deposit' | 'convert_to_kasbon' | 'expense' | 'adjustment' | 'opening'
+        from_location_id TEXT, -- NULL for movements that originate cash (e.g. a cash sale entering Store Cash or a courier location)
+        to_location_id TEXT, -- NULL for movements that remove cash (e.g. convert_to_kasbon leaves the cash ledger for Staff Debt)
+        amount INTEGER NOT NULL,
+        reference_transaction_id TEXT, -- links to transactions.id when the movement originates from a sale
+        reference_kasbon_id TEXT, -- links to kasbon.id when the movement is a kasbon conversion
+        reason TEXT,
+        created_at TEXT NOT NULL,
+        created_by TEXT, -- NULL until Auth exists; reserved for the acting user's id/name
+        FOREIGN KEY (from_location_id) REFERENCES cash_locations (id),
+        FOREIGN KEY (to_location_id) REFERENCES cash_locations (id),
+        FOREIGN KEY (reference_transaction_id) REFERENCES transactions (id)
+      )
+    ''');
+
+    // Staff debt created by "Jadikan Kasbon". Per PRD §9: never
+    // auto-marked paid just by being referenced in payroll — status and
+    // remaining_balance only change via explicit repayment records.
+    // Payroll integration itself is out of scope until a Payroll module
+    // exists; this table is shaped to support it later (source fields).
+    await db.execute('''
+      CREATE TABLE kasbon (
+        id TEXT PRIMARY KEY,
+        staff_id TEXT, -- NULL until Staff module exists; courier_location_id identifies who for now
+        courier_location_id TEXT NOT NULL,
+        staff_name TEXT NOT NULL, -- denormalized display name, since staff_id may be NULL
+        amount INTEGER NOT NULL,
+        remaining_balance INTEGER NOT NULL,
+        source TEXT NOT NULL DEFAULT 'Unsettled Courier Cash',
+        status TEXT NOT NULL DEFAULT 'outstanding', -- 'outstanding' | 'partially_paid' | 'paid'
+        created_at TEXT NOT NULL,
+        created_by TEXT,
+        FOREIGN KEY (courier_location_id) REFERENCES cash_locations (id)
+      )
+    ''');
+
+    // Repayment history for kasbon — kept separate from the kasbon row
+    // itself so remaining_balance is always derivable/auditable rather
+    // than a mutated field with no history, per PRD §9's repayment-
+    // history requirement.
+    await db.execute('''
+      CREATE TABLE kasbon_repayments (
+        id TEXT PRIMARY KEY,
+        kasbon_id TEXT NOT NULL,
+        amount INTEGER NOT NULL,
+        note TEXT,
+        created_at TEXT NOT NULL,
+        created_by TEXT,
+        FOREIGN KEY (kasbon_id) REFERENCES kasbon (id)
+      )
+    ''');
+
     await _seedDemoData(db);
   }
 
@@ -355,6 +443,54 @@ class AppDatabase {
       'is_active': 1,
       'created_at': now,
       'updated_at': now,
+    });
+
+    // --- Dompet ledger seed ---
+    // Store Cash location plus two dummy courier locations (manual
+    // stand-ins until the Staff module provides real courier/staff
+    // records — see docs/dompet-prd).
+    await db.insert('cash_locations', {
+      'id': 'loc-store',
+      'type': 'store',
+      'name': 'Dompet Toko',
+      'staff_id': null,
+      'is_active': 1,
+      'created_at': now,
+      'updated_at': now,
+    });
+    await db.insert('cash_locations', {
+      'id': 'loc-courier-budi',
+      'type': 'courier',
+      'name': 'Budi',
+      'staff_id': null,
+      'is_active': 1,
+      'created_at': now,
+      'updated_at': now,
+    });
+    await db.insert('cash_locations', {
+      'id': 'loc-courier-andi',
+      'type': 'courier',
+      'name': 'Andi',
+      'staff_id': null,
+      'is_active': 1,
+      'created_at': now,
+      'updated_at': now,
+    });
+
+    // Opening balance for Store Cash so the Dompet page isn't empty on
+    // first run — a movement with no from_location (cash entering the
+    // ledger), same shape a real "opening shift" entry would use later.
+    await db.insert('cash_movements', {
+      'id': 'cm-opening-store',
+      'type': 'opening',
+      'from_location_id': null,
+      'to_location_id': 'loc-store',
+      'amount': 200000,
+      'reference_transaction_id': null,
+      'reference_kasbon_id': null,
+      'reason': 'Saldo awal (demo)',
+      'created_at': now,
+      'created_by': null,
     });
   }
 }
