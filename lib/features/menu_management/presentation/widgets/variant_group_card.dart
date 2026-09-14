@@ -18,6 +18,7 @@ class VariantGroupCard extends StatelessWidget {
 
     return Material(
       color: AppColors.surface,
+      clipBehavior: Clip.antiAlias,
       borderRadius: BorderRadius.circular(isList ? AppRadius.xl : AppRadius.lg),
       child: InkWell(
         onTap: onTap,

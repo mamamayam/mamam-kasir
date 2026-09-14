@@ -26,6 +26,7 @@ class MenuItemCard extends StatelessWidget {
       opacity: item.isActive ? 1 : 0.55,
       child: Material(
         color: AppColors.surface,
+        clipBehavior: Clip.antiAlias,
         borderRadius: BorderRadius.circular(AppRadius.lg),
         child: InkWell(
           onTap: onTap,
@@ -100,6 +101,7 @@ class MenuItemCard extends StatelessWidget {
       opacity: item.isActive ? 1 : 0.55,
       child: Material(
         color: AppColors.surface,
+        clipBehavior: Clip.antiAlias,
         borderRadius: BorderRadius.circular(AppRadius.lg),
         child: InkWell(
           onTap: onTap,

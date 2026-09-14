@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../../core/navigation/app_nav.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/theme/app_spacing.dart';
 import '../../../../core/utils/currency.dart';
+import '../../../../core/widgets/app_sheet_header.dart';
 import '../../../dompet/presentation/widgets/cash_location_picker.dart';
 import '../../application/cart_provider.dart';
 import '../../application/payment_modal_provider.dart';
@@ -82,11 +84,14 @@ class _PaymentModalState extends ConsumerState<PaymentModal> {
     ref.read(cartProvider.notifier).resetDraft();
     ref.read(paymentModalProvider.notifier).close();
 
+    // Deliberately pop first, THEN show the receipt — unlike CartDrawer's
+    // push-on-top pattern. The cart has just been reset and the
+    // transaction finalized, so there's no in-progress state left to
+    // return to if the receipt is dismissed; the receipt is the natural
+    // end of this flow, not a nested step within it.
     Navigator.of(context).pop();
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
+    AppNav.showModal(
+      context,
       builder: (_) => ReceiptModal(transaction: transaction, changeAmount: change),
     );
   }
@@ -129,42 +134,12 @@ class _PaymentModalState extends ConsumerState<PaymentModal> {
             bottom: false,
             child: Column(
               children: [
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
-                  child: SizedBox(
-                    height: 44,
-                    child: Stack(
-                      alignment: Alignment.center,
-                      children: [
-                        const Center(
-                          child: Text('Pembayaran', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
-                        ),
-                        Align(
-                          alignment: Alignment.centerLeft,
-                          child: Material(
-                            color: AppColors.surface,
-                            shape: const CircleBorder(),
-                            child: InkWell(
-                              onTap: () {
-                                paymentController.close();
-                                Navigator.of(context).pop();
-                              },
-                              customBorder: const CircleBorder(),
-                              child: Container(
-                                width: 44,
-                                height: 44,
-                                decoration: BoxDecoration(
-                                  shape: BoxShape.circle,
-                                  boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 10, offset: const Offset(0, 2))],
-                                ),
-                                child: const Icon(Icons.close_rounded, size: 22, color: AppColors.textPrimary),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
+                AppSheetHeader(
+                  title: 'Pembayaran',
+                  onClose: () {
+                    paymentController.close();
+                    Navigator.of(context).pop();
+                  },
                 ),
                 Expanded(
                   child: ListView(

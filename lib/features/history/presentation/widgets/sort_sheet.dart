@@ -1,14 +1,14 @@
 import 'package:flutter/material.dart';
 
+import '../../../../core/navigation/app_nav.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/theme/app_spacing.dart';
 import '../../domain/history_models.dart';
 
 Future<void> showSortSheet(BuildContext context, {required HistorySortKey current, required ValueChanged<HistorySortKey> onSelect}) {
-  return showModalBottomSheet(
-    context: context,
+  return AppNav.showModal(
+    context,
     isScrollControlled: false,
-    backgroundColor: Colors.transparent,
     builder: (context) => SafeArea(
       child: Container(
         decoration: const BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.vertical(top: Radius.circular(28))),

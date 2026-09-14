@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../../core/navigation/app_nav.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/theme/app_spacing.dart';
 import '../../../../core/utils/currency.dart';
+import '../../../../core/widgets/app_sheet_header.dart';
 import '../../application/cart_provider.dart';
 import '../../application/pos_catalog_provider.dart';
 import '../../domain/cart_item.dart';
@@ -43,7 +45,7 @@ class CartDrawer extends ConsumerWidget {
             bottom: false,
             child: Column(
               children: [
-                const _CheckoutHeader(),
+                const AppSheetHeader(title: 'Checkout'),
                 if (cartState.cart.isEmpty)
                   const Expanded(
                     child: Center(
@@ -82,13 +84,17 @@ class CartDrawer extends ConsumerWidget {
                   total: totals.roundedTotal,
                   enabled: cartState.cart.isNotEmpty,
                   onCheckout: () {
-                    Navigator.of(context).pop();
-                    showModalBottomSheet(
-                      context: context,
-                      isScrollControlled: true,
-                      backgroundColor: Colors.transparent,
-                      builder: (_) => const PaymentModal(),
-                    );
+                    // Stack semantics: push PaymentModal ON TOP of this
+                    // sheet rather than popping CartDrawer first — so
+                    // closing the payment screen returns to the cart
+                    // exactly as it was, instead of dropping all the way
+                    // back to the bare Kasir grid. See AppNav's doc
+                    // comment. (Contrast with PaymentModal's own
+                    // "success" transition to ReceiptModal, which
+                    // deliberately DOES pop first — the cart has already
+                    // been reset by then, so there's nothing left to
+                    // return to.)
+                    AppNav.showModal(context, builder: (_) => const PaymentModal());
                   },
                 ),
               ],
@@ -96,52 +102,6 @@ class CartDrawer extends ConsumerWidget {
           ),
         );
       },
-    );
-  }
-}
-
-/// Checkout header — "close" (not a real back-navigation; this sheet is
-/// a layer over the POS screen, so it pops back to it) plus a centered
-/// title, matching the app's iOS-style header spacing/sizing without
-/// switching to a full page route.
-class _CheckoutHeader extends StatelessWidget {
-  const _CheckoutHeader();
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
-      child: SizedBox(
-        height: 44,
-        child: Stack(
-          alignment: Alignment.center,
-          children: [
-            const Center(
-              child: Text('Checkout', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
-            ),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: Material(
-                color: AppColors.surface,
-                shape: const CircleBorder(),
-                child: InkWell(
-                  onTap: () => Navigator.of(context).pop(),
-                  customBorder: const CircleBorder(),
-                  child: Container(
-                    width: 44,
-                    height: 44,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 10, offset: const Offset(0, 2))],
-                    ),
-                    child: const Icon(Icons.close_rounded, size: 22, color: AppColors.textPrimary),
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
     );
   }
 }

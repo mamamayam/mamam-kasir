@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/navigation/app_nav.dart';
 import '../../../core/theme/app_colors.dart';
 import '../application/hpp_opname_provider.dart';
 import 'widgets/add_ingredient_modal.dart';
@@ -35,10 +36,8 @@ class _HppOpnameScreenState extends ConsumerState<HppOpnameScreen> {
               onPageSelected: (page) => setState(() => _page = page),
               onBack: () => Navigator.of(context).pop(),
               onAdd: _page == HppOpnamePage.hpp
-                  ? () => showModalBottomSheet(
-                        context: context,
-                        isScrollControlled: true,
-                        backgroundColor: Colors.transparent,
+                  ? () => AppNav.showModal(
+                        context,
                         builder: (_) => AddIngredientModal(initialCategory: state.hppCategory),
                       )
                   : null,

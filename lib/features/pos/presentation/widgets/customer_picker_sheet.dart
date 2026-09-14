@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/theme/app_spacing.dart';
+import '../../../../core/widgets/app_sheet_header.dart';
 import '../../application/cart_provider.dart';
 import '../../domain/customer.dart';
 
@@ -55,20 +56,12 @@ class _CustomerPickerSheetState extends ConsumerState<CustomerPickerSheet> {
           child: Column(
             children: [
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: AppSpacing.sm),
                 decoration: const BoxDecoration(
                   color: AppColors.surface,
                   borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
                   border: Border(bottom: BorderSide(color: AppColors.border)),
                 ),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    IconButton(onPressed: () => Navigator.of(context).pop(), icon: const Icon(Icons.close_rounded, color: AppColors.textPrimary)),
-                    const Text('Pilih Pelanggan', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
-                    const SizedBox(width: 48),
-                  ],
-                ),
+                child: const AppSheetHeader(title: 'Pilih Pelanggan'),
               ),
               Padding(
                 padding: const EdgeInsets.all(AppSpacing.lg),

@@ -284,6 +284,7 @@ class _VariantGroupSection extends StatelessWidget {
               padding: const EdgeInsets.only(bottom: AppSpacing.sm),
               child: Material(
                 color: AppColors.surface,
+                clipBehavior: Clip.antiAlias,
                 borderRadius: BorderRadius.circular(AppRadius.pill),
                 child: InkWell(
                   onTap: () => onToggle(option.id),

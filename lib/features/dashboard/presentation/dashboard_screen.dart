@@ -76,10 +76,12 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         _isRefreshing = true;
         _pullDistance = 34;
       });
-      // NOTE: real refresh should trigger sync (push pending -> server
-      // validation -> pull) per docs/07 §19. Placeholder delay for the
-      // shell phase.
-      await Future.delayed(const Duration(milliseconds: 900));
+      // Local-DB refresh only for now. Once Supabase sync lands (docs/07
+      // §19), add the sync pull call INSIDE DashboardController.load()
+      // (push pending -> server validation -> pull, then re-read local
+      // DB) — this widget doesn't need to change at all when that
+      // happens, since it just awaits whatever load() does.
+      await ref.read(dashboardProvider.notifier).load();
       if (!mounted) return;
       setState(() {
         _isRefreshing = false;
@@ -179,11 +181,14 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   }
 
   void _showTrendDetail(BuildContext context, SalesTrendPoint point) {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: AppColors.surface,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
-      builder: (context) => Padding(
+    AppNav.showModal(
+      context,
+      isScrollControlled: false,
+      builder: (context) => Container(
+        decoration: const BoxDecoration(
+          color: AppColors.surface,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        ),
         padding: const EdgeInsets.all(AppSpacing.xl),
         child: Column(
           mainAxisSize: MainAxisSize.min,

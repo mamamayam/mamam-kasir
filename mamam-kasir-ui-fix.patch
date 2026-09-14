@@ -1,0 +1,1175 @@
+diff --git a/docs/refresh-pattern.md b/docs/refresh-pattern.md
+new file mode 100644
+index 0000000..bf89fbc
+--- /dev/null
++++ b/docs/refresh-pattern.md
+@@ -0,0 +1,75 @@
++# Pola Pull-to-Refresh — Mamam Kasir
++
++## Standar resmi: `RefreshIndicator` bawaan Flutter
++
++Dipilih dibanding bikin animasi custom karena sudah ada 2 implementasi
++berbeda di codebase sebelum audit ini (`RefreshIndicator` di Dompet vs
++`InlineRefreshIndicator` custom di Dashboard) — `RefreshIndicator` yang
++dijadikan standar karena lebih sederhana, sudah teruji dari Flutter
++sendiri, dan sudah kepakai lebih dulu di Dompet.
++
++Dipakai sekarang di: **Dompet**, **Kasir (POS)**, **Riwayat**, **Menu
++Management**.
++
++## Pengecualian yang disengaja: `InlineRefreshIndicator` (Dashboard)
++
++Dashboard TETAP pakai `InlineRefreshIndicator` custom (lib/features/
++dashboard/presentation/widgets/inline_refresh_indicator.dart), BUKAN
++`RefreshIndicator` bawaan. Ini bukan inkonsistensi yang kelewat — ini
++keputusan sengaja karena constraint layout: header dan tombol swipe-up
++menu di Dashboard sengaja dibekukan di luar area scroll (lihat doc
++comment `DashboardScreen`), sedangkan `RefreshIndicator` bawaan Flutter
++butuh membungkus SATU scrollable utuh dan nampilin spinner-nya di
++paling atas viewport situ — nggak cocok sama layout frozen-chrome ini
++tanpa restrukturisasi besar.
++
++Kalau Dashboard nanti direstruktur (misal header nggak perlu dibekukan
++lagi), baru pertimbangkan pindah ke `RefreshIndicator` biar bener-bener
++satu pola di semua tempat. Sampai saat itu, dua pola ini official-dua-duanya, masing-masing untuk kasus layoutnya sendiri.
++
++## Cara pasang `RefreshIndicator` (checklist)
++
++1. Pastikan controller punya method refresh yang genuinely re-fetch data
++   (bukan cuma delay palsu) — biasanya udah ada, namanya `load()` atau
++   `loadAll()` tergantung fitur.
++2. Bungkus SATU scrollable (`ListView`/`GridView`) langsung dengan
++   `RefreshIndicator(onRefresh: controller.load, child: ...)`.
++3. WAJIB set `physics: const AlwaysScrollableScrollPhysics()` di
++   scrollable itu — tanpa ini, `RefreshIndicator` nggak bisa deteksi
++   gesture pull kalau kontennya lebih pendek dari layar (contoh: list
++   cuma ada 1-2 item, atau lagi nampilin empty state).
++4. Kalau ada kondisi "data kosong" yang biasanya cuma `Center(child:
++   Text(...))`: JANGAN return widget itu langsung sebagai pengganti
++   scrollable. Bungkus dengan `LayoutBuilder` + `ListView` +
++   `SizedBox(height: constraints.maxHeight)` supaya (a) tetap ada
++   scrollable buat `RefreshIndicator` deteksi pull, dan (b) `Center`
++   di dalamnya tetap kebagian tinggi penuh buat centering yang benar.
++   Lihat `_EmptyState` handling di `history_screen.dart`,
++   `pos_screen.dart`, atau `menu_management_screen.dart` sebagai contoh
++   pola yang sama persis dipakai di 3 tempat.
++
++## Titik ekstensi buat nanti pas Supabase connect
++
++`RefreshIndicator.onRefresh` cuma manggil `controller.load()` /
++`loadAll()` yang sekarang isinya baca ulang dari SQLite lokal doang.
++Begitu sync Supabase (docs/07 §19: Local DB → Outbox → Server Validation
++→ Pull → Local DB) sudah jalan, yang perlu diubah CUMA isi method
++`load()`/`loadAll()` di masing-masing controller — tambahin panggilan
++`syncService.pull()` (atau apapun nama service sync-nya nanti) SEBELUM
++baca ulang dari repository lokal. Widget UI (RefreshIndicator, animasi,
++scrollable-nya) sama sekali TIDAK perlu disentuh lagi, karena dari awal
++dia cuma `await` apapun yang dikembalikan `load()`/`loadAll()`.
++
++Controller yang perlu ditambah sync call nanti:
++- `DashboardController.load()` — lib/features/dashboard/application/dashboard_provider.dart
++- `DompetController.load()` — cek nama file provider dompet
++- `PosCatalogController.load()` — lib/features/pos/application/pos_catalog_provider.dart
++- `HistoryController.load()` — lib/features/history/application/history_provider.dart
++- `MenuManagementController.loadAll()` — lib/features/menu_management/application/menu_management_provider.dart
++
++## Catatan penamaan
++Method refresh di controller namanya BEDA-BEDA (`load()` di 4 tempat,
++`loadAll()` di Menu Management) — bukan bug, cuma belum diseragamkan.
++Nggak wajib diseragamkan sekarang, tapi kalau nanti nambah controller
++baru yang butuh refresh, pakai nama `load()` biar konsisten sama
++mayoritas yang udah ada.
+diff --git a/docs/ui-priority-rules.md b/docs/ui-priority-rules.md
+new file mode 100644
+index 0000000..9fac8e4
+--- /dev/null
++++ b/docs/ui-priority-rules.md
+@@ -0,0 +1,141 @@
++# Aturan Prioritas Tampilan & Stack Navigation — Mamam Kasir
++
++Dokumen ini adalah rujukan resmi untuk kapan pakai dialog kecil, bottom
++sheet, atau full page, dan bagaimana navigasi antar-layar/sheet harus
++berperilaku secara konsisten di seluruh app. Ditulis berdasarkan audit
++langsung ke kode yang ada (bukan disusun dari nol), jadi contoh-contoh di
++bawah menunjuk ke file asli di repo.
++
++Kalau ragu nempatin komponen baru di skala mana, baca dulu dokumen ini —
++jangan bikin pola baru sendiri.
++
++## 1. Skala prioritas tampilan
++
++Dari paling ringan ke paling berat:
++
++### Level 1 — Dialog kecil (`showDialog`)
++Untuk konfirmasi singkat / alert / pilihan 2-3 opsi tanpa form. Muncul di
++tengah layar, ukurannya kecil, tidak untuk konten yang butuh scroll.
++
++Contoh yang sudah benar: `lib/features/pengaturan/presentation/
++pengaturan_screen.dart` → `_confirmLogout` (dialog "Keluar Akun?").
++
++Catatan: dialog TIDAK melalui `AppNav` — `AppNav` cuma menangani bottom
++sheet (`AppNav.showModal`) dan full page (`AppNav.push`). `showDialog`
++langsung dari Flutter tetap dipakai apa adanya untuk kasus Level 1.
++
++### Level 2 — Bottom sheet slide-up parsial
++Untuk pilihan dari list pendek, filter, sort, picker. Tinggi mengikuti
++konten (`isScrollControlled: false`), bukan hampir-full-screen.
++
++Contoh yang sudah benar: `category_filter_sheet.dart`, `sort_sheet.dart`,
++`month_picker_sheet.dart`, `report_type_picker_sheet.dart`,
++`customer_picker_sheet.dart` (pakai `DraggableScrollableSheet` ukuran
++sedang), dashboard `_showTrendDetail`.
++
++### Level 3 — Bottom sheet slide-up full/near-full
++Untuk FORM tambah/edit yang banyak field atau butuh scroll. Pakai
++`DraggableScrollableSheet` dengan `initialChildSize` tinggi (0.75–1.0),
++`isScrollControlled: true`.
++
++Contoh yang sudah benar: `payment_modal.dart` (Pembayaran), `cart_drawer.
++dart` (Checkout), `variant_selection_modal.dart`, `receipt_modal.dart`,
++`add_menu_item_modal.dart`, `add_ingredient_modal.dart`.
++
++### Level 4 — Full page (`AppNav.push`)
++Untuk layar yang punya identitas navigasi sendiri, biasa dibuka dari tap
++item di list, dan orang mungkin mau pindah-pindah antar halaman terkait.
++Transisi masuk dari kanan (lihat bagian Stack Navigation di bawah).
++
++Contoh yang sudah benar: `TransactionDetailScreen`, `PosScreen`,
++`HistoryScreen`, `MenuManagementScreen`, semua tujuan tile menu di
++`menu_grid_items.dart`, semua item di `pengaturan_screen.dart`.
++
++### Transisi antar-tab sejenis (bukan salah satu dari 4 level di atas)
++Perpindahan ANTAR TAB sejenis dalam satu context yang sama (misal antar
++kategori menu, antar tab laporan) pakai transisi geser kanan<->kiri
++(swipe horizontal antar tab), bukan push/pop vertikal dan bukan salah
++satu dari 4 level di atas. Ini pola terpisah untuk tab-switching, bukan
++untuk membuka layar/form baru.
++
++## 2. Cara memanggil tiap level (WAJIB, jangan reimplement manual)
++
++- **Level 1**: `showDialog(context: context, builder: ...)` langsung.
++- **Level 2 & 3**: WAJIB lewat `AppNav.showModal(context, builder: ...,
++  isScrollControlled: ...)` — lib/core/navigation/app_nav.dart. JANGAN
++  panggil `showModalBottomSheet` langsung di mana pun. Semua sheet di
++  codebase per audit ini sudah dikonversi ke `AppNav.showModal`; kalau
++  nambah sheet baru, ikuti pola ini dari awal.
++  - Level 2 → pass `isScrollControlled: false` (default sheet tinggi
++    sesuai konten).
++  - Level 3 → biarkan default (`isScrollControlled: true`), bungkus
++    contentnya dengan `DraggableScrollableSheet`.
++- **Level 4**: WAJIB lewat `AppNav.push(context, builder)` —
++  lib/core/navigation/app_nav.dart. JANGAN panggil `Navigator.push` /
++  `Navigator.of(context).push` langsung.
++
++Header setiap Level 2/3 sheet yang punya tombol close WAJIB pakai
++`AppSheetHeader` (lib/core/widgets/app_sheet_header.dart) — lihat doc
++comment di file itu untuk alasannya (mencegah title/tombol nabrak).
++Header setiap Level 4 full page WAJIB pakai `IosPageHeader`
++(lib/core/widgets/ios_page_header.dart). Jangan bikin header custom baru
++dengan `Stack` + `Center` + `Align` manual di kedua kasus ini.
++
++## 3. Stack navigation — sheet tetap hidup di belakang layar yang di-push
++
++Aturan inti: **sheet/modal yang lagi terbuka adalah route asli di
++Navigator stack, bukan sekadar overlay.** Kalau dari dalam sheet ada aksi
++"buka sesuatu yang lain" (form lain, layar detail, dll), pakai
++`AppNav.push` dari dalam sheet TANPA menutup sheet itu dulu. Begitu layar
++baru itu di-pop (tombol back/close), sheet sebelumnya otomatis muncul
++lagi persis seperti kondisi sebelum ditinggal — karena dia memang belum
++pernah hilang dari stack, cuma ketutup visual sementara.
++
++Referensi/contoh acuan yang sudah benar dari awal:
++`lib/features/menu_shell/presentation/menu_grid_items.dart` — baca doc
++comment `pushDestination`. Tiap tile menu manggil `AppNav.push` tanpa
++nutup menu sheet-nya dulu; itu sebabnya swipe-up menu "balik lagi" ke
++kondisi semula setelah user pencet back dari salah satu tile.
++
++### Bug yang ditemukan & diperbaiki dalam audit ini
++`CartDrawer` → tombol "Bayar" tadinya `Navigator.of(context).pop()`
++(nutup CartDrawer) baru `showModalBottomSheet` untuk `PaymentModal` —
++akibatnya kalau user pencet close di PaymentModal, dia balik ke Kasir
++grid kosong, bukan ke CartDrawer dengan isi keranjang yang masih ada.
++Sudah diperbaiki: sekarang `AppNav.showModal(context, builder: (_) =>
++const PaymentModal())` dipanggil TANPA pop CartDrawer dulu (lihat
++`cart_drawer.dart`, method `onCheckout`).
++
++### Pengecualian yang disengaja (boleh pop dulu baru show)
++`PaymentModal` → setelah transaksi SUKSES, kode sengaja
++`Navigator.of(context).pop()` (nutup Payment) baru `AppNav.showModal`
++untuk `ReceiptModal`. Ini BUKAN bug — setelah transaksi selesai, cart
++sudah di-reset dan tidak ada state yang perlu di-"balikin". Struk adalah
++akhir alur, bukan langkah bersarang di tengah alur. Kalau ada kasus serupa
++di masa depan (sheet yang mewakili "aksi sudah selesai/final"), boleh
++pakai pola pop-dulu ini, TAPI wajib ditulis sebagai comment di kode kenapa
++itu pengecualian — supaya nggak disalahartikan sebagai bug oleh developer
++berikutnya.
++
++### CATATAN WAJIB untuk fitur baru
++Setiap kali nambah fitur baru yang melibatkan sheet/modal yang bisa
++membuka layar lain di dalamnya (form dengan tombol "pilih dari daftar"
++yang bukanya full page, menu yang tiap tile-nya buka screen baru, dst),
++WAJIB pakai `AppNav.push` dari dalam sheet tersebut, JANGAN pop sheet
++dulu baru navigate — kecuali sheet itu memang mewakili aksi yang sudah
++final/selesai (lihat pengecualian di atas), dan itu pun harus
++didokumentasikan sebagai comment di kode. Kalau ragu, contoh acuannya ada
++di `lib/features/menu_shell/presentation/menu_grid_items.dart`.
++
++## 4. Ringkasan checklist sebelum bikin sheet/dialog/page baru
++
++- [ ] Sudah tentuin ini Level 1/2/3/4 sesuai kriteria di atas?
++- [ ] Level 1 → `showDialog` langsung.
++- [ ] Level 2/3 → `AppNav.showModal`, bukan `showModalBottomSheet` manual.
++- [ ] Level 4 → `AppNav.push`, bukan `Navigator.push` manual.
++- [ ] Header sheet pakai `AppSheetHeader`? Header full page pakai
++      `IosPageHeader`?
++- [ ] Kalau dari dalam sheet ini bisa buka layar/sheet lain: apakah sheet
++      ini harus tetap kebuka di belakang (kasus umum, pakai `AppNav.push`
++      tanpa pop dulu), atau ini memang kasus "aksi final" yang boleh pop
++      dulu (tulis comment kenapa)?
+diff --git a/lib/core/widgets/app_sheet_header.dart b/lib/core/widgets/app_sheet_header.dart
+new file mode 100644
+index 0000000..b570a69
+--- /dev/null
++++ b/lib/core/widgets/app_sheet_header.dart
+@@ -0,0 +1,121 @@
++import 'package:flutter/material.dart';
++
++import '../theme/app_colors.dart';
++import '../theme/app_spacing.dart';
++
++/// Shared header for bottom sheets / modals (Checkout, Pembayaran, picker
++/// sheets, etc.) — a circular close/back button on the left, a centered
++/// title, and an optional trailing widget on the right.
++///
++/// This exists specifically to prevent title/button collisions. The old
++/// pattern (repeated independently in several sheet files) used
++/// `Stack` + `Center` for the title and `Align(centerLeft)` for the close
++/// button: both are positioned independently of each other, so a long
++/// title or a narrow screen let them overlap instead of making room for
++/// one another.
++///
++/// This widget uses a `Row` instead: the close button and the trailing
++/// slot are fixed-width, the title sits in an `Expanded` between them and
++/// is truncated with an ellipsis rather than ever overflowing or
++/// colliding. Even with no [trailing], a same-size invisible spacer is
++/// reserved on the right so the title stays visually centered against the
++/// close button, matching [IosPageHeader]'s look for full-page screens.
++///
++/// NOTE FOR FUTURE WORK: every sheet/modal header MUST use this widget
++/// (or wrap it). Do not hand-roll a new header with `Stack` +
++/// `Center` + `Align` — that combination is exactly what caused the
++/// title-collision bug this widget was created to fix. If an existing
++/// sheet needs a different header shape, extend/parameterize
++/// [AppSheetHeader] rather than reimplementing it from scratch. Full-page
++/// screens (reached via [Navigator.push]) should keep using
++/// [IosPageHeader] instead — the two are intentionally separate widgets
++/// for two different navigation layers (see [IosPageHeader]'s doc
++/// comment), but both must stay collision-safe the same way.
++class AppSheetHeader extends StatelessWidget {
++  /// Title text. Always single-line with an ellipsis — see class doc.
++  final String title;
++
++  /// Called when the close/back button is tapped. Defaults to
++  /// `Navigator.of(context).pop()` when omitted. Pass a custom callback
++  /// when the sheet needs to run extra logic before closing (e.g.
++  /// resetting a provider) — see `PaymentModal` for an example.
++  final VoidCallback? onClose;
++
++  /// Icon for the left button. Defaults to a close ("X") icon, matching
++  /// the sheets this widget was extracted from. Pass
++  /// `Icons.chevron_left_rounded` for a back-style sheet header instead.
++  final IconData closeIcon;
++
++  /// Optional widget shown on the right, same reserved width as the
++  /// close button so the title stays centered either way.
++  final Widget? trailing;
++
++  const AppSheetHeader({
++    super.key,
++    required this.title,
++    this.onClose,
++    this.closeIcon = Icons.close_rounded,
++    this.trailing,
++  });
++
++  static const double _buttonSize = 44;
++
++  @override
++  Widget build(BuildContext context) {
++    return Padding(
++      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
++      child: SizedBox(
++        height: _buttonSize,
++        child: Row(
++          children: [
++            _CircleIconButton(
++              icon: closeIcon,
++              onTap: onClose ?? () => Navigator.of(context).pop(),
++            ),
++            Expanded(
++              child: Text(
++                title,
++                textAlign: TextAlign.center,
++                maxLines: 1,
++                overflow: TextOverflow.ellipsis,
++                style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
++              ),
++            ),
++            if (trailing != null)
++              trailing!
++            else
++              const SizedBox(width: _buttonSize),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++class _CircleIconButton extends StatelessWidget {
++  final IconData icon;
++  final VoidCallback? onTap;
++  const _CircleIconButton({required this.icon, this.onTap});
++
++  @override
++  Widget build(BuildContext context) {
++    return Material(
++      color: AppColors.surface,
++      shape: const CircleBorder(),
++      elevation: 0,
++      child: InkWell(
++        onTap: onTap,
++        customBorder: const CircleBorder(),
++        child: Container(
++          width: AppSheetHeader._buttonSize,
++          height: AppSheetHeader._buttonSize,
++          decoration: BoxDecoration(
++            shape: BoxShape.circle,
++            boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 10, offset: const Offset(0, 2))],
++          ),
++          child: Icon(icon, size: 22, color: AppColors.textPrimary),
++        ),
++      ),
++    );
++  }
++}
+diff --git a/lib/features/dashboard/presentation/dashboard_screen.dart b/lib/features/dashboard/presentation/dashboard_screen.dart
+index ff94aec..e18b920 100644
+--- a/lib/features/dashboard/presentation/dashboard_screen.dart
++++ b/lib/features/dashboard/presentation/dashboard_screen.dart
+@@ -76,10 +76,12 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
+         _isRefreshing = true;
+         _pullDistance = 34;
+       });
+-      // NOTE: real refresh should trigger sync (push pending -> server
+-      // validation -> pull) per docs/07 §19. Placeholder delay for the
+-      // shell phase.
+-      await Future.delayed(const Duration(milliseconds: 900));
++      // Local-DB refresh only for now. Once Supabase sync lands (docs/07
++      // §19), add the sync pull call INSIDE DashboardController.load()
++      // (push pending -> server validation -> pull, then re-read local
++      // DB) — this widget doesn't need to change at all when that
++      // happens, since it just awaits whatever load() does.
++      await ref.read(dashboardProvider.notifier).load();
+       if (!mounted) return;
+       setState(() {
+         _isRefreshing = false;
+@@ -179,11 +181,14 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
+   }
+ 
+   void _showTrendDetail(BuildContext context, SalesTrendPoint point) {
+-    showModalBottomSheet(
+-      context: context,
+-      backgroundColor: AppColors.surface,
+-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+-      builder: (context) => Padding(
++    AppNav.showModal(
++      context,
++      isScrollControlled: false,
++      builder: (context) => Container(
++        decoration: const BoxDecoration(
++          color: AppColors.surface,
++          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
++        ),
+         padding: const EdgeInsets.all(AppSpacing.xl),
+         child: Column(
+           mainAxisSize: MainAxisSize.min,
+diff --git a/lib/features/dashboard/presentation/widgets/quick_actions_row.dart b/lib/features/dashboard/presentation/widgets/quick_actions_row.dart
+index 7470e0e..3e37f99 100644
+--- a/lib/features/dashboard/presentation/widgets/quick_actions_row.dart
++++ b/lib/features/dashboard/presentation/widgets/quick_actions_row.dart
+@@ -52,6 +52,7 @@ class _QuickAction extends StatelessWidget {
+   Widget build(BuildContext context) {
+     return Material(
+       color: AppColors.surface,
++      clipBehavior: Clip.antiAlias,
+       borderRadius: BorderRadius.circular(AppRadius.lg),
+       child: InkWell(
+         onTap: onTap,
+diff --git a/lib/features/dompet/presentation/dompet_screen.dart b/lib/features/dompet/presentation/dompet_screen.dart
+index 17e2052..c53054d 100644
+--- a/lib/features/dompet/presentation/dompet_screen.dart
++++ b/lib/features/dompet/presentation/dompet_screen.dart
+@@ -43,6 +43,7 @@ class DompetScreen extends ConsumerWidget {
+                 color: AppColors.brand,
+                 onRefresh: controller.load,
+                 child: ListView(
++                  physics: const AlwaysScrollableScrollPhysics(),
+                   padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.xxl),
+                   children: [
+                     _SaldoCard(summary: state.summary),
+diff --git a/lib/features/history/presentation/history_screen.dart b/lib/features/history/presentation/history_screen.dart
+index 0e8710f..57a1ebe 100644
+--- a/lib/features/history/presentation/history_screen.dart
++++ b/lib/features/history/presentation/history_screen.dart
+@@ -85,6 +85,7 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
+                   const SizedBox(width: AppSpacing.sm),
+                   Material(
+                     color: AppColors.surface,
++                    clipBehavior: Clip.antiAlias,
+                     borderRadius: BorderRadius.circular(AppRadius.lg),
+                     child: InkWell(
+                       onTap: () => showSortSheet(context, current: state.sortKey, onSelect: controller.setSortKey),
+@@ -122,20 +123,44 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
+             Expanded(
+               child: state.isLoading
+                   ? const Center(child: CircularProgressIndicator(color: AppColors.brand))
+-                  : state.filteredTransactions.isEmpty
+-                      ? const _EmptyState()
+-                      : ListView.separated(
+-                          padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.xxl),
+-                          itemCount: state.filteredTransactions.length,
+-                          separatorBuilder: (_, __) => const SizedBox(height: AppSpacing.sm),
+-                          itemBuilder: (context, index) {
+-                            final transaction = state.filteredTransactions[index];
+-                            return TransactionCard(
+-                              transaction: transaction,
+-                              onTap: () => AppNav.push(context, (_) => TransactionDetailScreen(transaction: transaction)),
+-                            );
+-                          },
+-                        ),
++                  : RefreshIndicator(
++                      color: AppColors.brand,
++                      onRefresh: controller.load,
++                      child: state.filteredTransactions.isEmpty
++                          // RefreshIndicator needs a scrollable child to
++                          // detect the pull gesture even when there's
++                          // nothing to list — AlwaysScrollableScrollPhysics
++                          // keeps the ListView draggable with zero/short
++                          // content. The SizedBox(height: full viewport)
++                          // wrapper keeps _EmptyState's internal Center
++                          // actually centering in the visible area, since
++                          // a bare ListView child only sizes to its own
++                          // content, not the viewport.
++                          ? LayoutBuilder(
++                              builder: (context, constraints) => ListView(
++                                physics: const AlwaysScrollableScrollPhysics(),
++                                children: [
++                                  SizedBox(
++                                    height: constraints.maxHeight,
++                                    child: const _EmptyState(),
++                                  ),
++                                ],
++                              ),
++                            )
++                          : ListView.separated(
++                              physics: const AlwaysScrollableScrollPhysics(),
++                              padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.xxl),
++                              itemCount: state.filteredTransactions.length,
++                              separatorBuilder: (_, __) => const SizedBox(height: AppSpacing.sm),
++                              itemBuilder: (context, index) {
++                                final transaction = state.filteredTransactions[index];
++                                return TransactionCard(
++                                  transaction: transaction,
++                                  onTap: () => AppNav.push(context, (_) => TransactionDetailScreen(transaction: transaction)),
++                                );
++                              },
++                            ),
++                    ),
+             ),
+           ],
+         ),
+diff --git a/lib/features/history/presentation/widgets/sort_sheet.dart b/lib/features/history/presentation/widgets/sort_sheet.dart
+index 42e2842..85f9c90 100644
+--- a/lib/features/history/presentation/widgets/sort_sheet.dart
++++ b/lib/features/history/presentation/widgets/sort_sheet.dart
+@@ -1,14 +1,14 @@
+ import 'package:flutter/material.dart';
+ 
++import '../../../../core/navigation/app_nav.dart';
+ import '../../../../core/theme/app_colors.dart';
+ import '../../../../core/theme/app_spacing.dart';
+ import '../../domain/history_models.dart';
+ 
+ Future<void> showSortSheet(BuildContext context, {required HistorySortKey current, required ValueChanged<HistorySortKey> onSelect}) {
+-  return showModalBottomSheet(
+-    context: context,
++  return AppNav.showModal(
++    context,
+     isScrollControlled: false,
+-    backgroundColor: Colors.transparent,
+     builder: (context) => SafeArea(
+       child: Container(
+         decoration: const BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
+diff --git a/lib/features/history/presentation/widgets/transaction_card.dart b/lib/features/history/presentation/widgets/transaction_card.dart
+index 9869959..c4ef153 100644
+--- a/lib/features/history/presentation/widgets/transaction_card.dart
++++ b/lib/features/history/presentation/widgets/transaction_card.dart
+@@ -19,6 +19,7 @@ class TransactionCard extends StatelessWidget {
+ 
+     return Material(
+       color: AppColors.surface,
++      clipBehavior: Clip.antiAlias,
+       borderRadius: BorderRadius.circular(AppRadius.lg),
+       child: InkWell(
+         onTap: onTap,
+diff --git a/lib/features/hpp_opname/presentation/hpp_opname_screen.dart b/lib/features/hpp_opname/presentation/hpp_opname_screen.dart
+index ba10c37..e0cf061 100644
+--- a/lib/features/hpp_opname/presentation/hpp_opname_screen.dart
++++ b/lib/features/hpp_opname/presentation/hpp_opname_screen.dart
+@@ -1,6 +1,7 @@
+ import 'package:flutter/material.dart';
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
++import '../../../core/navigation/app_nav.dart';
+ import '../../../core/theme/app_colors.dart';
+ import '../application/hpp_opname_provider.dart';
+ import 'widgets/add_ingredient_modal.dart';
+@@ -35,10 +36,8 @@ class _HppOpnameScreenState extends ConsumerState<HppOpnameScreen> {
+               onPageSelected: (page) => setState(() => _page = page),
+               onBack: () => Navigator.of(context).pop(),
+               onAdd: _page == HppOpnamePage.hpp
+-                  ? () => showModalBottomSheet(
+-                        context: context,
+-                        isScrollControlled: true,
+-                        backgroundColor: Colors.transparent,
++                  ? () => AppNav.showModal(
++                        context,
+                         builder: (_) => AddIngredientModal(initialCategory: state.hppCategory),
+                       )
+                   : null,
+diff --git a/lib/features/hpp_opname/presentation/widgets/hpp_tab_content.dart b/lib/features/hpp_opname/presentation/widgets/hpp_tab_content.dart
+index 73f434e..e8e53b6 100644
+--- a/lib/features/hpp_opname/presentation/widgets/hpp_tab_content.dart
++++ b/lib/features/hpp_opname/presentation/widgets/hpp_tab_content.dart
+@@ -1,6 +1,7 @@
+ import 'package:flutter/material.dart';
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
++import '../../../../core/navigation/app_nav.dart';
+ import '../../../../core/theme/app_colors.dart';
+ import '../../../../core/theme/app_spacing.dart';
+ import '../../../../core/utils/currency.dart';
+@@ -137,10 +138,8 @@ class _IngredientRow extends ConsumerWidget {
+ 
+   void _showEditPriceSheet(BuildContext context, WidgetRef ref, Ingredient ingredient) {
+     final controller = TextEditingController(text: ingredient.lastPrice.toString());
+-    showModalBottomSheet(
+-      context: context,
+-      isScrollControlled: true,
+-      backgroundColor: Colors.transparent,
++    AppNav.showModal(
++      context,
+       builder: (sheetContext) => Padding(
+         padding: EdgeInsets.only(bottom: MediaQuery.of(sheetContext).viewInsets.bottom),
+         child: Container(
+diff --git a/lib/features/laporan/presentation/laporan_screen.dart b/lib/features/laporan/presentation/laporan_screen.dart
+index b1cdbaf..10edc99 100644
+--- a/lib/features/laporan/presentation/laporan_screen.dart
++++ b/lib/features/laporan/presentation/laporan_screen.dart
+@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ import 'package:intl/intl.dart';
+ 
++import '../../../core/navigation/app_nav.dart';
+ import '../../../core/theme/app_colors.dart';
+ import '../../../core/theme/app_spacing.dart';
+ import '../../../core/utils/currency.dart';
+@@ -53,8 +54,9 @@ class LaporanScreen extends ConsumerWidget {
+                   const SizedBox(width: AppSpacing.sm),
+                   _FilterPill(
+                     label: DateFormat('MMM yyyy', 'id_ID').format(state.selectedMonth),
+-                    onTap: () => showModalBottomSheet(
+-                      context: context,
++                    onTap: () => AppNav.showModal(
++                      context,
++                      isScrollControlled: false,
+                       builder: (_) => MonthPickerSheet(current: state.selectedMonth, onSelect: controller.setMonth),
+                     ),
+                   ),
+@@ -77,9 +79,9 @@ class LaporanScreen extends ConsumerWidget {
+ 
+   void _openTypePicker(BuildContext context, WidgetRef ref) {
+     final controller = ref.read(laporanProvider.notifier);
+-    showModalBottomSheet(
+-      context: context,
+-      backgroundColor: Colors.transparent,
++    AppNav.showModal(
++      context,
++      isScrollControlled: false,
+       builder: (_) => ReportTypePickerSheet(
+         current: ref.read(laporanProvider).reportType,
+         onSelect: controller.setReportType,
+diff --git a/lib/features/menu_management/presentation/menu_management_screen.dart b/lib/features/menu_management/presentation/menu_management_screen.dart
+index 7905c15..26948ed 100644
+--- a/lib/features/menu_management/presentation/menu_management_screen.dart
++++ b/lib/features/menu_management/presentation/menu_management_screen.dart
+@@ -79,16 +79,20 @@ class _MenuManagementScreenState extends ConsumerState<MenuManagementScreen> {
+             Expanded(
+               child: state.isLoading
+                   ? const Center(child: CircularProgressIndicator(color: AppColors.brand))
+-                  : state.tab == MenuManagementTab.menu
+-                      ? _MenuTabContent(
+-                          state: state,
+-                          onItemTap: (item) => AppNav.showModal(
+-                            context,
+-                            builder: (_) => AddMenuItemModal(editingItem: item),
+-                          ),
+-                          onItemLongPress: (item) => _showItemActions(context, item, controller),
+-                        )
+-                      : _VarianTabContent(state: state),
++                  : RefreshIndicator(
++                      color: AppColors.brand,
++                      onRefresh: controller.loadAll,
++                      child: state.tab == MenuManagementTab.menu
++                          ? _MenuTabContent(
++                              state: state,
++                              onItemTap: (item) => AppNav.showModal(
++                                context,
++                                builder: (_) => AddMenuItemModal(editingItem: item),
++                              ),
++                              onItemLongPress: (item) => _showItemActions(context, item, controller),
++                            )
++                          : _VarianTabContent(state: state),
++                    ),
+             ),
+           ],
+         ),
+@@ -186,6 +190,7 @@ class _SearchRow extends StatelessWidget {
+           const SizedBox(width: AppSpacing.sm),
+           Material(
+             color: AppColors.surface,
++            clipBehavior: Clip.antiAlias,
+             borderRadius: BorderRadius.circular(AppRadius.lg),
+             child: InkWell(
+               onTap: onToggleViewMode,
+@@ -230,10 +235,22 @@ class _MenuTabContent extends StatelessWidget {
+     final grouped = state.groupedFilteredMenuItems;
+ 
+     if (grouped.isEmpty) {
+-      return const _EmptyState(message: 'Menu tidak ditemukan.');
++      // Same reasoning as Riwayat/Kasir: RefreshIndicator (from the
++      // parent screen) needs a scrollable child to detect the pull
++      // gesture, so the empty state can't be a bare Center — wrap it in
++      // a full-viewport scrollable ListView instead.
++      return LayoutBuilder(
++        builder: (context, constraints) => ListView(
++          physics: const AlwaysScrollableScrollPhysics(),
++          children: [
++            SizedBox(height: constraints.maxHeight, child: const _EmptyState(message: 'Menu tidak ditemukan.')),
++          ],
++        ),
++      );
+     }
+ 
+     return ListView(
++      physics: const AlwaysScrollableScrollPhysics(),
+       padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, AppSpacing.xxl),
+       children: grouped.entries.map((entry) {
+         return Padding(
+@@ -276,10 +293,18 @@ class _VarianTabContent extends StatelessWidget {
+     final groups = state.filteredVariantGroups;
+ 
+     if (groups.isEmpty) {
+-      return const _EmptyState(message: 'Varian tidak ditemukan.');
++      return LayoutBuilder(
++        builder: (context, constraints) => ListView(
++          physics: const AlwaysScrollableScrollPhysics(),
++          children: [
++            SizedBox(height: constraints.maxHeight, child: const _EmptyState(message: 'Varian tidak ditemukan.')),
++          ],
++        ),
++      );
+     }
+ 
+     return ListView(
++      physics: const AlwaysScrollableScrollPhysics(),
+       padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, AppSpacing.xxl),
+       children: [
+         _ItemLayout(
+diff --git a/lib/features/menu_management/presentation/widgets/add_menu_item_modal.dart b/lib/features/menu_management/presentation/widgets/add_menu_item_modal.dart
+index a2452d4..699f106 100644
+--- a/lib/features/menu_management/presentation/widgets/add_menu_item_modal.dart
++++ b/lib/features/menu_management/presentation/widgets/add_menu_item_modal.dart
+@@ -409,6 +409,7 @@ class _VariantCheckboxTile extends StatelessWidget {
+       padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+       child: Material(
+         color: AppColors.surface,
++        clipBehavior: Clip.antiAlias,
+         borderRadius: BorderRadius.circular(AppRadius.md),
+         child: InkWell(
+           onTap: () => onChanged(!selected),
+diff --git a/lib/features/menu_management/presentation/widgets/menu_item_card.dart b/lib/features/menu_management/presentation/widgets/menu_item_card.dart
+index 5661fb0..272eed6 100644
+--- a/lib/features/menu_management/presentation/widgets/menu_item_card.dart
++++ b/lib/features/menu_management/presentation/widgets/menu_item_card.dart
+@@ -26,6 +26,7 @@ class MenuItemCard extends StatelessWidget {
+       opacity: item.isActive ? 1 : 0.55,
+       child: Material(
+         color: AppColors.surface,
++        clipBehavior: Clip.antiAlias,
+         borderRadius: BorderRadius.circular(AppRadius.lg),
+         child: InkWell(
+           onTap: onTap,
+@@ -100,6 +101,7 @@ class MenuItemCard extends StatelessWidget {
+       opacity: item.isActive ? 1 : 0.55,
+       child: Material(
+         color: AppColors.surface,
++        clipBehavior: Clip.antiAlias,
+         borderRadius: BorderRadius.circular(AppRadius.lg),
+         child: InkWell(
+           onTap: onTap,
+diff --git a/lib/features/menu_management/presentation/widgets/variant_group_card.dart b/lib/features/menu_management/presentation/widgets/variant_group_card.dart
+index 62c56ab..d470200 100644
+--- a/lib/features/menu_management/presentation/widgets/variant_group_card.dart
++++ b/lib/features/menu_management/presentation/widgets/variant_group_card.dart
+@@ -18,6 +18,7 @@ class VariantGroupCard extends StatelessWidget {
+ 
+     return Material(
+       color: AppColors.surface,
++      clipBehavior: Clip.antiAlias,
+       borderRadius: BorderRadius.circular(isList ? AppRadius.xl : AppRadius.lg),
+       child: InkWell(
+         onTap: onTap,
+diff --git a/lib/features/menu_shell/presentation/menu_action_card.dart b/lib/features/menu_shell/presentation/menu_action_card.dart
+index d3e0862..c9268bc 100644
+--- a/lib/features/menu_shell/presentation/menu_action_card.dart
++++ b/lib/features/menu_shell/presentation/menu_action_card.dart
+@@ -26,6 +26,7 @@ class MenuActionCard extends StatelessWidget {
+     return Expanded(
+       child: Material(
+         color: AppColors.surface,
++        clipBehavior: Clip.antiAlias,
+         borderRadius: BorderRadius.circular(AppRadius.lg),
+         child: InkWell(
+           onTap: onTap,
+diff --git a/lib/features/menu_shell/presentation/menu_bottom_sheet.dart b/lib/features/menu_shell/presentation/menu_bottom_sheet.dart
+index 142d46d..bd1ea18 100644
+--- a/lib/features/menu_shell/presentation/menu_bottom_sheet.dart
++++ b/lib/features/menu_shell/presentation/menu_bottom_sheet.dart
+@@ -1,5 +1,6 @@
+ import 'package:flutter/material.dart';
+ 
++import '../../../core/navigation/app_nav.dart';
+ import '../../../core/theme/app_colors.dart';
+ import '../../../core/theme/app_spacing.dart';
+ import 'menu_action_card.dart';
+@@ -13,15 +14,22 @@ import 'menu_grid_items.dart';
+ /// notifications/approvals table yet (see DashboardState's doc comment),
+ /// so callers without a real source for these can omit them rather than
+ /// needing to construct a whole summary object just to pass zeros.
++///
++/// Uses [AppNav.showModal] rather than a raw [showModalBottomSheet] —
++/// this sheet is the reference case for the app's stack-navigation model
++/// (see [buildMenuGridItems]'s doc comment): each tile pushes its
++/// destination on top of this sheet via [AppNav.push] without closing it
++/// first, so popping the destination reveals this sheet again exactly as
++/// it was. That only works because this sheet is itself a proper route
++/// in the same Navigator stack, which is what [AppNav.showModal]
++/// guarantees.
+ Future<void> showMenuBottomSheet(
+   BuildContext context, {
+   int unreadNotifications = 0,
+   int pendingApprovals = 0,
+ }) {
+-  return showModalBottomSheet(
+-    context: context,
+-    isScrollControlled: true,
+-    backgroundColor: Colors.transparent,
++  return AppNav.showModal(
++    context,
+     builder: (context) => MenuBottomSheetContent(
+       unreadNotifications: unreadNotifications,
+       pendingApprovals: pendingApprovals,
+diff --git a/lib/features/pos/presentation/pos_screen.dart b/lib/features/pos/presentation/pos_screen.dart
+index a6997e7..4b01d3c 100644
+--- a/lib/features/pos/presentation/pos_screen.dart
++++ b/lib/features/pos/presentation/pos_screen.dart
+@@ -1,6 +1,7 @@
+ import 'package:flutter/material.dart';
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
++import '../../../core/navigation/app_nav.dart';
+ import '../../../core/theme/app_colors.dart';
+ import '../../../core/theme/app_spacing.dart';
+ import '../../../core/utils/currency.dart';
+@@ -56,9 +57,9 @@ class _PosScreenState extends ConsumerState<PosScreen> {
+   }
+ 
+   Future<void> _openCategoryFilter(List<String> categoryNames) async {
+-    final result = await showModalBottomSheet<String>(
+-      context: context,
+-      backgroundColor: Colors.transparent,
++    final result = await AppNav.showModal<String>(
++      context,
++      isScrollControlled: false,
+       builder: (_) => CategoryFilterSheet(categories: categoryNames, selectedCategory: _selectedCategory),
+     );
+     // The sheet only pops a value from an explicit row tap ("Semua" pops
+@@ -78,10 +79,8 @@ class _PosScreenState extends ConsumerState<PosScreen> {
+       return;
+     }
+ 
+-    final selected = await showModalBottomSheet<VariantSelectionResult>(
+-      context: context,
+-      isScrollControlled: true,
+-      backgroundColor: Colors.transparent,
++    final selected = await AppNav.showModal<VariantSelectionResult>(
++      context,
+       builder: (_) => VariantSelectionModal(menu: menu, allGroups: catalog.variantGroups),
+     );
+ 
+@@ -133,27 +132,49 @@ class _PosScreenState extends ConsumerState<PosScreen> {
+                 Expanded(
+                   child: catalog.isLoading
+                       ? const Center(child: CircularProgressIndicator(color: AppColors.brand))
+-                      : filteredItems.isEmpty
+-                          ? const Center(child: Text('Menu tidak ditemukan.', style: TextStyle(fontSize: 13, color: AppColors.textMuted)))
+-                          : GridView.builder(
+-                              padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.xs, AppSpacing.lg, 110),
+-                              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+-                                crossAxisCount: gridColumns,
+-                                mainAxisSpacing: gridColumns == 3 ? AppSpacing.sm : AppSpacing.md,
+-                                crossAxisSpacing: gridColumns == 3 ? AppSpacing.sm : AppSpacing.md,
+-                                childAspectRatio: gridColumns == 3 ? 0.72 : 0.85,
+-                              ),
+-                              itemCount: filteredItems.length,
+-                              itemBuilder: (context, index) {
+-                                final item = filteredItems[index];
+-                                return _MenuGridCard(
+-                                  item: item,
+-                                  qtyInCart: qtyByMenuId[item.id] ?? 0,
+-                                  compact: gridColumns == 3,
+-                                  onTap: () => _handleMenuTap(item, catalog),
+-                                );
+-                              },
+-                            ),
++                      : RefreshIndicator(
++                          color: AppColors.brand,
++                          onRefresh: () => ref.read(posCatalogProvider.notifier).load(),
++                          child: filteredItems.isEmpty
++                              // Same reasoning as Riwayat: RefreshIndicator
++                              // needs a scrollable child to detect the pull
++                              // gesture, and a bare Center has no scroll
++                              // extent at all — wrap it in a full-viewport
++                              // scrollable ListView instead.
++                              ? LayoutBuilder(
++                                  builder: (context, constraints) => ListView(
++                                    physics: const AlwaysScrollableScrollPhysics(),
++                                    children: [
++                                      SizedBox(
++                                        height: constraints.maxHeight,
++                                        child: const Center(
++                                          child: Text('Menu tidak ditemukan.', style: TextStyle(fontSize: 13, color: AppColors.textMuted)),
++                                        ),
++                                      ),
++                                    ],
++                                  ),
++                                )
++                              : GridView.builder(
++                                  physics: const AlwaysScrollableScrollPhysics(),
++                                  padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.xs, AppSpacing.lg, 110),
++                                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
++                                    crossAxisCount: gridColumns,
++                                    mainAxisSpacing: gridColumns == 3 ? AppSpacing.sm : AppSpacing.md,
++                                    crossAxisSpacing: gridColumns == 3 ? AppSpacing.sm : AppSpacing.md,
++                                    childAspectRatio: gridColumns == 3 ? 0.72 : 0.85,
++                                  ),
++                                  itemCount: filteredItems.length,
++                                  itemBuilder: (context, index) {
++                                    final item = filteredItems[index];
++                                    return _MenuGridCard(
++                                      item: item,
++                                      qtyInCart: qtyByMenuId[item.id] ?? 0,
++                                      compact: gridColumns == 3,
++                                      onTap: () => _handleMenuTap(item, catalog),
++                                    );
++                                  },
++                                ),
++                        ),
+                 ),
+               ],
+             ),
+@@ -165,12 +186,7 @@ class _PosScreenState extends ConsumerState<PosScreen> {
+                 child: _CartFab(
+                   itemCount: cartCount,
+                   total: cartState.cart.fold(0, (sum, item) => sum + item.lineTotal),
+-                  onTap: () => showModalBottomSheet(
+-                    context: context,
+-                    isScrollControlled: true,
+-                    backgroundColor: Colors.transparent,
+-                    builder: (_) => const CartDrawer(),
+-                  ),
++                  onTap: () => AppNav.showModal(context, builder: (_) => const CartDrawer()),
+                 ),
+               ),
+           ],
+@@ -470,8 +486,17 @@ class _MenuGridCard extends StatelessWidget {
+ 
+   @override
+   Widget build(BuildContext context) {
++    // clipBehavior is required here: Material with a borderRadius but no
++    // explicit clip does NOT clip its InkWell splash/highlight circle to
++    // the rounded-rect shape, so on a tightly-packed GridView the ripple
++    // visibly bleeds past the card's rounded corners into neighboring
++    // cards ("circles behind the menu cards" bug). Every tappable card in
++    // a grid/list must set clipBehavior: Clip.antiAlias for this reason —
++    // see the header note in AppSheetHeader for the equivalent rule for
++    // sheet headers.
+     return Material(
+       color: AppColors.surface,
++      clipBehavior: Clip.antiAlias,
+       borderRadius: BorderRadius.circular(compact ? AppRadius.md : AppRadius.lg),
+       child: InkWell(
+         onTap: onTap,
+@@ -612,6 +637,7 @@ class _CartFab extends StatelessWidget {
+   Widget build(BuildContext context) {
+     return Material(
+       color: AppColors.brand,
++      clipBehavior: Clip.antiAlias,
+       borderRadius: BorderRadius.circular(AppRadius.lg),
+       child: InkWell(
+         onTap: onTap,
+diff --git a/lib/features/pos/presentation/widgets/cart_drawer.dart b/lib/features/pos/presentation/widgets/cart_drawer.dart
+index ef6fe21..e9d8517 100644
+--- a/lib/features/pos/presentation/widgets/cart_drawer.dart
++++ b/lib/features/pos/presentation/widgets/cart_drawer.dart
+@@ -1,9 +1,11 @@
+ import 'package:flutter/material.dart';
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
++import '../../../../core/navigation/app_nav.dart';
+ import '../../../../core/theme/app_colors.dart';
+ import '../../../../core/theme/app_spacing.dart';
+ import '../../../../core/utils/currency.dart';
++import '../../../../core/widgets/app_sheet_header.dart';
+ import '../../application/cart_provider.dart';
+ import '../../application/pos_catalog_provider.dart';
+ import '../../domain/cart_item.dart';
+@@ -43,7 +45,7 @@ class CartDrawer extends ConsumerWidget {
+             bottom: false,
+             child: Column(
+               children: [
+-                const _CheckoutHeader(),
++                const AppSheetHeader(title: 'Checkout'),
+                 if (cartState.cart.isEmpty)
+                   const Expanded(
+                     child: Center(
+@@ -82,13 +84,17 @@ class CartDrawer extends ConsumerWidget {
+                   total: totals.roundedTotal,
+                   enabled: cartState.cart.isNotEmpty,
+                   onCheckout: () {
+-                    Navigator.of(context).pop();
+-                    showModalBottomSheet(
+-                      context: context,
+-                      isScrollControlled: true,
+-                      backgroundColor: Colors.transparent,
+-                      builder: (_) => const PaymentModal(),
+-                    );
++                    // Stack semantics: push PaymentModal ON TOP of this
++                    // sheet rather than popping CartDrawer first — so
++                    // closing the payment screen returns to the cart
++                    // exactly as it was, instead of dropping all the way
++                    // back to the bare Kasir grid. See AppNav's doc
++                    // comment. (Contrast with PaymentModal's own
++                    // "success" transition to ReceiptModal, which
++                    // deliberately DOES pop first — the cart has already
++                    // been reset by then, so there's nothing left to
++                    // return to.)
++                    AppNav.showModal(context, builder: (_) => const PaymentModal());
+                   },
+                 ),
+               ],
+@@ -100,52 +106,6 @@ class CartDrawer extends ConsumerWidget {
+   }
+ }
+ 
+-/// Checkout header — "close" (not a real back-navigation; this sheet is
+-/// a layer over the POS screen, so it pops back to it) plus a centered
+-/// title, matching the app's iOS-style header spacing/sizing without
+-/// switching to a full page route.
+-class _CheckoutHeader extends StatelessWidget {
+-  const _CheckoutHeader();
+-
+-  @override
+-  Widget build(BuildContext context) {
+-    return Padding(
+-      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
+-      child: SizedBox(
+-        height: 44,
+-        child: Stack(
+-          alignment: Alignment.center,
+-          children: [
+-            const Center(
+-              child: Text('Checkout', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
+-            ),
+-            Align(
+-              alignment: Alignment.centerLeft,
+-              child: Material(
+-                color: AppColors.surface,
+-                shape: const CircleBorder(),
+-                child: InkWell(
+-                  onTap: () => Navigator.of(context).pop(),
+-                  customBorder: const CircleBorder(),
+-                  child: Container(
+-                    width: 44,
+-                    height: 44,
+-                    decoration: BoxDecoration(
+-                      shape: BoxShape.circle,
+-                      boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 10, offset: const Offset(0, 2))],
+-                    ),
+-                    child: const Icon(Icons.close_rounded, size: 22, color: AppColors.textPrimary),
+-                  ),
+-                ),
+-              ),
+-            ),
+-          ],
+-        ),
+-      ),
+-    );
+-  }
+-}
+-
+ /// Visual-only "Open Bill" toggle, per reference design. Not wired to
+ /// [CartState] yet — Agung is iterating on UI first, functionality later.
+ class _OpenBillToggle extends StatefulWidget {
+diff --git a/lib/features/pos/presentation/widgets/customer_picker_sheet.dart b/lib/features/pos/presentation/widgets/customer_picker_sheet.dart
+index 898a2a6..9381fe1 100644
+--- a/lib/features/pos/presentation/widgets/customer_picker_sheet.dart
++++ b/lib/features/pos/presentation/widgets/customer_picker_sheet.dart
+@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
+ import '../../../../core/theme/app_colors.dart';
+ import '../../../../core/theme/app_spacing.dart';
++import '../../../../core/widgets/app_sheet_header.dart';
+ import '../../application/cart_provider.dart';
+ import '../../domain/customer.dart';
+ 
+@@ -55,20 +56,12 @@ class _CustomerPickerSheetState extends ConsumerState<CustomerPickerSheet> {
+           child: Column(
+             children: [
+               Container(
+-                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: AppSpacing.sm),
+                 decoration: const BoxDecoration(
+                   color: AppColors.surface,
+                   borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+                   border: Border(bottom: BorderSide(color: AppColors.border)),
+                 ),
+-                child: Row(
+-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+-                  children: [
+-                    IconButton(onPressed: () => Navigator.of(context).pop(), icon: const Icon(Icons.close_rounded, color: AppColors.textPrimary)),
+-                    const Text('Pilih Pelanggan', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
+-                    const SizedBox(width: 48),
+-                  ],
+-                ),
++                child: const AppSheetHeader(title: 'Pilih Pelanggan'),
+               ),
+               Padding(
+                 padding: const EdgeInsets.all(AppSpacing.lg),
+diff --git a/lib/features/pos/presentation/widgets/payment_modal.dart b/lib/features/pos/presentation/widgets/payment_modal.dart
+index 84f7419..2b7063e 100644
+--- a/lib/features/pos/presentation/widgets/payment_modal.dart
++++ b/lib/features/pos/presentation/widgets/payment_modal.dart
+@@ -1,9 +1,11 @@
+ import 'package:flutter/material.dart';
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
++import '../../../../core/navigation/app_nav.dart';
+ import '../../../../core/theme/app_colors.dart';
+ import '../../../../core/theme/app_spacing.dart';
+ import '../../../../core/utils/currency.dart';
++import '../../../../core/widgets/app_sheet_header.dart';
+ import '../../../dompet/presentation/widgets/cash_location_picker.dart';
+ import '../../application/cart_provider.dart';
+ import '../../application/payment_modal_provider.dart';
+@@ -82,11 +84,14 @@ class _PaymentModalState extends ConsumerState<PaymentModal> {
+     ref.read(cartProvider.notifier).resetDraft();
+     ref.read(paymentModalProvider.notifier).close();
+ 
++    // Deliberately pop first, THEN show the receipt — unlike CartDrawer's
++    // push-on-top pattern. The cart has just been reset and the
++    // transaction finalized, so there's no in-progress state left to
++    // return to if the receipt is dismissed; the receipt is the natural
++    // end of this flow, not a nested step within it.
+     Navigator.of(context).pop();
+-    showModalBottomSheet(
+-      context: context,
+-      isScrollControlled: true,
+-      backgroundColor: Colors.transparent,
++    AppNav.showModal(
++      context,
+       builder: (_) => ReceiptModal(transaction: transaction, changeAmount: change),
+     );
+   }
+@@ -129,42 +134,12 @@ class _PaymentModalState extends ConsumerState<PaymentModal> {
+             bottom: false,
+             child: Column(
+               children: [
+-                Padding(
+-                  padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
+-                  child: SizedBox(
+-                    height: 44,
+-                    child: Stack(
+-                      alignment: Alignment.center,
+-                      children: [
+-                        const Center(
+-                          child: Text('Pembayaran', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
+-                        ),
+-                        Align(
+-                          alignment: Alignment.centerLeft,
+-                          child: Material(
+-                            color: AppColors.surface,
+-                            shape: const CircleBorder(),
+-                            child: InkWell(
+-                              onTap: () {
+-                                paymentController.close();
+-                                Navigator.of(context).pop();
+-                              },
+-                              customBorder: const CircleBorder(),
+-                              child: Container(
+-                                width: 44,
+-                                height: 44,
+-                                decoration: BoxDecoration(
+-                                  shape: BoxShape.circle,
+-                                  boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 10, offset: const Offset(0, 2))],
+-                                ),
+-                                child: const Icon(Icons.close_rounded, size: 22, color: AppColors.textPrimary),
+-                              ),
+-                            ),
+-                          ),
+-                        ),
+-                      ],
+-                    ),
+-                  ),
++                AppSheetHeader(
++                  title: 'Pembayaran',
++                  onClose: () {
++                    paymentController.close();
++                    Navigator.of(context).pop();
++                  },
+                 ),
+                 Expanded(
+                   child: ListView(
+diff --git a/lib/features/pos/presentation/widgets/variant_selection_modal.dart b/lib/features/pos/presentation/widgets/variant_selection_modal.dart
+index dc9f230..5c7fd89 100644
+--- a/lib/features/pos/presentation/widgets/variant_selection_modal.dart
++++ b/lib/features/pos/presentation/widgets/variant_selection_modal.dart
+@@ -284,6 +284,7 @@ class _VariantGroupSection extends StatelessWidget {
+               padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+               child: Material(
+                 color: AppColors.surface,
++                clipBehavior: Clip.antiAlias,
+                 borderRadius: BorderRadius.circular(AppRadius.pill),
+                 child: InkWell(
+                   onTap: () => onToggle(option.id),

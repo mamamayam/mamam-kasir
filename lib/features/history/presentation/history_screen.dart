@@ -85,6 +85,7 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
                   const SizedBox(width: AppSpacing.sm),
                   Material(
                     color: AppColors.surface,
+                    clipBehavior: Clip.antiAlias,
                     borderRadius: BorderRadius.circular(AppRadius.lg),
                     child: InkWell(
                       onTap: () => showSortSheet(context, current: state.sortKey, onSelect: controller.setSortKey),
@@ -122,20 +123,44 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
             Expanded(
               child: state.isLoading
                   ? const Center(child: CircularProgressIndicator(color: AppColors.brand))
-                  : state.filteredTransactions.isEmpty
-                      ? const _EmptyState()
-                      : ListView.separated(
-                          padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.xxl),
-                          itemCount: state.filteredTransactions.length,
-                          separatorBuilder: (_, __) => const SizedBox(height: AppSpacing.sm),
-                          itemBuilder: (context, index) {
-                            final transaction = state.filteredTransactions[index];
-                            return TransactionCard(
-                              transaction: transaction,
-                              onTap: () => AppNav.push(context, (_) => TransactionDetailScreen(transaction: transaction)),
-                            );
-                          },
-                        ),
+                  : RefreshIndicator(
+                      color: AppColors.brand,
+                      onRefresh: controller.load,
+                      child: state.filteredTransactions.isEmpty
+                          // RefreshIndicator needs a scrollable child to
+                          // detect the pull gesture even when there's
+                          // nothing to list — AlwaysScrollableScrollPhysics
+                          // keeps the ListView draggable with zero/short
+                          // content. The SizedBox(height: full viewport)
+                          // wrapper keeps _EmptyState's internal Center
+                          // actually centering in the visible area, since
+                          // a bare ListView child only sizes to its own
+                          // content, not the viewport.
+                          ? LayoutBuilder(
+                              builder: (context, constraints) => ListView(
+                                physics: const AlwaysScrollableScrollPhysics(),
+                                children: [
+                                  SizedBox(
+                                    height: constraints.maxHeight,
+                                    child: const _EmptyState(),
+                                  ),
+                                ],
+                              ),
+                            )
+                          : ListView.separated(
+                              physics: const AlwaysScrollableScrollPhysics(),
+                              padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.xxl),
+                              itemCount: state.filteredTransactions.length,
+                              separatorBuilder: (_, __) => const SizedBox(height: AppSpacing.sm),
+                              itemBuilder: (context, index) {
+                                final transaction = state.filteredTransactions[index];
+                                return TransactionCard(
+                                  transaction: transaction,
+                                  onTap: () => AppNav.push(context, (_) => TransactionDetailScreen(transaction: transaction)),
+                                );
+                              },
+                            ),
+                    ),
             ),
           ],
         ),

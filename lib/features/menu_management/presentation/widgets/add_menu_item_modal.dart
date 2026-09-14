@@ -409,6 +409,7 @@ class _VariantCheckboxTile extends StatelessWidget {
       padding: const EdgeInsets.only(bottom: AppSpacing.sm),
       child: Material(
         color: AppColors.surface,
+        clipBehavior: Clip.antiAlias,
         borderRadius: BorderRadius.circular(AppRadius.md),
         child: InkWell(
           onTap: () => onChanged(!selected),

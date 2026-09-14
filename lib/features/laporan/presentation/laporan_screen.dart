@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 
+import '../../../core/navigation/app_nav.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_spacing.dart';
 import '../../../core/utils/currency.dart';
@@ -53,8 +54,9 @@ class LaporanScreen extends ConsumerWidget {
                   const SizedBox(width: AppSpacing.sm),
                   _FilterPill(
                     label: DateFormat('MMM yyyy', 'id_ID').format(state.selectedMonth),
-                    onTap: () => showModalBottomSheet(
-                      context: context,
+                    onTap: () => AppNav.showModal(
+                      context,
+                      isScrollControlled: false,
                       builder: (_) => MonthPickerSheet(current: state.selectedMonth, onSelect: controller.setMonth),
                     ),
                   ),
@@ -77,9 +79,9 @@ class LaporanScreen extends ConsumerWidget {
 
   void _openTypePicker(BuildContext context, WidgetRef ref) {
     final controller = ref.read(laporanProvider.notifier);
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
+    AppNav.showModal(
+      context,
+      isScrollControlled: false,
       builder: (_) => ReportTypePickerSheet(
         current: ref.read(laporanProvider).reportType,
         onSelect: controller.setReportType,

@@ -26,6 +26,7 @@ class MenuActionCard extends StatelessWidget {
     return Expanded(
       child: Material(
         color: AppColors.surface,
+        clipBehavior: Clip.antiAlias,
         borderRadius: BorderRadius.circular(AppRadius.lg),
         child: InkWell(
           onTap: onTap,

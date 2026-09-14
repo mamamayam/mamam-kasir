@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../core/navigation/app_nav.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_spacing.dart';
 import 'menu_action_card.dart';
@@ -13,15 +14,22 @@ import 'menu_grid_items.dart';
 /// notifications/approvals table yet (see DashboardState's doc comment),
 /// so callers without a real source for these can omit them rather than
 /// needing to construct a whole summary object just to pass zeros.
+///
+/// Uses [AppNav.showModal] rather than a raw [showModalBottomSheet] —
+/// this sheet is the reference case for the app's stack-navigation model
+/// (see [buildMenuGridItems]'s doc comment): each tile pushes its
+/// destination on top of this sheet via [AppNav.push] without closing it
+/// first, so popping the destination reveals this sheet again exactly as
+/// it was. That only works because this sheet is itself a proper route
+/// in the same Navigator stack, which is what [AppNav.showModal]
+/// guarantees.
 Future<void> showMenuBottomSheet(
   BuildContext context, {
   int unreadNotifications = 0,
   int pendingApprovals = 0,
 }) {
-  return showModalBottomSheet(
-    context: context,
-    isScrollControlled: true,
-    backgroundColor: Colors.transparent,
+  return AppNav.showModal(
+    context,
     builder: (context) => MenuBottomSheetContent(
       unreadNotifications: unreadNotifications,
       pendingApprovals: pendingApprovals,

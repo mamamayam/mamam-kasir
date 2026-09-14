@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/navigation/app_nav.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_spacing.dart';
 import '../../../core/utils/currency.dart';
@@ -56,9 +57,9 @@ class _PosScreenState extends ConsumerState<PosScreen> {
   }
 
   Future<void> _openCategoryFilter(List<String> categoryNames) async {
-    final result = await showModalBottomSheet<String>(
-      context: context,
-      backgroundColor: Colors.transparent,
+    final result = await AppNav.showModal<String>(
+      context,
+      isScrollControlled: false,
       builder: (_) => CategoryFilterSheet(categories: categoryNames, selectedCategory: _selectedCategory),
     );
     // The sheet only pops a value from an explicit row tap ("Semua" pops
@@ -78,10 +79,8 @@ class _PosScreenState extends ConsumerState<PosScreen> {
       return;
     }
 
-    final selected = await showModalBottomSheet<VariantSelectionResult>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
+    final selected = await AppNav.showModal<VariantSelectionResult>(
+      context,
       builder: (_) => VariantSelectionModal(menu: menu, allGroups: catalog.variantGroups),
     );
 
@@ -133,27 +132,49 @@ class _PosScreenState extends ConsumerState<PosScreen> {
                 Expanded(
                   child: catalog.isLoading
                       ? const Center(child: CircularProgressIndicator(color: AppColors.brand))
-                      : filteredItems.isEmpty
-                          ? const Center(child: Text('Menu tidak ditemukan.', style: TextStyle(fontSize: 13, color: AppColors.textMuted)))
-                          : GridView.builder(
-                              padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.xs, AppSpacing.lg, 110),
-                              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                                crossAxisCount: gridColumns,
-                                mainAxisSpacing: gridColumns == 3 ? AppSpacing.sm : AppSpacing.md,
-                                crossAxisSpacing: gridColumns == 3 ? AppSpacing.sm : AppSpacing.md,
-                                childAspectRatio: gridColumns == 3 ? 0.72 : 0.85,
-                              ),
-                              itemCount: filteredItems.length,
-                              itemBuilder: (context, index) {
-                                final item = filteredItems[index];
-                                return _MenuGridCard(
-                                  item: item,
-                                  qtyInCart: qtyByMenuId[item.id] ?? 0,
-                                  compact: gridColumns == 3,
-                                  onTap: () => _handleMenuTap(item, catalog),
-                                );
-                              },
-                            ),
+                      : RefreshIndicator(
+                          color: AppColors.brand,
+                          onRefresh: () => ref.read(posCatalogProvider.notifier).load(),
+                          child: filteredItems.isEmpty
+                              // Same reasoning as Riwayat: RefreshIndicator
+                              // needs a scrollable child to detect the pull
+                              // gesture, and a bare Center has no scroll
+                              // extent at all — wrap it in a full-viewport
+                              // scrollable ListView instead.
+                              ? LayoutBuilder(
+                                  builder: (context, constraints) => ListView(
+                                    physics: const AlwaysScrollableScrollPhysics(),
+                                    children: [
+                                      SizedBox(
+                                        height: constraints.maxHeight,
+                                        child: const Center(
+                                          child: Text('Menu tidak ditemukan.', style: TextStyle(fontSize: 13, color: AppColors.textMuted)),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                )
+                              : GridView.builder(
+                                  physics: const AlwaysScrollableScrollPhysics(),
+                                  padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.xs, AppSpacing.lg, 110),
+                                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                                    crossAxisCount: gridColumns,
+                                    mainAxisSpacing: gridColumns == 3 ? AppSpacing.sm : AppSpacing.md,
+                                    crossAxisSpacing: gridColumns == 3 ? AppSpacing.sm : AppSpacing.md,
+                                    childAspectRatio: gridColumns == 3 ? 0.72 : 0.85,
+                                  ),
+                                  itemCount: filteredItems.length,
+                                  itemBuilder: (context, index) {
+                                    final item = filteredItems[index];
+                                    return _MenuGridCard(
+                                      item: item,
+                                      qtyInCart: qtyByMenuId[item.id] ?? 0,
+                                      compact: gridColumns == 3,
+                                      onTap: () => _handleMenuTap(item, catalog),
+                                    );
+                                  },
+                                ),
+                        ),
                 ),
               ],
             ),
@@ -165,12 +186,7 @@ class _PosScreenState extends ConsumerState<PosScreen> {
                 child: _CartFab(
                   itemCount: cartCount,
                   total: cartState.cart.fold(0, (sum, item) => sum + item.lineTotal),
-                  onTap: () => showModalBottomSheet(
-                    context: context,
-                    isScrollControlled: true,
-                    backgroundColor: Colors.transparent,
-                    builder: (_) => const CartDrawer(),
-                  ),
+                  onTap: () => AppNav.showModal(context, builder: (_) => const CartDrawer()),
                 ),
               ),
           ],
@@ -470,8 +486,17 @@ class _MenuGridCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // clipBehavior is required here: Material with a borderRadius but no
+    // explicit clip does NOT clip its InkWell splash/highlight circle to
+    // the rounded-rect shape, so on a tightly-packed GridView the ripple
+    // visibly bleeds past the card's rounded corners into neighboring
+    // cards ("circles behind the menu cards" bug). Every tappable card in
+    // a grid/list must set clipBehavior: Clip.antiAlias for this reason —
+    // see the header note in AppSheetHeader for the equivalent rule for
+    // sheet headers.
     return Material(
       color: AppColors.surface,
+      clipBehavior: Clip.antiAlias,
       borderRadius: BorderRadius.circular(compact ? AppRadius.md : AppRadius.lg),
       child: InkWell(
         onTap: onTap,
@@ -612,6 +637,7 @@ class _CartFab extends StatelessWidget {
   Widget build(BuildContext context) {
     return Material(
       color: AppColors.brand,
+      clipBehavior: Clip.antiAlias,
       borderRadius: BorderRadius.circular(AppRadius.lg),
       child: InkWell(
         onTap: onTap,

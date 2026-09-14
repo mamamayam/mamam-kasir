@@ -79,16 +79,20 @@ class _MenuManagementScreenState extends ConsumerState<MenuManagementScreen> {
             Expanded(
               child: state.isLoading
                   ? const Center(child: CircularProgressIndicator(color: AppColors.brand))
-                  : state.tab == MenuManagementTab.menu
-                      ? _MenuTabContent(
-                          state: state,
-                          onItemTap: (item) => AppNav.showModal(
-                            context,
-                            builder: (_) => AddMenuItemModal(editingItem: item),
-                          ),
-                          onItemLongPress: (item) => _showItemActions(context, item, controller),
-                        )
-                      : _VarianTabContent(state: state),
+                  : RefreshIndicator(
+                      color: AppColors.brand,
+                      onRefresh: controller.loadAll,
+                      child: state.tab == MenuManagementTab.menu
+                          ? _MenuTabContent(
+                              state: state,
+                              onItemTap: (item) => AppNav.showModal(
+                                context,
+                                builder: (_) => AddMenuItemModal(editingItem: item),
+                              ),
+                              onItemLongPress: (item) => _showItemActions(context, item, controller),
+                            )
+                          : _VarianTabContent(state: state),
+                    ),
             ),
           ],
         ),
@@ -186,6 +190,7 @@ class _SearchRow extends StatelessWidget {
           const SizedBox(width: AppSpacing.sm),
           Material(
             color: AppColors.surface,
+            clipBehavior: Clip.antiAlias,
             borderRadius: BorderRadius.circular(AppRadius.lg),
             child: InkWell(
               onTap: onToggleViewMode,
@@ -230,10 +235,22 @@ class _MenuTabContent extends StatelessWidget {
     final grouped = state.groupedFilteredMenuItems;
 
     if (grouped.isEmpty) {
-      return const _EmptyState(message: 'Menu tidak ditemukan.');
+      // Same reasoning as Riwayat/Kasir: RefreshIndicator (from the
+      // parent screen) needs a scrollable child to detect the pull
+      // gesture, so the empty state can't be a bare Center — wrap it in
+      // a full-viewport scrollable ListView instead.
+      return LayoutBuilder(
+        builder: (context, constraints) => ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          children: [
+            SizedBox(height: constraints.maxHeight, child: const _EmptyState(message: 'Menu tidak ditemukan.')),
+          ],
+        ),
+      );
     }
 
     return ListView(
+      physics: const AlwaysScrollableScrollPhysics(),
       padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, AppSpacing.xxl),
       children: grouped.entries.map((entry) {
         return Padding(
@@ -276,10 +293,18 @@ class _VarianTabContent extends StatelessWidget {
     final groups = state.filteredVariantGroups;
 
     if (groups.isEmpty) {
-      return const _EmptyState(message: 'Varian tidak ditemukan.');
+      return LayoutBuilder(
+        builder: (context, constraints) => ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          children: [
+            SizedBox(height: constraints.maxHeight, child: const _EmptyState(message: 'Varian tidak ditemukan.')),
+          ],
+        ),
+      );
     }
 
     return ListView(
+      physics: const AlwaysScrollableScrollPhysics(),
       padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, AppSpacing.xxl),
       children: [
         _ItemLayout(

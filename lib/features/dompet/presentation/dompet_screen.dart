@@ -43,6 +43,7 @@ class DompetScreen extends ConsumerWidget {
                 color: AppColors.brand,
                 onRefresh: controller.load,
                 child: ListView(
+                  physics: const AlwaysScrollableScrollPhysics(),
                   padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.xxl),
                   children: [
                     _SaldoCard(summary: state.summary),
