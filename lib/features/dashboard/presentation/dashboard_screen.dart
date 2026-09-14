@@ -92,7 +92,8 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final summary = ref.watch(dashboardSummaryProvider);
+    final state = ref.watch(dashboardProvider);
+    final metrics = state.metrics;
 
     return Scaffold(
       backgroundColor: AppColors.background,
@@ -102,47 +103,59 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
             Column(
               children: [
                 // --- Frozen header: does not scroll away ---
-                _DashboardHeader(summary: summary),
+                _DashboardHeader(user: state.user),
                 InlineRefreshIndicator(
                   visible: _pullDistance > 4,
                   isRefreshing: _isRefreshing,
                 ),
                 // --- Scrollable content only ---
                 Expanded(
-                  child: GestureDetector(
-                    onVerticalDragStart: _handleDragStart,
-                    onVerticalDragUpdate: (d) => _handleDragUpdate(d, _scrollController),
-                    onVerticalDragEnd: _handleDragEnd,
-                    child: SingleChildScrollView(
-                      controller: _scrollController,
-                      padding: const EdgeInsets.fromLTRB(
-                        AppSpacing.lg,
-                        AppSpacing.md,
-                        AppSpacing.lg,
-                        110, // clearance for the frozen swipe-up trigger
-                      ),
-                      child: Column(
-                        children: [
-                          HeroSalesCard(
-                            omzetHariIni: summary.metrics.omzetHariIni,
-                            growthPercent: summary.metrics.growthPercent,
+                  child: state.isLoading && metrics == null
+                      ? const Center(child: CircularProgressIndicator(color: AppColors.brand))
+                      : GestureDetector(
+                          onVerticalDragStart: _handleDragStart,
+                          onVerticalDragUpdate: (d) => _handleDragUpdate(d, _scrollController),
+                          onVerticalDragEnd: _handleDragEnd,
+                          child: SingleChildScrollView(
+                            controller: _scrollController,
+                            padding: const EdgeInsets.fromLTRB(
+                              AppSpacing.lg,
+                              AppSpacing.md,
+                              AppSpacing.lg,
+                              110, // clearance for the frozen swipe-up trigger
+                            ),
+                            child: Column(
+                              children: [
+                                HeroSalesCard(
+                                  omzetHariIni: metrics?.omzetHariIni ?? 0,
+                                  growthPercent: metrics?.growthPercent ?? 0,
+                                ),
+                                const SizedBox(height: AppSpacing.lg),
+                                MetricsGrid(
+                                  metrics: metrics ??
+                                      const DashboardMetrics(
+                                        omzetHariIni: 0,
+                                        totalPengeluaran: 0,
+                                        labaKotor: 0,
+                                        totalPesanan: 0,
+                                        rataRata: 0,
+                                        growthPercent: 0,
+                                      ),
+                                ),
+                                const SizedBox(height: AppSpacing.lg),
+                                SalesTrendChart(
+                                  points: state.trend,
+                                  onPointTap: (point) => _showTrendDetail(context, point),
+                                ),
+                                const SizedBox(height: AppSpacing.lg),
+                                QuickActionsRow(
+                                  onKasirTap: () => AppNav.push(context, (_) => const PosScreen()),
+                                  onRiwayatTap: () => AppNav.push(context, (_) => const HistoryScreen()),
+                                ),
+                              ],
+                            ),
                           ),
-                          const SizedBox(height: AppSpacing.lg),
-                          MetricsGrid(metrics: summary.metrics),
-                          const SizedBox(height: AppSpacing.lg),
-                          SalesTrendChart(
-                            points: summary.trend,
-                            onPointTap: (point) => _showTrendDetail(context, point),
-                          ),
-                          const SizedBox(height: AppSpacing.lg),
-                          QuickActionsRow(
-                            onKasirTap: () => AppNav.push(context, (_) => const PosScreen()),
-                            onRiwayatTap: () => AppNav.push(context, (_) => const HistoryScreen()),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
+                        ),
                 ),
               ],
             ),
@@ -152,7 +165,11 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
               right: AppSpacing.xxl,
               bottom: AppSpacing.md,
               child: SwipeUpTrigger(
-                onTap: () => showMenuBottomSheet(context, summary: summary),
+                onTap: () => showMenuBottomSheet(
+                  context,
+                  unreadNotifications: state.unreadNotifications,
+                  pendingApprovals: state.pendingApprovals,
+                ),
               ),
             ),
           ],
@@ -191,8 +208,8 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
 /// Lives outside the scroll area entirely (see [DashboardScreen] layout
 /// note) so it never moves as the user scrolls the content below it.
 class _DashboardHeader extends StatelessWidget {
-  final DashboardSummary summary;
-  const _DashboardHeader({required this.summary});
+  final SessionUser user;
+  const _DashboardHeader({required this.user});
 
   @override
   Widget build(BuildContext context) {
@@ -221,7 +238,7 @@ class _DashboardHeader extends StatelessWidget {
                   style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: AppColors.textPrimary, letterSpacing: -0.3),
                 ),
                 const SizedBox(height: 2),
-                SessionMarker(user: summary.user),
+                SessionMarker(user: user),
               ],
             ),
           ),

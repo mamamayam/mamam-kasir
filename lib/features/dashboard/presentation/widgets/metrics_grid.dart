@@ -5,13 +5,13 @@ import '../../../../core/theme/app_spacing.dart';
 import '../../../../core/utils/currency.dart';
 import '../../domain/dashboard_models.dart';
 
-/// 2x2 metrics grid matching the supplied mockup exactly.
+/// 2x2 metrics grid — all four figures are computed from real
+/// transaction data by DashboardRepository (see dashboard_provider.dart).
 ///
 /// NOTE: only `totalPengeluaran` and `labaKotor` are PRD-defined dashboard
-/// metrics (docs/01_PRD.md). `totalPesanan` and `rataRata` are kept here
-/// per explicit instruction to match the mockup during this shell-first
-/// pass — see [[mamam-kasir-flutter]] notes for the decision to defer
-/// metric correctness to the dashboard feature phase.
+/// metrics (docs/01_PRD.md). `totalPesanan` and `rataRata` are additional
+/// figures kept to match the supplied UI mockup — not PRD-specified, but
+/// still real counts/averages over actual transactions, not placeholders.
 class MetricsGrid extends StatelessWidget {
   final DashboardMetrics metrics;
   const MetricsGrid({super.key, required this.metrics});

@@ -1,0 +1,789 @@
+diff --git a/lib/core/data/app_database.dart b/lib/core/data/app_database.dart
+index 2c6bf73..36ba6d8 100644
+--- a/lib/core/data/app_database.dart
++++ b/lib/core/data/app_database.dart
+@@ -1,6 +1,7 @@
+ import 'package:path/path.dart' as p;
+ import 'package:path_provider/path_provider.dart';
+ import 'package:sqflite_sqlcipher/sqflite.dart';
++import 'package:uuid/uuid.dart';
+ 
+ /// App-wide encrypted local database.
+ ///
+@@ -33,15 +34,17 @@ class AppDatabase {
+   // exists yet, and _onUpgrade here is still a no-op. On a device with
+   // an existing install, uninstall the app (or clear its storage) first
+   // so onCreate runs fresh and the new item appears.
+-  // v5: added the Dompet ledger core — cash_locations (Store
+-  // Cash/Dompet + per-courier, courier rows are manual/dummy since the
+-  // Staff module doesn't exist yet), cash_movements (immutable
+-  // ledger entries with audit-trail fields per the Dompet PRD — never a
+-  // simple balance mutation; every location's balance is always SUM of
+-  // its movements, computed on read), and kasbon (staff debt records
+-  // created by "Jadikan Kasbon"). Closing/shift-block logic is
+-  // explicitly NOT part of this pass — see [[dompet-prd]] notes.
+-  static const _dbVersion = 5;
++  // v6: removed placeholder/dummy rows that had no path to real editing —
++  // the demo customer ("Budi Santoso"), demo voucher ("HEMAT10"), the two
++  // demo courier cash_locations ("Budi"/"Andi"), and the store's demo
++  // opening balance (Rp 200.000). Menu/category/variant seed data is kept
++  // (it IS real, editable data via Menu Management — the point of the
++  // cleanup was removing data with no real source, not emptying the menu
++  // Agung actually sells). Added a handful of seeded `transactions` +
++  // `transaction_items` rows (today + preceding days) so Dashboard/Riwayat
++  // have real, editable/cancelable data to show instead of being empty —
++  // these are ordinary transaction rows, not a separate demo mechanism.
++  static const _dbVersion = 6;
+ 
+   // TODO(security-foundation): replace with a key generated once and
+   // stored via flutter_secure_storage, per AGENTS.md.
+@@ -302,8 +305,21 @@ class AppDatabase {
+     // data that must be preserved across upgrades.
+   }
+ 
+-  /// Seeds demo rows so screens show familiar data on first run instead
+-  /// of an empty state. Safe to remove once real data entry is routine.
++  /// Seeds initial rows on first run.
++  ///
++  /// Menu/category/variant data below is Agung's actual menu — real,
++  /// editable rows via Menu Management, not placeholder content, so it
++  /// stays. What got removed in the v6 cleanup was data with no real
++  /// source to point to: a demo customer, a demo voucher, two demo
++  /// courier cash_locations, and a demo opening cash balance — those
++  /// were names/numbers invented for the shell phase with no path to
++  /// becoming real (no Staff module for couriers, no actual customer
++  /// named "Budi Santoso"). In their place, this seeds a handful of
++  /// ordinary `transactions` rows (today + the preceding few days, using
++  /// the real menu items) so Dashboard and Riwayat have something to
++  /// show and compute from immediately — these are real rows editable/
++  /// cancelable the same way any other transaction is, not a separate
++  /// "demo mode".
+   Future<void> _seedDemoData(Database db) async {
+     final now = DateTime.now().toIso8601String();
+ 
+@@ -418,37 +434,16 @@ class AppDatabase {
+     await db.insert('menu_item_variant_groups', {'menu_item_id': 'menu-3', 'variant_group_id': 'vg-1'});
+     await db.insert('menu_item_variant_groups', {'menu_item_id': 'menu-4', 'variant_group_id': 'vg-1'});
+     await db.insert('menu_item_variant_groups', {'menu_item_id': 'menu-4', 'variant_group_id': 'vg-3'});
+-
+-    // New dummy item — required topping choice plus the shared Ekstra
+-    // Topping group (multi-select), so it exercises a menu item with
+-    // two variant groups at once.
+     await db.insert('menu_item_variant_groups', {'menu_item_id': 'menu-7', 'variant_group_id': 'vg-4'});
+     await db.insert('menu_item_variant_groups', {'menu_item_id': 'menu-7', 'variant_group_id': 'vg-3'});
+ 
+-    await db.insert('customers', {
+-      'id': 'cust-1',
+-      'name': 'Budi Santoso',
+-      'phone': '081234567890',
+-      'is_active': 1,
+-      'created_at': now,
+-      'updated_at': now,
+-    });
+-
+-    await db.insert('vouchers', {
+-      'id': 'vch-1',
+-      'code': 'HEMAT10',
+-      'discount_type': 'percent',
+-      'discount_value': 10,
+-      'min_purchase': 20000,
+-      'is_active': 1,
+-      'created_at': now,
+-      'updated_at': now,
+-    });
+-
+-    // --- Dompet ledger seed ---
+-    // Store Cash location plus two dummy courier locations (manual
+-    // stand-ins until the Staff module provides real courier/staff
+-    // records — see docs/dompet-prd).
++    // --- Dompet ledger: only the structural Store Cash location. Every
++    // location's balance is always derived from cash_movements (never a
++    // stored/mutated field — see DompetRepository.getLocationBalance),
++    // so omitting an opening-balance movement here just means Store Cash
++    // legitimately starts at Rp 0 until real sales or a real "Saldo
++    // Awal" entry create movements — not a placeholder value pretending
++    // to be a real balance. ---
+     await db.insert('cash_locations', {
+       'id': 'loc-store',
+       'type': 'store',
+@@ -458,39 +453,101 @@ class AppDatabase {
+       'created_at': now,
+       'updated_at': now,
+     });
+-    await db.insert('cash_locations', {
+-      'id': 'loc-courier-budi',
+-      'type': 'courier',
+-      'name': 'Budi',
+-      'staff_id': null,
+-      'is_active': 1,
+-      'created_at': now,
+-      'updated_at': now,
+-    });
+-    await db.insert('cash_locations', {
+-      'id': 'loc-courier-andi',
+-      'type': 'courier',
+-      'name': 'Andi',
+-      'staff_id': null,
+-      'is_active': 1,
+-      'created_at': now,
+-      'updated_at': now,
+-    });
+ 
+-    // Opening balance for Store Cash so the Dompet page isn't empty on
+-    // first run — a movement with no from_location (cash entering the
+-    // ledger), same shape a real "opening shift" entry would use later.
+-    await db.insert('cash_movements', {
+-      'id': 'cm-opening-store',
+-      'type': 'opening',
+-      'from_location_id': null,
+-      'to_location_id': 'loc-store',
+-      'amount': 200000,
+-      'reference_transaction_id': null,
+-      'reference_kasbon_id': null,
+-      'reason': 'Saldo awal (demo)',
+-      'created_at': now,
+-      'created_by': null,
+-    });
++    await _seedSampleTransactions(db);
++  }
++
++  /// Seeds a handful of ordinary paid transactions (today + the
++  /// preceding several days) using the real menu rows above, so
++  /// Dashboard metrics/trend and Riwayat have real data to compute from
++  /// and display on first run — same tables, same shape, same
++  /// cancel/view flow as any transaction created through checkout. Not a
++  /// separate "sample data" system; these rows are editable/cancelable
++  /// exactly like any other transaction.
++  Future<void> _seedSampleTransactions(Database db) async {
++    const uuid = Uuid();
++    final today = DateTime.now();
++
++    // (day offset from today, [(menu_id, name, price, qty)], payment method)
++    final days = [
++      (0, [('menu-3', 'Ayam Crispy Original', 15000, 2), ('menu-6', 'Es Jeruk', 7000, 2)], 'Tunai'),
++      (0, [('menu-2', 'Firesauce', 20000, 1), ('menu-7', 'Nasi Goreng Spesial', 22000, 1)], 'QRIS'),
++      (1, [('menu-4', 'Ayam Bakar Madu', 17000, 3), ('menu-5', 'Es Teh Manis', 5000, 3)], 'Tunai'),
++      (2, [('menu-1', 'Brownbutter', 18000, 1), ('menu-3', 'Ayam Crispy Original', 15000, 1)], 'QRIS'),
++      (2, [('menu-7', 'Nasi Goreng Spesial', 22000, 2)], 'Transfer'),
++      (4, [('menu-3', 'Ayam Crispy Original', 15000, 1), ('menu-6', 'Es Jeruk', 7000, 1)], 'Tunai'),
++      (6, [('menu-4', 'Ayam Bakar Madu', 17000, 2), ('menu-2', 'Firesauce', 20000, 1)], 'QRIS'),
++    ];
++
++    for (final (dayOffset, items, paymentMethod) in days) {
++      final createdAt = today.subtract(Duration(days: dayOffset, hours: today.hour - 12));
++      final id = uuid.v4();
++      final displayNumber = 'ORD-${id.substring(0, 6).toUpperCase()}';
++      final subtotal = items.fold<int>(0, (sum, i) => sum + (i.$3 * i.$4));
++      final tax = (subtotal * 0.11).round();
++      final total = subtotal + tax;
++
++      await db.insert('transactions', {
++        'id': id,
++        'display_number': displayNumber,
++        'status': 'paid',
++        'order_type': 'Takeaway',
++        'customer_id': null,
++        'customer_name': null,
++        'ojol_platform': null,
++        'ojol_order_number': null,
++        'subtotal': subtotal,
++        'voucher_id': null,
++        'voucher_code': null,
++        'voucher_discount': 0,
++        'manual_discount_type': null,
++        'manual_discount_value': null,
++        'manual_discount_amount': 0,
++        'tax_amount': tax,
++        'service_amount': 0,
++        'delivery_fee': 0,
++        'rounding_adjustment': 0,
++        'total': total,
++        'payment_method': paymentMethod,
++        'amount_paid': total,
++        'change_amount': 0,
++        'split_payments_json': null,
++        'created_at': createdAt.toIso8601String(),
++        'paid_at': createdAt.toIso8601String(),
++      });
++
++      for (final (menuId, name, price, qty) in items) {
++        await db.insert('transaction_items', {
++          'id': uuid.v4(),
++          'transaction_id': id,
++          'menu_item_id': menuId,
++          'name': name,
++          'variant_name': null,
++          'variant_selected_json': null,
++          'price': price,
++          'hpp': 0,
++          'qty': qty,
++          'note': null,
++        });
++      }
++
++      // Cash-method sales route through the Dompet ledger like a real
++      // checkout would (see PosRepository.saveTransaction) — QRIS/
++      // Transfer have no physical cash to track, so no movement.
++      if (paymentMethod == 'Tunai') {
++        await db.insert('cash_movements', {
++          'id': uuid.v4(),
++          'type': 'cash_sale',
++          'from_location_id': null,
++          'to_location_id': 'loc-store',
++          'amount': total,
++          'reference_transaction_id': id,
++          'reference_kasbon_id': null,
++          'reason': null,
++          'created_at': createdAt.toIso8601String(),
++          'created_by': null,
++        });
++      }
++    }
+   }
+ }
+diff --git a/lib/features/dashboard/application/dashboard_provider.dart b/lib/features/dashboard/application/dashboard_provider.dart
+index f6e3ebb..83a040d 100644
+--- a/lib/features/dashboard/application/dashboard_provider.dart
++++ b/lib/features/dashboard/application/dashboard_provider.dart
+@@ -1,45 +1,83 @@
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
+ import '../domain/dashboard_models.dart';
++import 'dashboard_repository.dart';
+ 
+-/// Shell-phase placeholder provider. Real implementation reads from the
+-/// dashboard module (repositories/local DB + sync), scoped by branch and
+-/// permission (see AGENTS.md: "Server enforces permissions").
+-final dashboardSummaryProvider = Provider<DashboardSummary>((ref) {
+-  return DashboardSummary(
+-    user: const SessionUser(name: 'Andi Saputra', role: 'Owner'),
+-    metrics: const DashboardMetrics(
+-      omzetHariIni: 2450000,
+-      totalPengeluaran: 300000,
+-      labaKotor: 2150000,
+-      totalPesanan: 42,
+-      rataRata: 58000,
+-      growthPercent: 8.5,
+-    ),
+-    trend: _demoTrend(),
+-    unreadNotifications: 3,
+-    pendingApprovals: 2,
+-  );
+-});
++final dashboardRepositoryProvider = Provider<DashboardRepository>((ref) => DashboardRepository());
+ 
+-List<SalesTrendPoint> _demoTrend() {
+-  // Mirrors the shape/pattern of the supplied React mockup's chartData
+-  // (weekday dip, weekend spike) so the shell renders a comparable chart.
+-  final base = DateTime(2026, 8, 8);
+-  final weekendOffsets = {5, 6, 12, 13, 19, 20, 26, 27};
+-  final values = [
+-    1200000, 1350000, 1100000, 1400000, 1500000, 2300000, 2600000,
+-    1250000, 1300000, 1900000, 1350000, 1450000, 2150000, 2500000,
+-    1150000, 1250000, 1300000, 1400000, 1550000, 2200000, 2450000,
+-    1200000, 1300000, 1400000, 1450000, 1600000, 2250000, 2600000,
+-    1250000, 1350000, 1500000,
+-  ];
+-
+-  return List.generate(values.length, (i) {
+-    return SalesTrendPoint(
+-      date: base.add(Duration(days: i)),
+-      value: values[i],
+-      isWeekend: weekendOffsets.contains(i),
+-    );
++/// Dashboard page state: metrics + trend, loaded together (same pattern
++/// as DompetState) so the page has one loading/error surface instead of
++/// juggling separate async providers.
++///
++/// `user`/`unreadNotifications`/`pendingApprovals` stay at their
++/// unset/zero defaults — there is no Staff/Auth module (for `user`) or
++/// notifications/approvals table (for the other two) to read from yet.
++/// Once those modules exist, this state gains real fields for them
++/// instead of the counts being invented here.
++class DashboardState {
++  final SessionUser user;
++  final DashboardMetrics? metrics;
++  final List<SalesTrendPoint> trend;
++  final int unreadNotifications;
++  final int pendingApprovals;
++  final bool isLoading;
++  final String? errorMessage;
++
++  const DashboardState({
++    this.user = const SessionUser(),
++    this.metrics,
++    this.trend = const [],
++    this.unreadNotifications = 0,
++    this.pendingApprovals = 0,
++    this.isLoading = true,
++    this.errorMessage,
+   });
++
++  DashboardState copyWith({
++    SessionUser? user,
++    DashboardMetrics? metrics,
++    List<SalesTrendPoint>? trend,
++    int? unreadNotifications,
++    int? pendingApprovals,
++    bool? isLoading,
++    String? errorMessage,
++  }) {
++    return DashboardState(
++      user: user ?? this.user,
++      metrics: metrics ?? this.metrics,
++      trend: trend ?? this.trend,
++      unreadNotifications: unreadNotifications ?? this.unreadNotifications,
++      pendingApprovals: pendingApprovals ?? this.pendingApprovals,
++      isLoading: isLoading ?? this.isLoading,
++      errorMessage: errorMessage,
++    );
++  }
++}
++
++final dashboardProvider = StateNotifierProvider.autoDispose<DashboardController, DashboardState>((ref) {
++  return DashboardController(ref.watch(dashboardRepositoryProvider));
++});
++
++class DashboardController extends StateNotifier<DashboardState> {
++  final DashboardRepository _repository;
++
++  DashboardController(this._repository) : super(const DashboardState()) {
++    load();
++  }
++
++  Future<void> load() async {
++    state = state.copyWith(isLoading: true, errorMessage: null);
++    try {
++      final metrics = await _repository.getMetrics();
++      final trend = await _repository.getSalesTrend();
++
++      state = state.copyWith(
++        metrics: metrics,
++        trend: trend,
++        isLoading: false,
++      );
++    } catch (e) {
++      state = state.copyWith(isLoading: false, errorMessage: 'Gagal memuat data Dashboard: $e');
++    }
++  }
+ }
+diff --git a/lib/features/dashboard/application/dashboard_repository.dart b/lib/features/dashboard/application/dashboard_repository.dart
+new file mode 100644
+index 0000000..d9ffe40
+--- /dev/null
++++ b/lib/features/dashboard/application/dashboard_repository.dart
+@@ -0,0 +1,89 @@
++import 'package:sqflite_sqlcipher/sqflite.dart';
++
++import '../../../core/data/app_database.dart';
++import 'dashboard_models.dart';
++
++/// Reads dashboard figures from the same `transactions` / `cash_movements`
++/// tables every other feature writes to — no separate "dashboard data"
++/// store. Mirrors the query style already used in DompetRepository
++/// (raw SQL against sqflite, computed on read rather than cached).
++class DashboardRepository {
++  Future<Database> get _db => AppDatabase.instance.database;
++
++  Future<DashboardMetrics> getMetrics() async {
++    final db = await _db;
++
++    final todayOmzet = await _sumPaidTotalForDate(db, _today());
++    final yesterdayOmzet = await _sumPaidTotalForDate(db, _today().subtract(const Duration(days: 1)));
++    final todayExpense = await _sumExpenseForDate(db, _today());
++    final todayOrderCount = await _countPaidOrdersForDate(db, _today());
++
++    final labaKotor = todayOmzet - todayExpense;
++    final rataRata = todayOrderCount == 0 ? 0 : (todayOmzet / todayOrderCount).round();
++    // Growth vs. yesterday; 0% rather than a divide-by-zero/infinite
++    // figure when yesterday had no sales to compare against.
++    final growthPercent = yesterdayOmzet == 0 ? 0.0 : ((todayOmzet - yesterdayOmzet) / yesterdayOmzet) * 100;
++
++    return DashboardMetrics(
++      omzetHariIni: todayOmzet,
++      totalPengeluaran: todayExpense,
++      labaKotor: labaKotor,
++      totalPesanan: todayOrderCount,
++      rataRata: rataRata,
++      growthPercent: growthPercent,
++    );
++  }
++
++  /// Last 31 days of paid-order totals, oldest first — one point per
++  /// calendar day, 0 for days with no paid transactions (not omitted,
++  /// so the chart's x-axis stays continuous).
++  Future<List<SalesTrendPoint>> getSalesTrend({int days = 31}) async {
++    final db = await _db;
++    final points = <SalesTrendPoint>[];
++
++    for (var i = days - 1; i >= 0; i--) {
++      final date = _today().subtract(Duration(days: i));
++      final total = await _sumPaidTotalForDate(db, date);
++      final isWeekend = date.weekday == DateTime.saturday || date.weekday == DateTime.sunday;
++      points.add(SalesTrendPoint(date: date, value: total, isWeekend: isWeekend));
++    }
++
++    return points;
++  }
++
++  DateTime _today() {
++    final now = DateTime.now();
++    return DateTime(now.year, now.month, now.day);
++  }
++
++  String _dateOnly(DateTime date) =>
++      '${date.year.toString().padLeft(4, '0')}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
++
++  Future<int> _sumPaidTotalForDate(Database db, DateTime date) async {
++    final result = await db.rawQuery(
++      "SELECT COALESCE(SUM(total), 0) as total FROM transactions WHERE status = 'paid' AND date(paid_at) = ?",
++      [_dateOnly(date)],
++    );
++    return result.first['total'] as int;
++  }
++
++  Future<int> _countPaidOrdersForDate(Database db, DateTime date) async {
++    final result = await db.rawQuery(
++      "SELECT COUNT(*) as cnt FROM transactions WHERE status = 'paid' AND date(paid_at) = ?",
++      [_dateOnly(date)],
++    );
++    return result.first['cnt'] as int;
++  }
++
++  /// Expenses aren't a separate feature yet — the only "money leaving
++  /// the business" rows that exist today are `cash_movements` of type
++  /// 'expense' (per the Dompet ledger schema). Once a dedicated Expenses
++  /// module exists this should read from it instead/in addition.
++  Future<int> _sumExpenseForDate(Database db, DateTime date) async {
++    final result = await db.rawQuery(
++      "SELECT COALESCE(SUM(amount), 0) as total FROM cash_movements WHERE type = 'expense' AND date(created_at) = ?",
++      [_dateOnly(date)],
++    );
++    return result.first['total'] as int;
++  }
++}
+diff --git a/lib/features/dashboard/domain/dashboard_models.dart b/lib/features/dashboard/domain/dashboard_models.dart
+index 4e24e46..c392890 100644
+--- a/lib/features/dashboard/domain/dashboard_models.dart
++++ b/lib/features/dashboard/domain/dashboard_models.dart
+@@ -1,20 +1,24 @@
+-/// Minimal "who's logged in" marker shown subtly on the dashboard.
+-/// Real version should come from the auth/session module (docs/06 phase 3).
++/// "Who's logged in" marker shown subtly on the dashboard. `name`/`role`
++/// are null until a real Auth/Staff module exists (docs/06 phase 3) —
++/// there is no staff/session table to read from yet, so this stays
++/// unset rather than showing an invented name. [SessionMarker] hides
++/// itself when both are null instead of rendering "null • null".
+ class SessionUser {
+-  final String name;
+-  final String role; // e.g. "Owner", "Manager", "Cashier"
++  final String? name;
++  final String? role; // e.g. "Owner", "Manager", "Cashier"
+ 
+-  const SessionUser({required this.name, required this.role});
++  const SessionUser({this.name, this.role});
+ }
+ 
+-/// Dashboard summary metrics.
++/// Dashboard summary metrics — all computed from real `transactions` /
++/// `cash_movements` rows (see DashboardRepository), not placeholders.
+ ///
+-/// NOTE: per PRD (docs/01) the officially-specified dashboard metrics are
+-/// only Omzet Hari Ini, Total Pengeluaran Hari Ini, and Laba Kotor Hari Ini
+-/// (Laba Kotor = Omzet − Pengeluaran, no HPP). `totalPesanan` and
+-/// `rataRata` are kept here to match the supplied UI mockup exactly, per
+-/// explicit instruction — flagged as shell-phase placeholders, not PRD-
+-/// verified figures. Revisit when dashboard feature logic (phase 22) lands.
++/// Per PRD (docs/01) the officially-specified metrics are Omzet Hari
++/// Ini, Total Pengeluaran Hari Ini, and Laba Kotor Hari Ini (Laba Kotor
++/// = Omzet − Pengeluaran, no HPP). `totalPesanan` and `rataRata` are
++/// additional figures kept to match the supplied UI mockup — not
++/// PRD-specified, but computed from the same real transaction data
++/// (COUNT and AVG respectively), not invented numbers.
+ class DashboardMetrics {
+   final int omzetHariIni;
+   final int totalPengeluaran;
+@@ -40,19 +44,3 @@ class SalesTrendPoint {
+ 
+   const SalesTrendPoint({required this.date, required this.value, required this.isWeekend});
+ }
+-
+-class DashboardSummary {
+-  final SessionUser user;
+-  final DashboardMetrics metrics;
+-  final List<SalesTrendPoint> trend;
+-  final int unreadNotifications;
+-  final int pendingApprovals;
+-
+-  const DashboardSummary({
+-    required this.user,
+-    required this.metrics,
+-    required this.trend,
+-    required this.unreadNotifications,
+-    required this.pendingApprovals,
+-  });
+-}
+diff --git a/lib/features/dashboard/presentation/dashboard_screen.dart b/lib/features/dashboard/presentation/dashboard_screen.dart
+index 61de929..ff94aec 100644
+--- a/lib/features/dashboard/presentation/dashboard_screen.dart
++++ b/lib/features/dashboard/presentation/dashboard_screen.dart
+@@ -92,7 +92,8 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
+ 
+   @override
+   Widget build(BuildContext context) {
+-    final summary = ref.watch(dashboardSummaryProvider);
++    final state = ref.watch(dashboardProvider);
++    final metrics = state.metrics;
+ 
+     return Scaffold(
+       backgroundColor: AppColors.background,
+@@ -102,47 +103,59 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
+             Column(
+               children: [
+                 // --- Frozen header: does not scroll away ---
+-                _DashboardHeader(summary: summary),
++                _DashboardHeader(user: state.user),
+                 InlineRefreshIndicator(
+                   visible: _pullDistance > 4,
+                   isRefreshing: _isRefreshing,
+                 ),
+                 // --- Scrollable content only ---
+                 Expanded(
+-                  child: GestureDetector(
+-                    onVerticalDragStart: _handleDragStart,
+-                    onVerticalDragUpdate: (d) => _handleDragUpdate(d, _scrollController),
+-                    onVerticalDragEnd: _handleDragEnd,
+-                    child: SingleChildScrollView(
+-                      controller: _scrollController,
+-                      padding: const EdgeInsets.fromLTRB(
+-                        AppSpacing.lg,
+-                        AppSpacing.md,
+-                        AppSpacing.lg,
+-                        110, // clearance for the frozen swipe-up trigger
+-                      ),
+-                      child: Column(
+-                        children: [
+-                          HeroSalesCard(
+-                            omzetHariIni: summary.metrics.omzetHariIni,
+-                            growthPercent: summary.metrics.growthPercent,
++                  child: state.isLoading && metrics == null
++                      ? const Center(child: CircularProgressIndicator(color: AppColors.brand))
++                      : GestureDetector(
++                          onVerticalDragStart: _handleDragStart,
++                          onVerticalDragUpdate: (d) => _handleDragUpdate(d, _scrollController),
++                          onVerticalDragEnd: _handleDragEnd,
++                          child: SingleChildScrollView(
++                            controller: _scrollController,
++                            padding: const EdgeInsets.fromLTRB(
++                              AppSpacing.lg,
++                              AppSpacing.md,
++                              AppSpacing.lg,
++                              110, // clearance for the frozen swipe-up trigger
++                            ),
++                            child: Column(
++                              children: [
++                                HeroSalesCard(
++                                  omzetHariIni: metrics?.omzetHariIni ?? 0,
++                                  growthPercent: metrics?.growthPercent ?? 0,
++                                ),
++                                const SizedBox(height: AppSpacing.lg),
++                                MetricsGrid(
++                                  metrics: metrics ??
++                                      const DashboardMetrics(
++                                        omzetHariIni: 0,
++                                        totalPengeluaran: 0,
++                                        labaKotor: 0,
++                                        totalPesanan: 0,
++                                        rataRata: 0,
++                                        growthPercent: 0,
++                                      ),
++                                ),
++                                const SizedBox(height: AppSpacing.lg),
++                                SalesTrendChart(
++                                  points: state.trend,
++                                  onPointTap: (point) => _showTrendDetail(context, point),
++                                ),
++                                const SizedBox(height: AppSpacing.lg),
++                                QuickActionsRow(
++                                  onKasirTap: () => AppNav.push(context, (_) => const PosScreen()),
++                                  onRiwayatTap: () => AppNav.push(context, (_) => const HistoryScreen()),
++                                ),
++                              ],
++                            ),
+                           ),
+-                          const SizedBox(height: AppSpacing.lg),
+-                          MetricsGrid(metrics: summary.metrics),
+-                          const SizedBox(height: AppSpacing.lg),
+-                          SalesTrendChart(
+-                            points: summary.trend,
+-                            onPointTap: (point) => _showTrendDetail(context, point),
+-                          ),
+-                          const SizedBox(height: AppSpacing.lg),
+-                          QuickActionsRow(
+-                            onKasirTap: () => AppNav.push(context, (_) => const PosScreen()),
+-                            onRiwayatTap: () => AppNav.push(context, (_) => const HistoryScreen()),
+-                          ),
+-                        ],
+-                      ),
+-                    ),
+-                  ),
++                        ),
+                 ),
+               ],
+             ),
+@@ -152,7 +165,11 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
+               right: AppSpacing.xxl,
+               bottom: AppSpacing.md,
+               child: SwipeUpTrigger(
+-                onTap: () => showMenuBottomSheet(context, summary: summary),
++                onTap: () => showMenuBottomSheet(
++                  context,
++                  unreadNotifications: state.unreadNotifications,
++                  pendingApprovals: state.pendingApprovals,
++                ),
+               ),
+             ),
+           ],
+@@ -191,8 +208,8 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
+ /// Lives outside the scroll area entirely (see [DashboardScreen] layout
+ /// note) so it never moves as the user scrolls the content below it.
+ class _DashboardHeader extends StatelessWidget {
+-  final DashboardSummary summary;
+-  const _DashboardHeader({required this.summary});
++  final SessionUser user;
++  const _DashboardHeader({required this.user});
+ 
+   @override
+   Widget build(BuildContext context) {
+@@ -221,7 +238,7 @@ class _DashboardHeader extends StatelessWidget {
+                   style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: AppColors.textPrimary, letterSpacing: -0.3),
+                 ),
+                 const SizedBox(height: 2),
+-                SessionMarker(user: summary.user),
++                SessionMarker(user: user),
+               ],
+             ),
+           ),
+diff --git a/lib/features/dashboard/presentation/widgets/metrics_grid.dart b/lib/features/dashboard/presentation/widgets/metrics_grid.dart
+index c0e5728..c5a5ba8 100644
+--- a/lib/features/dashboard/presentation/widgets/metrics_grid.dart
++++ b/lib/features/dashboard/presentation/widgets/metrics_grid.dart
+@@ -5,13 +5,13 @@ import '../../../../core/theme/app_spacing.dart';
+ import '../../../../core/utils/currency.dart';
+ import '../../domain/dashboard_models.dart';
+ 
+-/// 2x2 metrics grid matching the supplied mockup exactly.
++/// 2x2 metrics grid — all four figures are computed from real
++/// transaction data by DashboardRepository (see dashboard_provider.dart).
+ ///
+ /// NOTE: only `totalPengeluaran` and `labaKotor` are PRD-defined dashboard
+-/// metrics (docs/01_PRD.md). `totalPesanan` and `rataRata` are kept here
+-/// per explicit instruction to match the mockup during this shell-first
+-/// pass — see [[mamam-kasir-flutter]] notes for the decision to defer
+-/// metric correctness to the dashboard feature phase.
++/// metrics (docs/01_PRD.md). `totalPesanan` and `rataRata` are additional
++/// figures kept to match the supplied UI mockup — not PRD-specified, but
++/// still real counts/averages over actual transactions, not placeholders.
+ class MetricsGrid extends StatelessWidget {
+   final DashboardMetrics metrics;
+   const MetricsGrid({super.key, required this.metrics});
+diff --git a/lib/features/dashboard/presentation/widgets/session_marker.dart b/lib/features/dashboard/presentation/widgets/session_marker.dart
+index 01f0b2e..90e68b0 100644
+--- a/lib/features/dashboard/presentation/widgets/session_marker.dart
++++ b/lib/features/dashboard/presentation/widgets/session_marker.dart
+@@ -4,15 +4,19 @@ import '../../../../core/theme/app_colors.dart';
+ import '../../domain/dashboard_models.dart';
+ 
+ /// "Who's logged in" line shown under the store name in the header, e.g.
+-/// "● Owner • Budi S." — visible and legible (per the latest mockup) but
+-/// kept in muted gray text rather than a bold/colored treatment, per the
+-/// toned-down palette decision.
++/// "● Owner • Budi S." once a real Auth/Staff module provides a name and
++/// role. Renders nothing at all when both are unset (see [SessionUser]'s
++/// doc comment) rather than showing a placeholder "null • null" line.
+ class SessionMarker extends StatelessWidget {
+   final SessionUser user;
+   const SessionMarker({super.key, required this.user});
+ 
+   @override
+   Widget build(BuildContext context) {
++    if (user.name == null && user.role == null) return const SizedBox.shrink();
++
++    final label = [user.role, user.name].where((s) => s != null && s.isNotEmpty).join(' • ');
++
+     return Row(
+       mainAxisSize: MainAxisSize.min,
+       children: [
+@@ -23,7 +27,7 @@ class SessionMarker extends StatelessWidget {
+         ),
+         const SizedBox(width: 6),
+         Text(
+-          '${user.role} • ${user.name}',
++          label,
+           style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: AppColors.textSecondary),
+         ),
+       ],
+diff --git a/lib/features/menu_shell/presentation/menu_bottom_sheet.dart b/lib/features/menu_shell/presentation/menu_bottom_sheet.dart
+index 14a54bd..142d46d 100644
+--- a/lib/features/menu_shell/presentation/menu_bottom_sheet.dart
++++ b/lib/features/menu_shell/presentation/menu_bottom_sheet.dart
+@@ -2,28 +2,37 @@ import 'package:flutter/material.dart';
+ 
+ import '../../../core/theme/app_colors.dart';
+ import '../../../core/theme/app_spacing.dart';
+-import '../../dashboard/domain/dashboard_models.dart';
+ import 'menu_action_card.dart';
+ import 'menu_grid_items.dart';
+ 
+ /// Shows the swipe-up menu as a modal bottom sheet. Call this instead of
+ /// building the sheet inline so the trigger (pill / swipe gesture) stays
+ /// decoupled from the sheet's own content.
++///
++/// `unreadNotifications`/`pendingApprovals` default to 0 — there is no
++/// notifications/approvals table yet (see DashboardState's doc comment),
++/// so callers without a real source for these can omit them rather than
++/// needing to construct a whole summary object just to pass zeros.
+ Future<void> showMenuBottomSheet(
+   BuildContext context, {
+-  required DashboardSummary summary,
++  int unreadNotifications = 0,
++  int pendingApprovals = 0,
+ }) {
+   return showModalBottomSheet(
+     context: context,
+     isScrollControlled: true,
+     backgroundColor: Colors.transparent,
+-    builder: (context) => MenuBottomSheetContent(summary: summary),
++    builder: (context) => MenuBottomSheetContent(
++      unreadNotifications: unreadNotifications,
++      pendingApprovals: pendingApprovals,
++    ),
+   );
+ }
+ 
+ class MenuBottomSheetContent extends StatelessWidget {
+-  final DashboardSummary summary;
+-  const MenuBottomSheetContent({super.key, required this.summary});
++  final int unreadNotifications;
++  final int pendingApprovals;
++  const MenuBottomSheetContent({super.key, required this.unreadNotifications, required this.pendingApprovals});
+ 
+   @override
+   Widget build(BuildContext context) {
+@@ -72,14 +81,14 @@ class MenuBottomSheetContent extends StatelessWidget {
+                         MenuActionCard(
+                           icon: Icons.notifications_rounded,
+                           title: 'Notifikasi',
+-                          subtitle: '${summary.unreadNotifications} belum dibaca',
++                          subtitle: '$unreadNotifications belum dibaca',
+                           onTap: () => Navigator.of(context).pop(),
+                         ),
+                         const SizedBox(width: AppSpacing.md),
+                         MenuActionCard(
+                           icon: Icons.fact_check_rounded,
+                           title: 'Approval',
+-                          subtitle: '${summary.pendingApprovals} menunggu',
++                          subtitle: '$pendingApprovals menunggu',
+                           onTap: () => Navigator.of(context).pop(),
+                         ),
+                       ],

@@ -1,6 +1,7 @@
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite_sqlcipher/sqflite.dart';
+import 'package:uuid/uuid.dart';
 
 /// App-wide encrypted local database.
 ///
@@ -33,15 +34,22 @@ class AppDatabase {
   // exists yet, and _onUpgrade here is still a no-op. On a device with
   // an existing install, uninstall the app (or clear its storage) first
   // so onCreate runs fresh and the new item appears.
-  // v5: added the Dompet ledger core — cash_locations (Store
-  // Cash/Dompet + per-courier, courier rows are manual/dummy since the
-  // Staff module doesn't exist yet), cash_movements (immutable
-  // ledger entries with audit-trail fields per the Dompet PRD — never a
-  // simple balance mutation; every location's balance is always SUM of
-  // its movements, computed on read), and kasbon (staff debt records
-  // created by "Jadikan Kasbon"). Closing/shift-block logic is
-  // explicitly NOT part of this pass — see [[dompet-prd]] notes.
-  static const _dbVersion = 5;
+  // v6: removed placeholder/dummy rows that had no path to real editing —
+  // the demo customer ("Budi Santoso"), demo voucher ("HEMAT10"), the two
+  // demo courier cash_locations ("Budi"/"Andi"), and the store's demo
+  // opening balance (Rp 200.000). Menu/category/variant seed data is kept
+  // (it IS real, editable data via Menu Management — the point of the
+  // cleanup was removing data with no real source, not emptying the menu
+  // Agung actually sells). Added a handful of seeded `transactions` +
+  // `transaction_items` rows (today + preceding days) so Dashboard/Riwayat
+  // have real, editable/cancelable data to show instead of being empty —
+  // these are ordinary transaction rows, not a separate demo mechanism.
+  // v7: added ingredients, stock_opname_sessions, stock_opname_items
+  // tables (HPP & Stok Opname feature, ported from the approved HTML
+  // mockup) and seeded them with the same sample ingredient set used in
+  // that mockup so the feature isn't empty on first run — same "real,
+  // editable seed data" rationale as the v6 menu/transaction seeding.
+  static const _dbVersion = 7;
 
   // TODO(security-foundation): replace with a key generated once and
   // stored via flutter_secure_storage, per AGENTS.md.
@@ -291,6 +299,57 @@ class AppDatabase {
       )
     ''');
 
+    // --- HPP & Stok Opname (port of the HTML mockup) ---
+    // `ingredients` holds Agung's cost-basis (HPP) ingredient list, split
+    // into the three categories used consistently across both HPP and
+    // Stok Opname (per Agung's direction that Stok Opname's item list
+    // "follows" HPP's) — 'baku' (raw), 'setengah_jadi' (semi-finished),
+    // 'jadi' (finished/sellable). `last_price` is what HPP shows/edits
+    // and what Stok Opname auto-fills (editable per-session, not
+    // overwritten by that edit — see stock_opname_items.price_used).
+    await db.execute('''
+      CREATE TABLE ingredients (
+        id TEXT PRIMARY KEY,
+        category TEXT NOT NULL,
+        name TEXT NOT NULL,
+        unit TEXT NOT NULL,
+        last_price INTEGER NOT NULL DEFAULT 0,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    ''');
+
+    // A session is one full "opname" pass that can span all three
+    // categories in one sitting (per Agung's direction — one session,
+    // free to switch categories, single submit) before being marked
+    // 'selesai'. 'draft' sessions can be resumed/completed later.
+    await db.execute('''
+      CREATE TABLE stock_opname_sessions (
+        id TEXT PRIMARY KEY,
+        status TEXT NOT NULL DEFAULT 'draft',
+        created_at TEXT NOT NULL,
+        completed_at TEXT,
+        created_by TEXT
+      )
+    ''');
+
+    // price_used is captured per-item at submit time (defaults to the
+    // ingredient's last_price, editable in the form) so a session's
+    // historical value never silently changes if last_price is edited
+    // later in HPP.
+    await db.execute('''
+      CREATE TABLE stock_opname_items (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        ingredient_id TEXT NOT NULL,
+        qty REAL NOT NULL,
+        price_used INTEGER NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES stock_opname_sessions (id),
+        FOREIGN KEY (ingredient_id) REFERENCES ingredients (id)
+      )
+    ''');
+
     await _seedDemoData(db);
   }
 
@@ -302,8 +361,21 @@ class AppDatabase {
     // data that must be preserved across upgrades.
   }
 
-  /// Seeds demo rows so screens show familiar data on first run instead
-  /// of an empty state. Safe to remove once real data entry is routine.
+  /// Seeds initial rows on first run.
+  ///
+  /// Menu/category/variant data below is Agung's actual menu — real,
+  /// editable rows via Menu Management, not placeholder content, so it
+  /// stays. What got removed in the v6 cleanup was data with no real
+  /// source to point to: a demo customer, a demo voucher, two demo
+  /// courier cash_locations, and a demo opening cash balance — those
+  /// were names/numbers invented for the shell phase with no path to
+  /// becoming real (no Staff module for couriers, no actual customer
+  /// named "Budi Santoso"). In their place, this seeds a handful of
+  /// ordinary `transactions` rows (today + the preceding few days, using
+  /// the real menu items) so Dashboard and Riwayat have something to
+  /// show and compute from immediately — these are real rows editable/
+  /// cancelable the same way any other transaction is, not a separate
+  /// "demo mode".
   Future<void> _seedDemoData(Database db) async {
     final now = DateTime.now().toIso8601String();
 
@@ -418,37 +490,16 @@ class AppDatabase {
     await db.insert('menu_item_variant_groups', {'menu_item_id': 'menu-3', 'variant_group_id': 'vg-1'});
     await db.insert('menu_item_variant_groups', {'menu_item_id': 'menu-4', 'variant_group_id': 'vg-1'});
     await db.insert('menu_item_variant_groups', {'menu_item_id': 'menu-4', 'variant_group_id': 'vg-3'});
-
-    // New dummy item — required topping choice plus the shared Ekstra
-    // Topping group (multi-select), so it exercises a menu item with
-    // two variant groups at once.
     await db.insert('menu_item_variant_groups', {'menu_item_id': 'menu-7', 'variant_group_id': 'vg-4'});
     await db.insert('menu_item_variant_groups', {'menu_item_id': 'menu-7', 'variant_group_id': 'vg-3'});
 
-    await db.insert('customers', {
-      'id': 'cust-1',
-      'name': 'Budi Santoso',
-      'phone': '081234567890',
-      'is_active': 1,
-      'created_at': now,
-      'updated_at': now,
-    });
-
-    await db.insert('vouchers', {
-      'id': 'vch-1',
-      'code': 'HEMAT10',
-      'discount_type': 'percent',
-      'discount_value': 10,
-      'min_purchase': 20000,
-      'is_active': 1,
-      'created_at': now,
-      'updated_at': now,
-    });
-
-    // --- Dompet ledger seed ---
-    // Store Cash location plus two dummy courier locations (manual
-    // stand-ins until the Staff module provides real courier/staff
-    // records — see docs/dompet-prd).
+    // --- Dompet ledger: only the structural Store Cash location. Every
+    // location's balance is always derived from cash_movements (never a
+    // stored/mutated field — see DompetRepository.getLocationBalance),
+    // so omitting an opening-balance movement here just means Store Cash
+    // legitimately starts at Rp 0 until real sales or a real "Saldo
+    // Awal" entry create movements — not a placeholder value pretending
+    // to be a real balance. ---
     await db.insert('cash_locations', {
       'id': 'loc-store',
       'type': 'store',
@@ -458,39 +509,131 @@ class AppDatabase {
       'created_at': now,
       'updated_at': now,
     });
-    await db.insert('cash_locations', {
-      'id': 'loc-courier-budi',
-      'type': 'courier',
-      'name': 'Budi',
-      'staff_id': null,
-      'is_active': 1,
-      'created_at': now,
-      'updated_at': now,
-    });
-    await db.insert('cash_locations', {
-      'id': 'loc-courier-andi',
-      'type': 'courier',
-      'name': 'Andi',
-      'staff_id': null,
-      'is_active': 1,
-      'created_at': now,
-      'updated_at': now,
-    });
 
-    // Opening balance for Store Cash so the Dompet page isn't empty on
-    // first run — a movement with no from_location (cash entering the
-    // ledger), same shape a real "opening shift" entry would use later.
-    await db.insert('cash_movements', {
-      'id': 'cm-opening-store',
-      'type': 'opening',
-      'from_location_id': null,
-      'to_location_id': 'loc-store',
-      'amount': 200000,
-      'reference_transaction_id': null,
-      'reference_kasbon_id': null,
-      'reason': 'Saldo awal (demo)',
-      'created_at': now,
-      'created_by': null,
-    });
+    await _seedIngredients(db, now);
+    await _seedSampleTransactions(db);
+  }
+
+  /// Seeds the same sample ingredient set shown in the approved HTML
+  /// mockup — real, editable rows via the HPP screen (add/edit/delete),
+  /// not placeholder content baked into the UI.
+  Future<void> _seedIngredients(Database db, String now) async {
+    final ingredients = [
+      {'id': 'ing-1', 'category': 'baku', 'name': 'Ayam Potong', 'unit': 'kg', 'lastPrice': 38000},
+      {'id': 'ing-2', 'category': 'baku', 'name': 'Beras', 'unit': 'kg', 'lastPrice': 14000},
+      {'id': 'ing-3', 'category': 'baku', 'name': 'Minyak Goreng', 'unit': 'liter', 'lastPrice': 21000},
+      {'id': 'ing-4', 'category': 'baku', 'name': 'Bawang Putih', 'unit': 'kg', 'lastPrice': 42000},
+      {'id': 'ing-5', 'category': 'setengah_jadi', 'name': 'Bumbu Marinasi', 'unit': 'liter', 'lastPrice': 35000},
+      {'id': 'ing-6', 'category': 'setengah_jadi', 'name': 'Adonan Tepung', 'unit': 'kg', 'lastPrice': 18000},
+      {'id': 'ing-7', 'category': 'jadi', 'name': 'Firesauce (botol)', 'unit': 'pcs', 'lastPrice': 12000},
+      {'id': 'ing-8', 'category': 'jadi', 'name': 'Brownbutter (botol)', 'unit': 'pcs', 'lastPrice': 11000},
+    ];
+
+    for (final ing in ingredients) {
+      await db.insert('ingredients', {
+        'id': ing['id'],
+        'category': ing['category'],
+        'name': ing['name'],
+        'unit': ing['unit'],
+        'last_price': ing['lastPrice'],
+        'is_active': 1,
+        'created_at': now,
+        'updated_at': now,
+      });
+    }
+  }
+
+  /// Seeds a handful of ordinary paid transactions (today + the
+  /// preceding several days) using the real menu rows above, so
+  /// Dashboard metrics/trend and Riwayat have real data to compute from
+  /// and display on first run — same tables, same shape, same
+  /// cancel/view flow as any transaction created through checkout. Not a
+  /// separate "sample data" system; these rows are editable/cancelable
+  /// exactly like any other transaction.
+  Future<void> _seedSampleTransactions(Database db) async {
+    const uuid = Uuid();
+    final today = DateTime.now();
+
+    // (day offset from today, [(menu_id, name, price, qty)], payment method)
+    final days = [
+      (0, [('menu-3', 'Ayam Crispy Original', 15000, 2), ('menu-6', 'Es Jeruk', 7000, 2)], 'Tunai'),
+      (0, [('menu-2', 'Firesauce', 20000, 1), ('menu-7', 'Nasi Goreng Spesial', 22000, 1)], 'QRIS'),
+      (1, [('menu-4', 'Ayam Bakar Madu', 17000, 3), ('menu-5', 'Es Teh Manis', 5000, 3)], 'Tunai'),
+      (2, [('menu-1', 'Brownbutter', 18000, 1), ('menu-3', 'Ayam Crispy Original', 15000, 1)], 'QRIS'),
+      (2, [('menu-7', 'Nasi Goreng Spesial', 22000, 2)], 'Transfer'),
+      (4, [('menu-3', 'Ayam Crispy Original', 15000, 1), ('menu-6', 'Es Jeruk', 7000, 1)], 'Tunai'),
+      (6, [('menu-4', 'Ayam Bakar Madu', 17000, 2), ('menu-2', 'Firesauce', 20000, 1)], 'QRIS'),
+    ];
+
+    for (final (dayOffset, items, paymentMethod) in days) {
+      final createdAt = today.subtract(Duration(days: dayOffset, hours: today.hour - 12));
+      final id = uuid.v4();
+      final displayNumber = 'ORD-${id.substring(0, 6).toUpperCase()}';
+      final subtotal = items.fold<int>(0, (sum, i) => sum + (i.$3 * i.$4));
+      final tax = (subtotal * 0.11).round();
+      final total = subtotal + tax;
+
+      await db.insert('transactions', {
+        'id': id,
+        'display_number': displayNumber,
+        'status': 'paid',
+        'order_type': 'Takeaway',
+        'customer_id': null,
+        'customer_name': null,
+        'ojol_platform': null,
+        'ojol_order_number': null,
+        'subtotal': subtotal,
+        'voucher_id': null,
+        'voucher_code': null,
+        'voucher_discount': 0,
+        'manual_discount_type': null,
+        'manual_discount_value': null,
+        'manual_discount_amount': 0,
+        'tax_amount': tax,
+        'service_amount': 0,
+        'delivery_fee': 0,
+        'rounding_adjustment': 0,
+        'total': total,
+        'payment_method': paymentMethod,
+        'amount_paid': total,
+        'change_amount': 0,
+        'split_payments_json': null,
+        'created_at': createdAt.toIso8601String(),
+        'paid_at': createdAt.toIso8601String(),
+      });
+
+      for (final (menuId, name, price, qty) in items) {
+        await db.insert('transaction_items', {
+          'id': uuid.v4(),
+          'transaction_id': id,
+          'menu_item_id': menuId,
+          'name': name,
+          'variant_name': null,
+          'variant_selected_json': null,
+          'price': price,
+          'hpp': 0,
+          'qty': qty,
+          'note': null,
+        });
+      }
+
+      // Cash-method sales route through the Dompet ledger like a real
+      // checkout would (see PosRepository.saveTransaction) — QRIS/
+      // Transfer have no physical cash to track, so no movement.
+      if (paymentMethod == 'Tunai') {
+        await db.insert('cash_movements', {
+          'id': uuid.v4(),
+          'type': 'cash_sale',
+          'from_location_id': null,
+          'to_location_id': 'loc-store',
+          'amount': total,
+          'reference_transaction_id': id,
+          'reference_kasbon_id': null,
+          'reason': null,
+          'created_at': createdAt.toIso8601String(),
+          'created_by': null,
+        });
+      }
+    }
   }
 }

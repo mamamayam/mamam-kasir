@@ -2,28 +2,37 @@ import 'package:flutter/material.dart';
 
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_spacing.dart';
-import '../../dashboard/domain/dashboard_models.dart';
 import 'menu_action_card.dart';
 import 'menu_grid_items.dart';
 
 /// Shows the swipe-up menu as a modal bottom sheet. Call this instead of
 /// building the sheet inline so the trigger (pill / swipe gesture) stays
 /// decoupled from the sheet's own content.
+///
+/// `unreadNotifications`/`pendingApprovals` default to 0 — there is no
+/// notifications/approvals table yet (see DashboardState's doc comment),
+/// so callers without a real source for these can omit them rather than
+/// needing to construct a whole summary object just to pass zeros.
 Future<void> showMenuBottomSheet(
   BuildContext context, {
-  required DashboardSummary summary,
+  int unreadNotifications = 0,
+  int pendingApprovals = 0,
 }) {
   return showModalBottomSheet(
     context: context,
     isScrollControlled: true,
     backgroundColor: Colors.transparent,
-    builder: (context) => MenuBottomSheetContent(summary: summary),
+    builder: (context) => MenuBottomSheetContent(
+      unreadNotifications: unreadNotifications,
+      pendingApprovals: pendingApprovals,
+    ),
   );
 }
 
 class MenuBottomSheetContent extends StatelessWidget {
-  final DashboardSummary summary;
-  const MenuBottomSheetContent({super.key, required this.summary});
+  final int unreadNotifications;
+  final int pendingApprovals;
+  const MenuBottomSheetContent({super.key, required this.unreadNotifications, required this.pendingApprovals});
 
   @override
   Widget build(BuildContext context) {
@@ -72,14 +81,14 @@ class MenuBottomSheetContent extends StatelessWidget {
                         MenuActionCard(
                           icon: Icons.notifications_rounded,
                           title: 'Notifikasi',
-                          subtitle: '${summary.unreadNotifications} belum dibaca',
+                          subtitle: '$unreadNotifications belum dibaca',
                           onTap: () => Navigator.of(context).pop(),
                         ),
                         const SizedBox(width: AppSpacing.md),
                         MenuActionCard(
                           icon: Icons.fact_check_rounded,
                           title: 'Approval',
-                          subtitle: '${summary.pendingApprovals} menunggu',
+                          subtitle: '$pendingApprovals menunggu',
                           onTap: () => Navigator.of(context).pop(),
                         ),
                       ],

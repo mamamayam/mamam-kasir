@@ -1,45 +1,83 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../domain/dashboard_models.dart';
+import 'dashboard_repository.dart';
 
-/// Shell-phase placeholder provider. Real implementation reads from the
-/// dashboard module (repositories/local DB + sync), scoped by branch and
-/// permission (see AGENTS.md: "Server enforces permissions").
-final dashboardSummaryProvider = Provider<DashboardSummary>((ref) {
-  return DashboardSummary(
-    user: const SessionUser(name: 'Andi Saputra', role: 'Owner'),
-    metrics: const DashboardMetrics(
-      omzetHariIni: 2450000,
-      totalPengeluaran: 300000,
-      labaKotor: 2150000,
-      totalPesanan: 42,
-      rataRata: 58000,
-      growthPercent: 8.5,
-    ),
-    trend: _demoTrend(),
-    unreadNotifications: 3,
-    pendingApprovals: 2,
-  );
+final dashboardRepositoryProvider = Provider<DashboardRepository>((ref) => DashboardRepository());
+
+/// Dashboard page state: metrics + trend, loaded together (same pattern
+/// as DompetState) so the page has one loading/error surface instead of
+/// juggling separate async providers.
+///
+/// `user`/`unreadNotifications`/`pendingApprovals` stay at their
+/// unset/zero defaults — there is no Staff/Auth module (for `user`) or
+/// notifications/approvals table (for the other two) to read from yet.
+/// Once those modules exist, this state gains real fields for them
+/// instead of the counts being invented here.
+class DashboardState {
+  final SessionUser user;
+  final DashboardMetrics? metrics;
+  final List<SalesTrendPoint> trend;
+  final int unreadNotifications;
+  final int pendingApprovals;
+  final bool isLoading;
+  final String? errorMessage;
+
+  const DashboardState({
+    this.user = const SessionUser(),
+    this.metrics,
+    this.trend = const [],
+    this.unreadNotifications = 0,
+    this.pendingApprovals = 0,
+    this.isLoading = true,
+    this.errorMessage,
+  });
+
+  DashboardState copyWith({
+    SessionUser? user,
+    DashboardMetrics? metrics,
+    List<SalesTrendPoint>? trend,
+    int? unreadNotifications,
+    int? pendingApprovals,
+    bool? isLoading,
+    String? errorMessage,
+  }) {
+    return DashboardState(
+      user: user ?? this.user,
+      metrics: metrics ?? this.metrics,
+      trend: trend ?? this.trend,
+      unreadNotifications: unreadNotifications ?? this.unreadNotifications,
+      pendingApprovals: pendingApprovals ?? this.pendingApprovals,
+      isLoading: isLoading ?? this.isLoading,
+      errorMessage: errorMessage,
+    );
+  }
+}
+
+final dashboardProvider = StateNotifierProvider.autoDispose<DashboardController, DashboardState>((ref) {
+  return DashboardController(ref.watch(dashboardRepositoryProvider));
 });
 
-List<SalesTrendPoint> _demoTrend() {
-  // Mirrors the shape/pattern of the supplied React mockup's chartData
-  // (weekday dip, weekend spike) so the shell renders a comparable chart.
-  final base = DateTime(2026, 8, 8);
-  final weekendOffsets = {5, 6, 12, 13, 19, 20, 26, 27};
-  final values = [
-    1200000, 1350000, 1100000, 1400000, 1500000, 2300000, 2600000,
-    1250000, 1300000, 1900000, 1350000, 1450000, 2150000, 2500000,
-    1150000, 1250000, 1300000, 1400000, 1550000, 2200000, 2450000,
-    1200000, 1300000, 1400000, 1450000, 1600000, 2250000, 2600000,
-    1250000, 1350000, 1500000,
-  ];
+class DashboardController extends StateNotifier<DashboardState> {
+  final DashboardRepository _repository;
 
-  return List.generate(values.length, (i) {
-    return SalesTrendPoint(
-      date: base.add(Duration(days: i)),
-      value: values[i],
-      isWeekend: weekendOffsets.contains(i),
-    );
-  });
+  DashboardController(this._repository) : super(const DashboardState()) {
+    load();
+  }
+
+  Future<void> load() async {
+    state = state.copyWith(isLoading: true, errorMessage: null);
+    try {
+      final metrics = await _repository.getMetrics();
+      final trend = await _repository.getSalesTrend();
+
+      state = state.copyWith(
+        metrics: metrics,
+        trend: trend,
+        isLoading: false,
+      );
+    } catch (e) {
+      state = state.copyWith(isLoading: false, errorMessage: 'Gagal memuat data Dashboard: $e');
+    }
+  }
 }

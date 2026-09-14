@@ -1,0 +1,3000 @@
+diff --git a/lib/core/data/app_database.dart b/lib/core/data/app_database.dart
+index 36ba6d8..4e72481 100644
+--- a/lib/core/data/app_database.dart
++++ b/lib/core/data/app_database.dart
+@@ -44,7 +44,12 @@ class AppDatabase {
+   // `transaction_items` rows (today + preceding days) so Dashboard/Riwayat
+   // have real, editable/cancelable data to show instead of being empty —
+   // these are ordinary transaction rows, not a separate demo mechanism.
+-  static const _dbVersion = 6;
++  // v7: added ingredients, stock_opname_sessions, stock_opname_items
++  // tables (HPP & Stok Opname feature, ported from the approved HTML
++  // mockup) and seeded them with the same sample ingredient set used in
++  // that mockup so the feature isn't empty on first run — same "real,
++  // editable seed data" rationale as the v6 menu/transaction seeding.
++  static const _dbVersion = 7;
+ 
+   // TODO(security-foundation): replace with a key generated once and
+   // stored via flutter_secure_storage, per AGENTS.md.
+@@ -294,6 +299,57 @@ class AppDatabase {
+       )
+     ''');
+ 
++    // --- HPP & Stok Opname (port of the HTML mockup) ---
++    // `ingredients` holds Agung's cost-basis (HPP) ingredient list, split
++    // into the three categories used consistently across both HPP and
++    // Stok Opname (per Agung's direction that Stok Opname's item list
++    // "follows" HPP's) — 'baku' (raw), 'setengah_jadi' (semi-finished),
++    // 'jadi' (finished/sellable). `last_price` is what HPP shows/edits
++    // and what Stok Opname auto-fills (editable per-session, not
++    // overwritten by that edit — see stock_opname_items.price_used).
++    await db.execute('''
++      CREATE TABLE ingredients (
++        id TEXT PRIMARY KEY,
++        category TEXT NOT NULL,
++        name TEXT NOT NULL,
++        unit TEXT NOT NULL,
++        last_price INTEGER NOT NULL DEFAULT 0,
++        is_active INTEGER NOT NULL DEFAULT 1,
++        created_at TEXT NOT NULL,
++        updated_at TEXT NOT NULL
++      )
++    ''');
++
++    // A session is one full "opname" pass that can span all three
++    // categories in one sitting (per Agung's direction — one session,
++    // free to switch categories, single submit) before being marked
++    // 'selesai'. 'draft' sessions can be resumed/completed later.
++    await db.execute('''
++      CREATE TABLE stock_opname_sessions (
++        id TEXT PRIMARY KEY,
++        status TEXT NOT NULL DEFAULT 'draft',
++        created_at TEXT NOT NULL,
++        completed_at TEXT,
++        created_by TEXT
++      )
++    ''');
++
++    // price_used is captured per-item at submit time (defaults to the
++    // ingredient's last_price, editable in the form) so a session's
++    // historical value never silently changes if last_price is edited
++    // later in HPP.
++    await db.execute('''
++      CREATE TABLE stock_opname_items (
++        id TEXT PRIMARY KEY,
++        session_id TEXT NOT NULL,
++        ingredient_id TEXT NOT NULL,
++        qty REAL NOT NULL,
++        price_used INTEGER NOT NULL,
++        FOREIGN KEY (session_id) REFERENCES stock_opname_sessions (id),
++        FOREIGN KEY (ingredient_id) REFERENCES ingredients (id)
++      )
++    ''');
++
+     await _seedDemoData(db);
+   }
+ 
+@@ -454,9 +510,39 @@ class AppDatabase {
+       'updated_at': now,
+     });
+ 
++    await _seedIngredients(db, now);
+     await _seedSampleTransactions(db);
+   }
+ 
++  /// Seeds the same sample ingredient set shown in the approved HTML
++  /// mockup — real, editable rows via the HPP screen (add/edit/delete),
++  /// not placeholder content baked into the UI.
++  Future<void> _seedIngredients(Database db, String now) async {
++    final ingredients = [
++      {'id': 'ing-1', 'category': 'baku', 'name': 'Ayam Potong', 'unit': 'kg', 'lastPrice': 38000},
++      {'id': 'ing-2', 'category': 'baku', 'name': 'Beras', 'unit': 'kg', 'lastPrice': 14000},
++      {'id': 'ing-3', 'category': 'baku', 'name': 'Minyak Goreng', 'unit': 'liter', 'lastPrice': 21000},
++      {'id': 'ing-4', 'category': 'baku', 'name': 'Bawang Putih', 'unit': 'kg', 'lastPrice': 42000},
++      {'id': 'ing-5', 'category': 'setengah_jadi', 'name': 'Bumbu Marinasi', 'unit': 'liter', 'lastPrice': 35000},
++      {'id': 'ing-6', 'category': 'setengah_jadi', 'name': 'Adonan Tepung', 'unit': 'kg', 'lastPrice': 18000},
++      {'id': 'ing-7', 'category': 'jadi', 'name': 'Firesauce (botol)', 'unit': 'pcs', 'lastPrice': 12000},
++      {'id': 'ing-8', 'category': 'jadi', 'name': 'Brownbutter (botol)', 'unit': 'pcs', 'lastPrice': 11000},
++    ];
++
++    for (final ing in ingredients) {
++      await db.insert('ingredients', {
++        'id': ing['id'],
++        'category': ing['category'],
++        'name': ing['name'],
++        'unit': ing['unit'],
++        'last_price': ing['lastPrice'],
++        'is_active': 1,
++        'created_at': now,
++        'updated_at': now,
++      });
++    }
++  }
++
+   /// Seeds a handful of ordinary paid transactions (today + the
+   /// preceding several days) using the real menu rows above, so
+   /// Dashboard metrics/trend and Riwayat have real data to compute from
+diff --git a/lib/features/hpp_opname/application/hpp_opname_provider.dart b/lib/features/hpp_opname/application/hpp_opname_provider.dart
+new file mode 100644
+index 0000000..0553ab7
+--- /dev/null
++++ b/lib/features/hpp_opname/application/hpp_opname_provider.dart
+@@ -0,0 +1,214 @@
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../domain/hpp_opname_models.dart';
++import 'hpp_opname_repository.dart';
++
++final hppOpnameRepositoryProvider = Provider<HppOpnameRepository>((ref) => HppOpnameRepository());
++
++/// One in-progress line in the Stok Opname input form — qty/price start
++/// null/unset until the user types something, so "not yet counted" is
++/// distinguishable from "counted as zero".
++class OpnameDraftLine {
++  final double? qty;
++  final int priceUsed;
++  final bool priceEdited;
++
++  const OpnameDraftLine({this.qty, required this.priceUsed, this.priceEdited = false});
++
++  OpnameDraftLine copyWith({double? qty, int? priceUsed, bool? priceEdited}) {
++    return OpnameDraftLine(
++      qty: qty ?? this.qty,
++      priceUsed: priceUsed ?? this.priceUsed,
++      priceEdited: priceEdited ?? this.priceEdited,
++    );
++  }
++}
++
++/// Combined state for the HPP & Stok Opname screen. Both features share
++/// one controller because they share one ingredient list and one screen
++/// (switchable via the header dropdown, per the mockup) — splitting them
++/// into two controllers would mean duplicating the ingredients load.
++class HppOpnameState {
++  final List<Ingredient> ingredients;
++  final IngredientCategory hppCategory;
++  final String hppSearchQuery;
++
++  final List<StockOpnameSession> sessions;
++  final IngredientCategory opnameCategory;
++  final String opnameSearchQuery;
++  // Keyed by ingredient id so switching categories mid-session (per
++  // Agung's direction) never loses what was already typed elsewhere.
++  final Map<String, OpnameDraftLine> opnameDraft;
++
++  final bool isLoading;
++  final String? errorMessage;
++
++  const HppOpnameState({
++    this.ingredients = const [],
++    this.hppCategory = IngredientCategory.baku,
++    this.hppSearchQuery = '',
++    this.sessions = const [],
++    this.opnameCategory = IngredientCategory.baku,
++    this.opnameSearchQuery = '',
++    this.opnameDraft = const {},
++    this.isLoading = true,
++    this.errorMessage,
++  });
++
++  HppOpnameState copyWith({
++    List<Ingredient>? ingredients,
++    IngredientCategory? hppCategory,
++    String? hppSearchQuery,
++    List<StockOpnameSession>? sessions,
++    IngredientCategory? opnameCategory,
++    String? opnameSearchQuery,
++    Map<String, OpnameDraftLine>? opnameDraft,
++    bool? isLoading,
++    String? errorMessage,
++    bool clearError = false,
++  }) {
++    return HppOpnameState(
++      ingredients: ingredients ?? this.ingredients,
++      hppCategory: hppCategory ?? this.hppCategory,
++      hppSearchQuery: hppSearchQuery ?? this.hppSearchQuery,
++      sessions: sessions ?? this.sessions,
++      opnameCategory: opnameCategory ?? this.opnameCategory,
++      opnameSearchQuery: opnameSearchQuery ?? this.opnameSearchQuery,
++      opnameDraft: opnameDraft ?? this.opnameDraft,
++      isLoading: isLoading ?? this.isLoading,
++      errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
++    );
++  }
++
++  List<Ingredient> get hppFilteredIngredients {
++    final query = hppSearchQuery.toLowerCase();
++    return ingredients
++        .where((i) => i.category == hppCategory && i.isActive && i.name.toLowerCase().contains(query))
++        .toList();
++  }
++
++  List<Ingredient> get opnameFilteredIngredients {
++    final query = opnameSearchQuery.toLowerCase();
++    return ingredients
++        .where((i) => i.category == opnameCategory && i.isActive && i.name.toLowerCase().contains(query))
++        .toList();
++  }
++
++  /// Total value for whichever category is currently shown in the Input
++  /// Baru form — matches the mockup's per-category running total, not a
++  /// grand total across every category in the draft.
++  int get opnameCategoryTotal {
++    var total = 0;
++    for (final ingredient in opnameFilteredIngredients) {
++      final line = opnameDraft[ingredient.id];
++      if (line?.qty != null) total += (line!.qty! * line.priceUsed).round();
++    }
++    return total;
++  }
++}
++
++final hppOpnameProvider = StateNotifierProvider.autoDispose<HppOpnameController, HppOpnameState>((ref) {
++  return HppOpnameController(ref.watch(hppOpnameRepositoryProvider));
++});
++
++class HppOpnameController extends StateNotifier<HppOpnameState> {
++  final HppOpnameRepository _repository;
++
++  HppOpnameController(this._repository) : super(const HppOpnameState()) {
++    loadAll();
++  }
++
++  Future<void> loadAll() async {
++    state = state.copyWith(isLoading: true, clearError: true);
++    try {
++      final ingredients = await _repository.getIngredients();
++      final sessions = await _repository.getSessions();
++      state = state.copyWith(ingredients: ingredients, sessions: sessions, isLoading: false);
++    } catch (e) {
++      state = state.copyWith(isLoading: false, errorMessage: 'Gagal memuat data: $e');
++    }
++  }
++
++  // --- HPP ---
++
++  void setHppCategory(IngredientCategory category) => state = state.copyWith(hppCategory: category);
++
++  void setHppSearchQuery(String query) => state = state.copyWith(hppSearchQuery: query);
++
++  Future<void> addIngredient({
++    required IngredientCategory category,
++    required String name,
++    required String unit,
++    required int lastPrice,
++  }) async {
++    try {
++      await _repository.createIngredient(category: category, name: name, unit: unit, lastPrice: lastPrice);
++      await loadAll();
++    } catch (e) {
++      state = state.copyWith(errorMessage: 'Gagal menambah bahan: $e');
++    }
++  }
++
++  Future<void> updateIngredientPrice(String id, int newPrice) async {
++    try {
++      await _repository.updateIngredientPrice(id, newPrice);
++      await loadAll();
++    } catch (e) {
++      state = state.copyWith(errorMessage: 'Gagal memperbarui harga: $e');
++    }
++  }
++
++  // --- Stok Opname ---
++
++  void setOpnameCategory(IngredientCategory category) => state = state.copyWith(opnameCategory: category);
++
++  void setOpnameSearchQuery(String query) => state = state.copyWith(opnameSearchQuery: query);
++
++  void setDraftQty(String ingredientId, double? qty) {
++    final ingredient = state.ingredients.firstWhere((i) => i.id == ingredientId);
++    final current = state.opnameDraft[ingredientId];
++    final updated = Map<String, OpnameDraftLine>.from(state.opnameDraft);
++    // Built directly (not via copyWith) so a cleared field can actually
++    // set qty back to null — copyWith's `qty ?? this.qty` pattern can't
++    // distinguish "clear this" from "leave it alone".
++    updated[ingredientId] = OpnameDraftLine(
++      qty: qty,
++      priceUsed: current?.priceUsed ?? ingredient.lastPrice,
++      priceEdited: current?.priceEdited ?? false,
++    );
++    state = state.copyWith(opnameDraft: updated);
++  }
++
++  void setDraftPrice(String ingredientId, int price) {
++    final current = state.opnameDraft[ingredientId];
++    final updated = Map<String, OpnameDraftLine>.from(state.opnameDraft);
++    updated[ingredientId] = (current ?? const OpnameDraftLine(priceUsed: 0)).copyWith(
++      priceUsed: price,
++      priceEdited: true,
++    );
++    state = state.copyWith(opnameDraft: updated);
++  }
++
++  /// Submits everything counted across the whole draft (every category
++  /// touched this session, not just the one currently shown) — matches
++  /// Agung's direction that one session covers all three categories.
++  Future<void> submitSession({required bool asDraft}) async {
++    final items = state.opnameDraft.entries
++        .where((e) => e.value.qty != null)
++        .map((e) => StockOpnameItem(ingredientId: e.key, qty: e.value.qty!, priceUsed: e.value.priceUsed))
++        .toList();
++
++    if (items.isEmpty) {
++      state = state.copyWith(errorMessage: 'Isi minimal satu bahan sebelum menyimpan.');
++      return;
++    }
++
++    try {
++      await _repository.submitSession(items: items, asDraft: asDraft);
++      state = state.copyWith(opnameDraft: {});
++      await loadAll();
++    } catch (e) {
++      state = state.copyWith(errorMessage: 'Gagal menyimpan sesi opname: $e');
++    }
++  }
++}
+diff --git a/lib/features/hpp_opname/application/hpp_opname_repository.dart b/lib/features/hpp_opname/application/hpp_opname_repository.dart
+new file mode 100644
+index 0000000..2c243e7
+--- /dev/null
++++ b/lib/features/hpp_opname/application/hpp_opname_repository.dart
+@@ -0,0 +1,134 @@
++import 'package:sqflite_sqlcipher/sqflite.dart';
++import 'package:uuid/uuid.dart';
++
++import '../../../core/data/app_database.dart';
++import '../domain/hpp_opname_models.dart';
++
++/// CRUD access for HPP (ingredients/cost basis) and Stok Opname (monthly
++/// physical stock count sessions), ported from the approved HTML
++/// mockup. Same "one repository, one set of tables" pattern as
++/// [MenuManagementRepository] — the UI/controller never touch
++/// [AppDatabase] directly.
++class HppOpnameRepository {
++  final _uuid = const Uuid();
++
++  Future<Database> get _db => AppDatabase.instance.database;
++
++  // --- HPP: ingredients ---
++
++  Future<List<Ingredient>> getIngredients({IngredientCategory? category}) async {
++    final db = await _db;
++    final rows = await db.query(
++      'ingredients',
++      where: category != null ? 'category = ?' : null,
++      whereArgs: category != null ? [category.dbValue] : null,
++      orderBy: 'created_at ASC',
++    );
++    return rows.map(Ingredient.fromMap).toList();
++  }
++
++  Future<Ingredient> createIngredient({
++    required IngredientCategory category,
++    required String name,
++    required String unit,
++    required int lastPrice,
++  }) async {
++    final db = await _db;
++    final now = DateTime.now().toIso8601String();
++    final id = _uuid.v4();
++
++    await db.insert('ingredients', {
++      'id': id,
++      'category': category.dbValue,
++      'name': name,
++      'unit': unit,
++      'last_price': lastPrice,
++      'is_active': 1,
++      'created_at': now,
++      'updated_at': now,
++    });
++
++    return Ingredient(id: id, category: category, name: name, unit: unit, lastPrice: lastPrice, isActive: true);
++  }
++
++  /// Updates an ingredient's cost basis. Per the mockup's info banner,
++  /// this is the single source every Menu & Variant HPP calculation is
++  /// meant to read from — no other table stores a duplicate price.
++  Future<void> updateIngredientPrice(String id, int newPrice) async {
++    final db = await _db;
++    await db.update(
++      'ingredients',
++      {'last_price': newPrice, 'updated_at': DateTime.now().toIso8601String()},
++      where: 'id = ?',
++      whereArgs: [id],
++    );
++  }
++
++  Future<void> deactivateIngredient(String id) async {
++    final db = await _db;
++    await db.update(
++      'ingredients',
++      {'is_active': 0, 'updated_at': DateTime.now().toIso8601String()},
++      where: 'id = ?',
++      whereArgs: [id],
++    );
++  }
++
++  // --- Stok Opname: sessions ---
++
++  Future<List<StockOpnameSession>> getSessions() async {
++    final db = await _db;
++    final rows = await db.rawQuery('''
++      SELECT
++        s.id, s.status, s.created_at, s.completed_at,
++        COUNT(i.id) as item_count,
++        COALESCE(SUM(i.qty * i.price_used), 0) as total_value
++      FROM stock_opname_sessions s
++      LEFT JOIN stock_opname_items i ON i.session_id = s.id
++      GROUP BY s.id
++      ORDER BY s.created_at DESC
++    ''');
++
++    return rows.map((row) {
++      return StockOpnameSession(
++        id: row['id'] as String,
++        status: StockOpnameStatus.fromDb(row['status'] as String),
++        createdAt: DateTime.parse(row['created_at'] as String),
++        completedAt: row['completed_at'] != null ? DateTime.parse(row['completed_at'] as String) : null,
++        itemCount: row['item_count'] as int,
++        totalValue: (row['total_value'] as num).round(),
++      );
++    }).toList();
++  }
++
++  /// Saves a full session in one pass: all items entered across
++  /// whichever categories were visited (per Agung's direction — one
++  /// session, free to switch categories, single submit), not saved
++  /// incrementally per category.
++  Future<void> submitSession({
++    required List<StockOpnameItem> items,
++    required bool asDraft,
++  }) async {
++    final db = await _db;
++    final now = DateTime.now().toIso8601String();
++    final sessionId = _uuid.v4();
++
++    await db.insert('stock_opname_sessions', {
++      'id': sessionId,
++      'status': asDraft ? StockOpnameStatus.draft.dbValue : StockOpnameStatus.selesai.dbValue,
++      'created_at': now,
++      'completed_at': asDraft ? null : now,
++      'created_by': null, // no Staff/Auth module yet — see docs/06 phase 3
++    });
++
++    for (final item in items) {
++      await db.insert('stock_opname_items', {
++        'id': _uuid.v4(),
++        'session_id': sessionId,
++        'ingredient_id': item.ingredientId,
++        'qty': item.qty,
++        'price_used': item.priceUsed,
++      });
++    }
++  }
++}
+diff --git a/lib/features/hpp_opname/domain/hpp_opname_models.dart b/lib/features/hpp_opname/domain/hpp_opname_models.dart
+new file mode 100644
+index 0000000..5bed103
+--- /dev/null
++++ b/lib/features/hpp_opname/domain/hpp_opname_models.dart
+@@ -0,0 +1,101 @@
++/// Domain models for HPP (cost-basis ingredient pricing) and Stok Opname
++/// (monthly physical stock count), ported from the approved HTML mockup.
++/// Both features share the same three-category ingredient list — see
++/// [IngredientCategory] — per Agung's direction that Stok Opname's item
++/// list "follows" HPP's.
++enum IngredientCategory {
++  baku('baku', 'Bahan Baku'),
++  setengahJadi('setengah_jadi', 'Setengah Jadi'),
++  jadi('jadi', 'Bahan Jadi');
++
++  final String dbValue;
++  final String label;
++  const IngredientCategory(this.dbValue, this.label);
++
++  static IngredientCategory fromDb(String value) {
++    return IngredientCategory.values.firstWhere(
++      (c) => c.dbValue == value,
++      orElse: () => IngredientCategory.baku,
++    );
++  }
++}
++
++/// One row in the HPP ingredient list. `lastPrice` is what HPP shows and
++/// edits, and what a new Stok Opname session auto-fills per item.
++class Ingredient {
++  final String id;
++  final IngredientCategory category;
++  final String name;
++  final String unit;
++  final int lastPrice;
++  final bool isActive;
++
++  const Ingredient({
++    required this.id,
++    required this.category,
++    required this.name,
++    required this.unit,
++    required this.lastPrice,
++    required this.isActive,
++  });
++
++  factory Ingredient.fromMap(Map<String, Object?> map) {
++    return Ingredient(
++      id: map['id'] as String,
++      category: IngredientCategory.fromDb(map['category'] as String),
++      name: map['name'] as String,
++      unit: map['unit'] as String,
++      lastPrice: map['last_price'] as int,
++      isActive: (map['is_active'] as int) == 1,
++    );
++  }
++}
++
++enum StockOpnameStatus {
++  draft('draft', 'Draft'),
++  selesai('selesai', 'Selesai');
++
++  final String dbValue;
++  final String label;
++  const StockOpnameStatus(this.dbValue, this.label);
++
++  static StockOpnameStatus fromDb(String value) {
++    return StockOpnameStatus.values.firstWhere(
++      (s) => s.dbValue == value,
++      orElse: () => StockOpnameStatus.draft,
++    );
++  }
++}
++
++/// One completed/in-progress opname pass — can cover items across all
++/// three categories in a single session (per Agung's direction: one
++/// session, free to switch categories, single submit).
++class StockOpnameSession {
++  final String id;
++  final StockOpnameStatus status;
++  final DateTime createdAt;
++  final DateTime? completedAt;
++  final int itemCount;
++  final int totalValue;
++
++  const StockOpnameSession({
++    required this.id,
++    required this.status,
++    required this.createdAt,
++    required this.completedAt,
++    required this.itemCount,
++    required this.totalValue,
++  });
++}
++
++/// One line inside a session: the physical qty counted for an
++/// ingredient, and the price used for that count (captured at submit
++/// time — see stock_opname_items.price_used in the schema — so editing
++/// an ingredient's HPP later never rewrites a past session's value).
++class StockOpnameItem {
++  final String ingredientId;
++  final double qty;
++  final int priceUsed;
++
++  const StockOpnameItem({required this.ingredientId, required this.qty, required this.priceUsed});
++}
+diff --git a/lib/features/hpp_opname/presentation/hpp_opname_screen.dart b/lib/features/hpp_opname/presentation/hpp_opname_screen.dart
+new file mode 100644
+index 0000000..ba10c37
+--- /dev/null
++++ b/lib/features/hpp_opname/presentation/hpp_opname_screen.dart
+@@ -0,0 +1,58 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../../../core/theme/app_colors.dart';
++import '../application/hpp_opname_provider.dart';
++import 'widgets/add_ingredient_modal.dart';
++import 'widgets/hpp_opname_header.dart';
++import 'widgets/hpp_tab_content.dart';
++import 'widgets/opname_tab_content.dart';
++
++/// HPP & Stok Opname screen — combined per the approved HTML mockup,
++/// switchable via the header's dropdown title rather than being two
++/// separate pushed screens.
++class HppOpnameScreen extends ConsumerStatefulWidget {
++  const HppOpnameScreen({super.key});
++
++  @override
++  ConsumerState<HppOpnameScreen> createState() => _HppOpnameScreenState();
++}
++
++class _HppOpnameScreenState extends ConsumerState<HppOpnameScreen> {
++  HppOpnamePage _page = HppOpnamePage.hpp;
++
++  @override
++  Widget build(BuildContext context) {
++    final state = ref.watch(hppOpnameProvider);
++
++    return Scaffold(
++      backgroundColor: AppColors.background,
++      body: SafeArea(
++        child: Column(
++          children: [
++            HppOpnameHeader(
++              currentPage: _page,
++              onPageSelected: (page) => setState(() => _page = page),
++              onBack: () => Navigator.of(context).pop(),
++              onAdd: _page == HppOpnamePage.hpp
++                  ? () => showModalBottomSheet(
++                        context: context,
++                        isScrollControlled: true,
++                        backgroundColor: Colors.transparent,
++                        builder: (_) => AddIngredientModal(initialCategory: state.hppCategory),
++                      )
++                  : null,
++            ),
++            Expanded(
++              child: state.isLoading
++                  ? const Center(child: CircularProgressIndicator(color: AppColors.tileHpp))
++                  : _page == HppOpnamePage.hpp
++                      ? const HppTabContent()
++                      : const OpnameTabContent(),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
+diff --git a/lib/features/hpp_opname/presentation/widgets/add_ingredient_modal.dart b/lib/features/hpp_opname/presentation/widgets/add_ingredient_modal.dart
+new file mode 100644
+index 0000000..ad18d93
+--- /dev/null
++++ b/lib/features/hpp_opname/presentation/widgets/add_ingredient_modal.dart
+@@ -0,0 +1,145 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../../../../core/theme/app_colors.dart';
++import '../../../../core/theme/app_spacing.dart';
++import '../../application/hpp_opname_provider.dart';
++import '../../domain/hpp_opname_models.dart';
++
++/// "Tambah Bahan" form, reached via the header's "+" button on the HPP
++/// page. Not present as a built screen in the HTML mockup (it only
++/// showed the button) — this is a straightforward add-form consistent
++/// with [AddMenuItemModal]'s shape, not a new design decision.
++class AddIngredientModal extends ConsumerStatefulWidget {
++  final IngredientCategory initialCategory;
++  const AddIngredientModal({super.key, required this.initialCategory});
++
++  @override
++  ConsumerState<AddIngredientModal> createState() => _AddIngredientModalState();
++}
++
++class _AddIngredientModalState extends ConsumerState<AddIngredientModal> {
++  final _nameController = TextEditingController();
++  final _unitController = TextEditingController();
++  final _priceController = TextEditingController();
++  late IngredientCategory _category;
++
++  @override
++  void initState() {
++    super.initState();
++    _category = widget.initialCategory;
++  }
++
++  @override
++  void dispose() {
++    _nameController.dispose();
++    _unitController.dispose();
++    _priceController.dispose();
++    super.dispose();
++  }
++
++  bool get _canSave => _nameController.text.trim().isNotEmpty && _unitController.text.trim().isNotEmpty;
++
++  void _save() {
++    final price = int.tryParse(_priceController.text.replaceAll('.', '').replaceAll(',', '')) ?? 0;
++    ref.read(hppOpnameProvider.notifier).addIngredient(
++          category: _category,
++          name: _nameController.text.trim(),
++          unit: _unitController.text.trim(),
++          lastPrice: price,
++        );
++    Navigator.of(context).pop();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    return Padding(
++      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
++      child: Container(
++        decoration: const BoxDecoration(color: AppColors.background, borderRadius: BorderRadius.vertical(top: Radius.circular(AppRadius.xl))),
++        padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.lg, AppSpacing.xl, AppSpacing.xl),
++        child: Column(
++          mainAxisSize: MainAxisSize.min,
++          crossAxisAlignment: CrossAxisAlignment.start,
++          children: [
++            const Text('Tambah Bahan', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
++            const SizedBox(height: AppSpacing.lg),
++            Wrap(
++              spacing: AppSpacing.sm,
++              children: IngredientCategory.values.map((c) {
++                final selected = c == _category;
++                return ChoiceChip(
++                  label: Text(c.label),
++                  selected: selected,
++                  onSelected: (_) => setState(() => _category = c),
++                  selectedColor: AppColors.tileHpp,
++                  labelStyle: TextStyle(color: selected ? Colors.white : AppColors.textPrimary, fontWeight: FontWeight.w700, fontSize: 12.5),
++                  backgroundColor: AppColors.surface,
++                  side: BorderSide(color: selected ? AppColors.tileHpp : AppColors.border),
++                );
++              }).toList(),
++            ),
++            const SizedBox(height: AppSpacing.lg),
++            TextField(
++              controller: _nameController,
++              onChanged: (_) => setState(() {}),
++              decoration: InputDecoration(
++                labelText: 'Nama Bahan',
++                filled: true,
++                fillColor: AppColors.surface,
++                border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: BorderSide.none),
++              ),
++            ),
++            const SizedBox(height: AppSpacing.md),
++            Row(
++              children: [
++                Expanded(
++                  child: TextField(
++                    controller: _unitController,
++                    onChanged: (_) => setState(() {}),
++                    decoration: InputDecoration(
++                      labelText: 'Satuan (kg, liter, pcs)',
++                      filled: true,
++                      fillColor: AppColors.surface,
++                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: BorderSide.none),
++                    ),
++                  ),
++                ),
++                const SizedBox(width: AppSpacing.md),
++                Expanded(
++                  child: TextField(
++                    controller: _priceController,
++                    keyboardType: TextInputType.number,
++                    decoration: InputDecoration(
++                      labelText: 'Harga',
++                      prefixText: 'Rp ',
++                      filled: true,
++                      fillColor: AppColors.surface,
++                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: BorderSide.none),
++                    ),
++                  ),
++                ),
++              ],
++            ),
++            const SizedBox(height: AppSpacing.lg),
++            SizedBox(
++              width: double.infinity,
++              child: ElevatedButton(
++                onPressed: _canSave ? _save : null,
++                style: ElevatedButton.styleFrom(
++                  backgroundColor: AppColors.tileHpp,
++                  foregroundColor: Colors.white,
++                  disabledBackgroundColor: AppColors.border,
++                  padding: const EdgeInsets.symmetric(vertical: 14),
++                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
++                  elevation: 0,
++                ),
++                child: const Text('Simpan Bahan', style: TextStyle(fontSize: 14.5, fontWeight: FontWeight.w800)),
++              ),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
+diff --git a/lib/features/hpp_opname/presentation/widgets/hpp_opname_header.dart b/lib/features/hpp_opname/presentation/widgets/hpp_opname_header.dart
+new file mode 100644
+index 0000000..1010083
+--- /dev/null
++++ b/lib/features/hpp_opname/presentation/widgets/hpp_opname_header.dart
+@@ -0,0 +1,235 @@
++import 'package:flutter/material.dart';
++
++import '../../../../core/theme/app_colors.dart';
++import '../../../../core/theme/app_spacing.dart';
++
++enum HppOpnamePage { hpp, opname }
++
++/// Header for the combined HPP & Stok Opname screen: circular back
++/// button, a tappable dropdown title to switch between HPP and Stok
++/// Opname (ported 1:1 from the HTML mockup's header dropdown, using the
++/// same [OverlayEntry] approach as [MenuManagementHeader] — the mockup's
++/// original nested-DOM dropdown had a real click-bubbling bug; an
++/// Overlay is a fully independent layer, so that class of bug can't
++/// happen here), and an optional "+" button on the right shown only on
++/// the HPP page (Stok Opname has no "add ingredient" action of its own).
++class HppOpnameHeader extends StatefulWidget {
++  final HppOpnamePage currentPage;
++  final ValueChanged<HppOpnamePage> onPageSelected;
++  final VoidCallback onBack;
++  final VoidCallback? onAdd;
++
++  const HppOpnameHeader({
++    super.key,
++    required this.currentPage,
++    required this.onPageSelected,
++    required this.onBack,
++    this.onAdd,
++  });
++
++  @override
++  State<HppOpnameHeader> createState() => _HppOpnameHeaderState();
++}
++
++class _HppOpnameHeaderState extends State<HppOpnameHeader> {
++  final _dropdownKey = GlobalKey();
++  OverlayEntry? _overlayEntry;
++  bool _isOpen = false;
++
++  void _toggleDropdown() => _isOpen ? _closeDropdown() : _openDropdown();
++
++  void _openDropdown() {
++    final renderBox = _dropdownKey.currentContext?.findRenderObject() as RenderBox?;
++    if (renderBox == null) return;
++    final position = renderBox.localToGlobal(Offset.zero);
++    final size = renderBox.size;
++
++    _overlayEntry = OverlayEntry(
++      builder: (context) => Stack(
++        children: [
++          Positioned.fill(
++            child: GestureDetector(
++              onTap: _closeDropdown,
++              behavior: HitTestBehavior.translucent,
++              child: Container(color: Colors.transparent),
++            ),
++          ),
++          Positioned(
++            top: position.dy + size.height + 6,
++            left: position.dx + size.width / 2 - 85,
++            width: 170,
++            child: _DropdownMenu(
++              currentPage: widget.currentPage,
++              onSelect: (page) {
++                widget.onPageSelected(page);
++                _closeDropdown();
++              },
++            ),
++          ),
++        ],
++      ),
++    );
++
++    Overlay.of(context).insert(_overlayEntry!);
++    setState(() => _isOpen = true);
++  }
++
++  void _closeDropdown() {
++    _overlayEntry?.remove();
++    _overlayEntry = null;
++    if (mounted) setState(() => _isOpen = false);
++  }
++
++  @override
++  void dispose() {
++    _overlayEntry?.remove();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    return Padding(
++      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
++      child: SizedBox(
++        height: 44,
++        child: Stack(
++          alignment: Alignment.center,
++          children: [
++            Center(
++              child: GestureDetector(
++                key: _dropdownKey,
++                onTap: _toggleDropdown,
++                child: Row(
++                  mainAxisSize: MainAxisSize.min,
++                  children: [
++                    Text(
++                      widget.currentPage == HppOpnamePage.hpp ? 'HPP' : 'Stok Opname',
++                      style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
++                    ),
++                    const SizedBox(width: 4),
++                    AnimatedRotation(
++                      turns: _isOpen ? 0.5 : 0,
++                      duration: const Duration(milliseconds: 180),
++                      child: const Icon(Icons.keyboard_arrow_down_rounded, size: 20, color: AppColors.textPrimary),
++                    ),
++                  ],
++                ),
++              ),
++            ),
++            Align(
++              alignment: Alignment.centerLeft,
++              child: _CircleIconButton(icon: Icons.chevron_left_rounded, onTap: widget.onBack),
++            ),
++            if (widget.currentPage == HppOpnamePage.hpp)
++              Align(
++                alignment: Alignment.centerRight,
++                child: _CircleIconButton(icon: Icons.add_rounded, onTap: widget.onAdd),
++              ),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++class _CircleIconButton extends StatelessWidget {
++  final IconData icon;
++  final VoidCallback? onTap;
++  const _CircleIconButton({required this.icon, this.onTap});
++
++  @override
++  Widget build(BuildContext context) {
++    return Material(
++      color: AppColors.surface,
++      shape: const CircleBorder(),
++      elevation: 0,
++      child: InkWell(
++        onTap: onTap,
++        customBorder: const CircleBorder(),
++        child: Container(
++          width: 44,
++          height: 44,
++          decoration: BoxDecoration(
++            shape: BoxShape.circle,
++            boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 10, offset: const Offset(0, 2))],
++          ),
++          child: Icon(icon, size: 24, color: AppColors.textPrimary),
++        ),
++      ),
++    );
++  }
++}
++
++class _DropdownMenu extends StatelessWidget {
++  final HppOpnamePage currentPage;
++  final ValueChanged<HppOpnamePage> onSelect;
++
++  const _DropdownMenu({required this.currentPage, required this.onSelect});
++
++  @override
++  Widget build(BuildContext context) {
++    return Material(
++      color: Colors.transparent,
++      child: Container(
++        decoration: BoxDecoration(
++          color: AppColors.surface,
++          borderRadius: BorderRadius.circular(AppRadius.lg),
++          border: Border.all(color: AppColors.border),
++          boxShadow: [
++            BoxShadow(color: Colors.black.withValues(alpha: 0.08), blurRadius: 20, offset: const Offset(0, 6)),
++          ],
++        ),
++        padding: const EdgeInsets.symmetric(vertical: 6),
++        child: Column(
++          mainAxisSize: MainAxisSize.min,
++          children: [
++            _DropdownOption(
++              label: 'HPP',
++              selected: currentPage == HppOpnamePage.hpp,
++              onTap: () => onSelect(HppOpnamePage.hpp),
++            ),
++            _DropdownOption(
++              label: 'Stok Opname',
++              selected: currentPage == HppOpnamePage.opname,
++              onTap: () => onSelect(HppOpnamePage.opname),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++class _DropdownOption extends StatelessWidget {
++  final String label;
++  final bool selected;
++  final VoidCallback onTap;
++
++  const _DropdownOption({required this.label, required this.selected, required this.onTap});
++
++  @override
++  Widget build(BuildContext context) {
++    return InkWell(
++      onTap: onTap,
++      child: Container(
++        width: double.infinity,
++        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: 10),
++        color: selected ? AppColors.brand.withValues(alpha: 0.06) : Colors.transparent,
++        child: Row(
++          mainAxisAlignment: MainAxisAlignment.spaceBetween,
++          children: [
++            Text(
++              label,
++              style: TextStyle(
++                fontSize: 14,
++                fontWeight: FontWeight.w700,
++                color: selected ? AppColors.brand : AppColors.textPrimary,
++              ),
++            ),
++            if (selected) const Icon(Icons.check_rounded, size: 16, color: AppColors.brand),
++          ],
++        ),
++      ),
++    );
++  }
++}
+diff --git a/lib/features/hpp_opname/presentation/widgets/hpp_tab_content.dart b/lib/features/hpp_opname/presentation/widgets/hpp_tab_content.dart
+new file mode 100644
+index 0000000..73f434e
+--- /dev/null
++++ b/lib/features/hpp_opname/presentation/widgets/hpp_tab_content.dart
+@@ -0,0 +1,199 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../../../../core/theme/app_colors.dart';
++import '../../../../core/theme/app_spacing.dart';
++import '../../../../core/utils/currency.dart';
++import '../../application/hpp_opname_provider.dart';
++import '../../domain/hpp_opname_models.dart';
++import 'sliding_pill_tabs.dart';
++
++/// HPP tab: search + 3-way category pill + ingredient list + inline
++/// price editing. Ported 1:1 from the HTML mockup's HPP page.
++class HppTabContent extends ConsumerWidget {
++  const HppTabContent({super.key});
++
++  @override
++  Widget build(BuildContext context, WidgetRef ref) {
++    final state = ref.watch(hppOpnameProvider);
++    final controller = ref.read(hppOpnameProvider.notifier);
++    final items = state.hppFilteredIngredients;
++
++    return Column(
++      children: [
++        Padding(
++          padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.lg),
++          child: SearchBarField(
++            hintText: 'Cari bahan...',
++            onChanged: controller.setHppSearchQuery,
++          ),
++        ),
++        Padding(
++          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
++          child: SlidingPillTabs(
++            labels: IngredientCategory.values.map((c) => c.label).toList(),
++            selectedIndex: IngredientCategory.values.indexOf(state.hppCategory),
++            onSelected: (i) => controller.setHppCategory(IngredientCategory.values[i]),
++          ),
++        ),
++        const SizedBox(height: AppSpacing.lg),
++        Expanded(
++          child: items.isEmpty
++              ? const Center(
++                  child: Text('Bahan tidak ditemukan.', style: TextStyle(fontSize: 13, color: AppColors.textMuted)),
++                )
++              : ListView.separated(
++                  padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.xxl),
++                  itemCount: items.length,
++                  separatorBuilder: (_, __) => const Divider(height: 1, color: AppColors.border),
++                  itemBuilder: (context, index) => _IngredientRow(ingredient: items[index]),
++                ),
++        ),
++      ],
++    );
++  }
++}
++
++/// Shared pill search field — same visual across the HPP tab and the
++/// Stok Opname Input Baru sub-tab (both search the same ingredient
++/// list), so this is public rather than duplicated per-file.
++class SearchBarField extends StatelessWidget {
++  final String hintText;
++  final ValueChanged<String> onChanged;
++  const SearchBarField({super.key, this.hintText = 'Cari bahan...', required this.onChanged});
++
++  @override
++  Widget build(BuildContext context) {
++    return Container(
++      decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.pill)),
++      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
++      child: Row(
++        children: [
++          const Icon(Icons.search_rounded, size: 19, color: AppColors.textMuted),
++          const SizedBox(width: AppSpacing.sm),
++          Expanded(
++            child: TextField(
++              onChanged: onChanged,
++              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: AppColors.textPrimary),
++              decoration: InputDecoration(
++                hintText: hintText,
++                hintStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: AppColors.textMuted),
++                border: InputBorder.none,
++                isDense: true,
++                contentPadding: const EdgeInsets.symmetric(vertical: 13),
++              ),
++            ),
++          ),
++        ],
++      ),
++    );
++  }
++}
++
++class _IngredientRow extends ConsumerWidget {
++  final Ingredient ingredient;
++  const _IngredientRow({required this.ingredient});
++
++  @override
++  Widget build(BuildContext context, WidgetRef ref) {
++    return InkWell(
++      onTap: () => _showEditPriceSheet(context, ref, ingredient),
++      child: Container(
++        color: AppColors.surface,
++        padding: const EdgeInsets.symmetric(vertical: AppSpacing.md),
++        child: Row(
++          children: [
++            Container(
++              width: 38,
++              height: 38,
++              decoration: BoxDecoration(color: AppColors.background, borderRadius: BorderRadius.circular(AppSpacing.sm)),
++              child: const Icon(Icons.inventory_2_outlined, size: 18, color: AppColors.textSecondary),
++            ),
++            const SizedBox(width: AppSpacing.md),
++            Expanded(
++              child: Column(
++                crossAxisAlignment: CrossAxisAlignment.start,
++                children: [
++                  Text(ingredient.name, style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
++                  const SizedBox(height: 2),
++                  Text('per ${ingredient.unit}', style: const TextStyle(fontSize: 12, color: AppColors.textMuted)),
++                ],
++              ),
++            ),
++            Column(
++              crossAxisAlignment: CrossAxisAlignment.end,
++              children: [
++                Text(formatRupiah(ingredient.lastPrice), style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
++                Text('/ ${ingredient.unit}', style: const TextStyle(fontSize: 11, color: AppColors.textMuted)),
++              ],
++            ),
++            const SizedBox(width: 4),
++            const Icon(Icons.chevron_right_rounded, size: 16, color: AppColors.textMuted),
++          ],
++        ),
++      ),
++    );
++  }
++
++  void _showEditPriceSheet(BuildContext context, WidgetRef ref, Ingredient ingredient) {
++    final controller = TextEditingController(text: ingredient.lastPrice.toString());
++    showModalBottomSheet(
++      context: context,
++      isScrollControlled: true,
++      backgroundColor: Colors.transparent,
++      builder: (sheetContext) => Padding(
++        padding: EdgeInsets.only(bottom: MediaQuery.of(sheetContext).viewInsets.bottom),
++        child: Container(
++          decoration: const BoxDecoration(color: AppColors.background, borderRadius: BorderRadius.vertical(top: Radius.circular(AppRadius.xl))),
++          padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.lg, AppSpacing.xl, AppSpacing.xl),
++          child: Column(
++            mainAxisSize: MainAxisSize.min,
++            crossAxisAlignment: CrossAxisAlignment.start,
++            children: [
++              Text(ingredient.name, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
++              const SizedBox(height: 4),
++              Text(
++                'Harga ini kepakai ke semua Menu & Variant yang pakai bahan ini.',
++                style: const TextStyle(fontSize: 12.5, color: AppColors.textSecondary),
++              ),
++              const SizedBox(height: AppSpacing.lg),
++              TextField(
++                controller: controller,
++                keyboardType: TextInputType.number,
++                autofocus: true,
++                decoration: InputDecoration(
++                  labelText: 'Harga / ${ingredient.unit}',
++                  prefixText: 'Rp ',
++                  filled: true,
++                  fillColor: AppColors.surface,
++                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: BorderSide.none),
++                ),
++              ),
++              const SizedBox(height: AppSpacing.lg),
++              SizedBox(
++                width: double.infinity,
++                child: ElevatedButton(
++                  style: ElevatedButton.styleFrom(
++                    backgroundColor: AppColors.tileHpp,
++                    foregroundColor: Colors.white,
++                    padding: const EdgeInsets.symmetric(vertical: 14),
++                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
++                    elevation: 0,
++                  ),
++                  onPressed: () {
++                    final newPrice = int.tryParse(controller.text.replaceAll('.', '').replaceAll(',', ''));
++                    if (newPrice != null) {
++                      ref.read(hppOpnameProvider.notifier).updateIngredientPrice(ingredient.id, newPrice);
++                    }
++                    Navigator.of(sheetContext).pop();
++                  },
++                  child: const Text('Simpan Harga', style: TextStyle(fontSize: 14.5, fontWeight: FontWeight.w800)),
++                ),
++              ),
++            ],
++          ),
++        ),
++      ),
++    );
++  }
++}
+diff --git a/lib/features/hpp_opname/presentation/widgets/opname_tab_content.dart b/lib/features/hpp_opname/presentation/widgets/opname_tab_content.dart
+new file mode 100644
+index 0000000..c1608db
+--- /dev/null
++++ b/lib/features/hpp_opname/presentation/widgets/opname_tab_content.dart
+@@ -0,0 +1,328 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++import 'package:intl/intl.dart';
++
++import '../../../../core/theme/app_colors.dart';
++import '../../../../core/theme/app_spacing.dart';
++import '../../../../core/utils/currency.dart';
++import '../../application/hpp_opname_provider.dart';
++import '../../domain/hpp_opname_models.dart';
++import 'hpp_tab_content.dart';
++import 'sliding_pill_tabs.dart';
++
++/// Stok Opname tab: Riwayat (history) / Input Baru sub-tabs, ported 1:1
++/// from the HTML mockup.
++class OpnameTabContent extends StatefulWidget {
++  const OpnameTabContent({super.key});
++
++  @override
++  State<OpnameTabContent> createState() => _OpnameTabContentState();
++}
++
++class _OpnameTabContentState extends State<OpnameTabContent> {
++  int _subTabIndex = 0; // 0 = Riwayat, 1 = Input Baru
++
++  @override
++  Widget build(BuildContext context) {
++    return Column(
++      children: [
++        Padding(
++          padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.lg),
++          child: SlidingPillTabs(
++            labels: const ['Riwayat', 'Input Baru'],
++            selectedIndex: _subTabIndex,
++            onSelected: (i) => setState(() => _subTabIndex = i),
++          ),
++        ),
++        Expanded(
++          child: _subTabIndex == 0 ? const _RiwayatList() : const _InputBaruForm(),
++        ),
++      ],
++    );
++  }
++}
++
++class _RiwayatList extends ConsumerWidget {
++  const _RiwayatList();
++
++  @override
++  Widget build(BuildContext context, WidgetRef ref) {
++    final sessions = ref.watch(hppOpnameProvider).sessions;
++
++    if (sessions.isEmpty) {
++      return const Center(
++        child: Text('Belum ada sesi opname.', style: TextStyle(fontSize: 13, color: AppColors.textMuted)),
++      );
++    }
++
++    return ListView.builder(
++      padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.xxl),
++      itemCount: sessions.length,
++      itemBuilder: (context, index) {
++        final session = sessions[index];
++        final isSelesai = session.status == StockOpnameStatus.selesai;
++        return Container(
++          margin: const EdgeInsets.only(bottom: AppSpacing.md),
++          decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.lg)),
++          padding: const EdgeInsets.all(AppSpacing.lg),
++          child: Row(
++            children: [
++              Container(
++                width: 42,
++                height: 42,
++                decoration: BoxDecoration(
++                  color: (isSelesai ? AppColors.success : AppColors.warning).withValues(alpha: 0.12),
++                  shape: BoxShape.circle,
++                ),
++                child: Icon(
++                  isSelesai ? Icons.check_circle_outline_rounded : Icons.schedule_rounded,
++                  size: 19,
++                  color: isSelesai ? AppColors.success : AppColors.warning,
++                ),
++              ),
++              const SizedBox(width: AppSpacing.md),
++              Expanded(
++                child: Column(
++                  crossAxisAlignment: CrossAxisAlignment.start,
++                  children: [
++                    Text(
++                      'Opname · ${session.itemCount} bahan',
++                      style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
++                    ),
++                    const SizedBox(height: 2),
++                    Text(
++                      '${DateFormat('dd MMM yyyy, HH:mm', 'id_ID').format(session.createdAt)} · ${formatRupiah(session.totalValue)}',
++                      style: const TextStyle(fontSize: 12, color: AppColors.textMuted),
++                    ),
++                  ],
++                ),
++              ),
++              Container(
++                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
++                decoration: BoxDecoration(
++                  color: (isSelesai ? AppColors.success : AppColors.warning).withValues(alpha: 0.15),
++                  borderRadius: BorderRadius.circular(AppRadius.pill),
++                ),
++                child: Text(
++                  session.status.label,
++                  style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w800, color: isSelesai ? AppColors.success : AppColors.warning),
++                ),
++              ),
++            ],
++          ),
++        );
++      },
++    );
++  }
++}
++
++class _InputBaruForm extends ConsumerWidget {
++  const _InputBaruForm();
++
++  @override
++  Widget build(BuildContext context, WidgetRef ref) {
++    final state = ref.watch(hppOpnameProvider);
++    final controller = ref.read(hppOpnameProvider.notifier);
++    final items = state.opnameFilteredIngredients;
++
++    return Column(
++      children: [
++        Padding(
++          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
++          child: SearchBarField(onChanged: controller.setOpnameSearchQuery),
++        ),
++        const SizedBox(height: AppSpacing.lg),
++        Padding(
++          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
++          child: SlidingPillTabs(
++            labels: IngredientCategory.values.map((c) => c.label).toList(),
++            selectedIndex: IngredientCategory.values.indexOf(state.opnameCategory),
++            onSelected: (i) => controller.setOpnameCategory(IngredientCategory.values[i]),
++          ),
++        ),
++        const SizedBox(height: AppSpacing.lg),
++        Expanded(
++          child: items.isEmpty
++              ? const Center(
++                  child: Text('Bahan tidak ditemukan.', style: TextStyle(fontSize: 13, color: AppColors.textMuted)),
++                )
++              : ListView.builder(
++                  padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
++                  itemCount: items.length,
++                  itemBuilder: (context, index) => _OpnameItemCard(
++                    key: ValueKey(items[index].id),
++                    ingredient: items[index],
++                  ),
++                ),
++        ),
++        Container(
++          margin: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.md),
++          decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.lg)),
++          padding: const EdgeInsets.all(AppSpacing.lg),
++          child: Row(
++            mainAxisAlignment: MainAxisAlignment.spaceBetween,
++            children: [
++              const Text('Total Nilai Stok (kategori ini)', style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w700, color: AppColors.textSecondary)),
++              Text(formatRupiah(state.opnameCategoryTotal), style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
++            ],
++          ),
++        ),
++        Padding(
++          padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.lg),
++          child: SizedBox(
++            width: double.infinity,
++            child: ElevatedButton(
++              onPressed: () async {
++                await controller.submitSession(asDraft: false);
++                if (context.mounted) {
++                  final error = ref.read(hppOpnameProvider).errorMessage;
++                  ScaffoldMessenger.of(context).showSnackBar(
++                    SnackBar(content: Text(error ?? 'Sesi opname berhasil disimpan.')),
++                  );
++                }
++              },
++              style: ElevatedButton.styleFrom(
++                backgroundColor: AppColors.tileHpp,
++                foregroundColor: Colors.white,
++                padding: const EdgeInsets.symmetric(vertical: 14),
++                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
++                elevation: 0,
++              ),
++              child: const Text('Simpan Sesi Opname', style: TextStyle(fontSize: 14.5, fontWeight: FontWeight.w800)),
++            ),
++          ),
++        ),
++      ],
++    );
++  }
++}
++
++class _OpnameItemCard extends ConsumerStatefulWidget {
++  final Ingredient ingredient;
++  const _OpnameItemCard({super.key, required this.ingredient});
++
++  @override
++  ConsumerState<_OpnameItemCard> createState() => _OpnameItemCardState();
++}
++
++class _OpnameItemCardState extends ConsumerState<_OpnameItemCard> {
++  late final TextEditingController _qtyController;
++  late final TextEditingController _priceController;
++  bool _priceEditable = false;
++
++  @override
++  void initState() {
++    super.initState();
++    _qtyController = TextEditingController();
++    _priceController = TextEditingController(text: widget.ingredient.lastPrice.toString());
++  }
++
++  @override
++  void dispose() {
++    _qtyController.dispose();
++    _priceController.dispose();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final controller = ref.read(hppOpnameProvider.notifier);
++    final draft = ref.watch(hppOpnameProvider.select((s) => s.opnameDraft[widget.ingredient.id]));
++    final subtotal = draft?.qty != null ? (draft!.qty! * draft.priceUsed).round() : 0;
++
++    return Container(
++      margin: const EdgeInsets.only(bottom: AppSpacing.sm),
++      decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.lg)),
++      padding: const EdgeInsets.all(AppSpacing.lg),
++      child: Column(
++        crossAxisAlignment: CrossAxisAlignment.start,
++        children: [
++          Text(widget.ingredient.name, style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
++          const SizedBox(height: 2),
++          Text('Satuan: ${widget.ingredient.unit}', style: const TextStyle(fontSize: 11.5, color: AppColors.textMuted)),
++          const SizedBox(height: AppSpacing.md),
++          Row(
++            children: [
++              Expanded(
++                child: _FieldBox(
++                  label: 'Qty Fisik',
++                  child: TextField(
++                    controller: _qtyController,
++                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
++                    style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
++                    decoration: const InputDecoration(hintText: '0', border: InputBorder.none, isDense: true),
++                    onChanged: (value) {
++                      final qty = double.tryParse(value.replaceAll(',', '.'));
++                      controller.setDraftQty(widget.ingredient.id, qty);
++                    },
++                  ),
++                ),
++              ),
++              const SizedBox(width: AppSpacing.sm),
++              Expanded(
++                child: _FieldBox(
++                  label: 'Harga / ${widget.ingredient.unit}',
++                  editable: _priceEditable,
++                  child: TextField(
++                    controller: _priceController,
++                    enabled: _priceEditable,
++                    keyboardType: TextInputType.number,
++                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: _priceEditable ? AppColors.textPrimary : AppColors.textSecondary),
++                    decoration: const InputDecoration(border: InputBorder.none, isDense: true),
++                    onChanged: (value) {
++                      final price = int.tryParse(value.replaceAll('.', '').replaceAll(',', ''));
++                      if (price != null) controller.setDraftPrice(widget.ingredient.id, price);
++                    },
++                  ),
++                ),
++              ),
++            ],
++          ),
++          const SizedBox(height: 4),
++          GestureDetector(
++            onTap: () => setState(() => _priceEditable = !_priceEditable),
++            child: Row(
++              mainAxisSize: MainAxisSize.min,
++              children: const [
++                Icon(Icons.edit_outlined, size: 12, color: AppColors.textSecondary),
++                SizedBox(width: 5),
++                Text('Edit harga manual', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.textSecondary)),
++              ],
++            ),
++          ),
++          const SizedBox(height: AppSpacing.sm),
++          Row(
++            mainAxisAlignment: MainAxisAlignment.spaceBetween,
++            children: [
++              const Text('Subtotal', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textMuted)),
++              Text(formatRupiah(subtotal), style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
++            ],
++          ),
++        ],
++      ),
++    );
++  }
++}
++
++class _FieldBox extends StatelessWidget {
++  final String label;
++  final Widget child;
++  final bool editable;
++  const _FieldBox({required this.label, required this.child, this.editable = true});
++
++  @override
++  Widget build(BuildContext context) {
++    return Column(
++      crossAxisAlignment: CrossAxisAlignment.start,
++      children: [
++        Text(label, style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700, color: AppColors.textMuted, letterSpacing: 0.3)),
++        const SizedBox(height: 5),
++        Container(
++          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
++          decoration: BoxDecoration(color: AppColors.background, borderRadius: BorderRadius.circular(AppRadius.sm)),
++          child: child,
++        ),
++      ],
++    );
++  }
++}
+diff --git a/lib/features/hpp_opname/presentation/widgets/sliding_pill_tabs.dart b/lib/features/hpp_opname/presentation/widgets/sliding_pill_tabs.dart
+new file mode 100644
+index 0000000..676baa5
+--- /dev/null
++++ b/lib/features/hpp_opname/presentation/widgets/sliding_pill_tabs.dart
+@@ -0,0 +1,77 @@
++import 'package:flutter/material.dart';
++
++import '../../../../core/theme/app_colors.dart';
++import '../../../../core/theme/app_spacing.dart';
++
++/// Sliding-capsule segmented control — one solid pill that glides
++/// between options via [AnimatedPositioned], rather than each option
++/// carrying its own background. Ported from the HTML mockup's
++/// `.pill-indicator` mechanism (which measured DOM rects with JS);
++/// Flutter's [LayoutBuilder] + equal-width [Expanded] segments makes the
++/// same visual result reachable without manual measurement.
++///
++/// Used for both the 2-option Riwayat/Input Baru sub-tab and the
++/// 3-option Bahan Baku/Setengah Jadi/Bahan Jadi category switcher.
++class SlidingPillTabs extends StatelessWidget {
++  final List<String> labels;
++  final int selectedIndex;
++  final ValueChanged<int> onSelected;
++
++  const SlidingPillTabs({
++    super.key,
++    required this.labels,
++    required this.selectedIndex,
++    required this.onSelected,
++  });
++
++  @override
++  Widget build(BuildContext context) {
++    return Container(
++      padding: const EdgeInsets.all(4),
++      decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.pill)),
++      child: LayoutBuilder(
++        builder: (context, constraints) {
++          final segmentWidth = (constraints.maxWidth - 8) / labels.length;
++          return Stack(
++            children: [
++              AnimatedPositioned(
++                duration: const Duration(milliseconds: 280),
++                curve: Curves.easeOutCubic,
++                left: segmentWidth * selectedIndex,
++                top: 0,
++                bottom: 0,
++                width: segmentWidth,
++                child: DecoratedBox(
++                  decoration: BoxDecoration(color: AppColors.textPrimary, borderRadius: BorderRadius.circular(AppRadius.pill)),
++                ),
++              ),
++              Row(
++                children: List.generate(labels.length, (i) {
++                  final isSelected = i == selectedIndex;
++                  return Expanded(
++                    child: GestureDetector(
++                      onTap: () => onSelected(i),
++                      behavior: HitTestBehavior.opaque,
++                      child: Padding(
++                        padding: const EdgeInsets.symmetric(vertical: 9),
++                        child: AnimatedDefaultTextStyle(
++                          duration: const Duration(milliseconds: 200),
++                          style: TextStyle(
++                            fontSize: labels.length > 2 ? 12 : 13,
++                            fontWeight: FontWeight.w700,
++                            color: isSelected ? Colors.white : AppColors.textSecondary,
++                          ),
++                          child: Text(labels[i], textAlign: TextAlign.center, overflow: TextOverflow.ellipsis),
++                        ),
++                      ),
++                    ),
++                  );
++                }),
++              ),
++            ],
++          );
++        },
++      ),
++    );
++  }
++}
+diff --git a/lib/features/laporan/application/laporan_provider.dart b/lib/features/laporan/application/laporan_provider.dart
+new file mode 100644
+index 0000000..1ba6f4f
+--- /dev/null
++++ b/lib/features/laporan/application/laporan_provider.dart
+@@ -0,0 +1,80 @@
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../domain/laporan_models.dart';
++import 'laporan_repository.dart';
++
++final laporanRepositoryProvider = Provider<LaporanRepository>((ref) => LaporanRepository());
++
++class LaporanState {
++  final ReportType reportType;
++  final DateTime selectedMonth; // day is always 1 — month-granularity only
++  final ReportData data;
++  final bool isLoading;
++  final String? errorMessage;
++
++  const LaporanState({
++    this.reportType = ReportType.pendapatan,
++    required this.selectedMonth,
++    this.data = const ReportData(totalValue: 0, transactionCount: 0, averagePerTransaction: 0, averagePerDay: 0, trend: [], rows: []),
++    this.isLoading = true,
++    this.errorMessage,
++  });
++
++  LaporanState copyWith({
++    ReportType? reportType,
++    DateTime? selectedMonth,
++    ReportData? data,
++    bool? isLoading,
++    String? errorMessage,
++    bool clearError = false,
++  }) {
++    return LaporanState(
++      reportType: reportType ?? this.reportType,
++      selectedMonth: selectedMonth ?? this.selectedMonth,
++      data: data ?? this.data,
++      isLoading: isLoading ?? this.isLoading,
++      errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
++    );
++  }
++}
++
++final laporanProvider = StateNotifierProvider.autoDispose<LaporanController, LaporanState>((ref) {
++  return LaporanController(ref.watch(laporanRepositoryProvider));
++});
++
++class LaporanController extends StateNotifier<LaporanState> {
++  final LaporanRepository _repository;
++
++  LaporanController(this._repository) : super(LaporanState(selectedMonth: DateTime(DateTime.now().year, DateTime.now().month, 1))) {
++    load();
++  }
++
++  Future<void> load() async {
++    if (!state.reportType.isImplemented) {
++      // Laba/Produk/Customer have no designed report body yet — nothing
++      // to query, so this just clears loading without inventing data.
++      state = state.copyWith(isLoading: false, data: ReportData.empty(), clearError: true);
++      return;
++    }
++
++    state = state.copyWith(isLoading: true, clearError: true);
++    try {
++      final data = state.reportType == ReportType.pendapatan
++          ? await _repository.getPendapatanReport(state.selectedMonth)
++          : await _repository.getPengeluaranReport(state.selectedMonth);
++      state = state.copyWith(data: data, isLoading: false);
++    } catch (e) {
++      state = state.copyWith(isLoading: false, errorMessage: 'Gagal memuat laporan: $e');
++    }
++  }
++
++  void setReportType(ReportType type) {
++    state = state.copyWith(reportType: type);
++    load();
++  }
++
++  void setMonth(DateTime month) {
++    state = state.copyWith(selectedMonth: DateTime(month.year, month.month, 1));
++    load();
++  }
++}
+diff --git a/lib/features/laporan/application/laporan_repository.dart b/lib/features/laporan/application/laporan_repository.dart
+new file mode 100644
+index 0000000..51c59c0
+--- /dev/null
++++ b/lib/features/laporan/application/laporan_repository.dart
+@@ -0,0 +1,135 @@
++import 'package:sqflite_sqlcipher/sqflite.dart';
++
++import '../../../core/data/app_database.dart';
++import '../domain/laporan_models.dart';
++
++/// Reads Pendapatan/Pengeluaran report data for a given month from the
++/// same `transactions` / `cash_movements` tables as Dashboard — same
++/// "compute on read, no separate reports store" approach as
++/// DashboardRepository/DompetRepository.
++class LaporanRepository {
++  Future<Database> get _db => AppDatabase.instance.database;
++
++  Future<ReportData> getPendapatanReport(DateTime month) async {
++    final db = await _db;
++    final daysInMonth = DateTime(month.year, month.month + 1, 0).day;
++
++    final trend = <ReportTrendPoint>[];
++    for (var day = 1; day <= daysInMonth; day++) {
++      final total = await _sumPaidTotalForDay(db, month.year, month.month, day);
++      trend.add(ReportTrendPoint(day: day, value: total));
++    }
++
++    final totalValue = trend.fold<int>(0, (sum, p) => sum + p.value);
++    final txCount = await _countPaidOrdersForMonth(db, month.year, month.month);
++    final rows = await _getPendapatanRows(db, month.year, month.month);
++
++    return ReportData(
++      totalValue: totalValue,
++      transactionCount: txCount,
++      averagePerTransaction: txCount == 0 ? 0 : (totalValue / txCount).round(),
++      averagePerDay: (totalValue / daysInMonth).round(),
++      trend: trend,
++      rows: rows,
++    );
++  }
++
++  Future<ReportData> getPengeluaranReport(DateTime month) async {
++    final db = await _db;
++    final daysInMonth = DateTime(month.year, month.month + 1, 0).day;
++
++    final trend = <ReportTrendPoint>[];
++    for (var day = 1; day <= daysInMonth; day++) {
++      final total = await _sumExpenseForDay(db, month.year, month.month, day);
++      trend.add(ReportTrendPoint(day: day, value: total));
++    }
++
++    final totalValue = trend.fold<int>(0, (sum, p) => sum + p.value);
++    final txCount = await _countExpensesForMonth(db, month.year, month.month);
++    final rows = await _getPengeluaranRows(db, month.year, month.month);
++
++    return ReportData(
++      totalValue: totalValue,
++      transactionCount: txCount,
++      averagePerTransaction: txCount == 0 ? 0 : (totalValue / txCount).round(),
++      averagePerDay: (totalValue / daysInMonth).round(),
++      trend: trend,
++      rows: rows,
++    );
++  }
++
++  String _monthPrefix(int year, int month) => '$year-${month.toString().padLeft(2, '0')}';
++
++  Future<int> _sumPaidTotalForDay(Database db, int year, int month, int day) async {
++    final dateStr = '$year-${month.toString().padLeft(2, '0')}-${day.toString().padLeft(2, '0')}';
++    final result = await db.rawQuery(
++      "SELECT COALESCE(SUM(total), 0) as total FROM transactions WHERE status = 'paid' AND date(paid_at) = ?",
++      [dateStr],
++    );
++    return result.first['total'] as int;
++  }
++
++  Future<int> _sumExpenseForDay(Database db, int year, int month, int day) async {
++    final dateStr = '$year-${month.toString().padLeft(2, '0')}-${day.toString().padLeft(2, '0')}';
++    final result = await db.rawQuery(
++      "SELECT COALESCE(SUM(amount), 0) as total FROM cash_movements WHERE type = 'expense' AND date(created_at) = ?",
++      [dateStr],
++    );
++    return result.first['total'] as int;
++  }
++
++  Future<int> _countPaidOrdersForMonth(Database db, int year, int month) async {
++    final result = await db.rawQuery(
++      "SELECT COUNT(*) as cnt FROM transactions WHERE status = 'paid' AND strftime('%Y-%m', paid_at) = ?",
++      [_monthPrefix(year, month)],
++    );
++    return result.first['cnt'] as int;
++  }
++
++  Future<int> _countExpensesForMonth(Database db, int year, int month) async {
++    final result = await db.rawQuery(
++      "SELECT COUNT(*) as cnt FROM cash_movements WHERE type = 'expense' AND strftime('%Y-%m', created_at) = ?",
++      [_monthPrefix(year, month)],
++    );
++    return result.first['cnt'] as int;
++  }
++
++  Future<List<ReportRow>> _getPendapatanRows(Database db, int year, int month) async {
++    final rows = await db.rawQuery(
++      "SELECT * FROM transactions WHERE status = 'paid' AND strftime('%Y-%m', paid_at) = ? ORDER BY paid_at DESC LIMIT 50",
++      [_monthPrefix(year, month)],
++    );
++    return rows.map((row) {
++      final paidAt = DateTime.parse(row['paid_at'] as String);
++      final customerName = row['customer_name'] as String? ?? 'Pelanggan';
++      return ReportRow(
++        title: customerName,
++        subtitle: 'Mamam Ayam - ${_formatDate(paidAt)}',
++        amount: row['total'] as int,
++      );
++    }).toList();
++  }
++
++  Future<List<ReportRow>> _getPengeluaranRows(Database db, int year, int month) async {
++    final rows = await db.rawQuery(
++      "SELECT * FROM cash_movements WHERE type = 'expense' AND strftime('%Y-%m', created_at) = ? ORDER BY created_at DESC LIMIT 50",
++      [_monthPrefix(year, month)],
++    );
++    return rows.map((row) {
++      final createdAt = DateTime.parse(row['created_at'] as String);
++      final reason = row['reason'] as String? ?? 'Belanja';
++      return ReportRow(
++        title: reason,
++        subtitle: 'Mamam Ayam - ${_formatDate(createdAt)}',
++        amount: row['amount'] as int,
++      );
++    }).toList();
++  }
++
++  String _formatDate(DateTime date) {
++    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
++    final hh = date.hour.toString().padLeft(2, '0');
++    final mm = date.minute.toString().padLeft(2, '0');
++    return '${date.day.toString().padLeft(2, '0')} ${months[date.month - 1]}, $hh:$mm';
++  }
++}
+diff --git a/lib/features/laporan/domain/laporan_models.dart b/lib/features/laporan/domain/laporan_models.dart
+new file mode 100644
+index 0000000..4b566ab
+--- /dev/null
++++ b/lib/features/laporan/domain/laporan_models.dart
+@@ -0,0 +1,65 @@
++/// Domain models for the Laporan (Reports) feature, ported from the
++/// approved HTML mockup. Pendapatan and Pengeluaran are the two fully
++/// wired report types (real queries against `transactions` /
++/// `cash_movements`); Laba, Produk, and Customer remain selectable in
++/// the type picker (matching the mockup) but have no designed report
++/// body yet — selecting them shows a "Segera Hadir" placeholder rather
++/// than an invented report.
++enum ReportType {
++  pendapatan('Pendapatan'),
++  pengeluaran('Pengeluaran'),
++  laba('Laba'),
++  produk('Produk'),
++  customer('Customer');
++
++  final String label;
++  const ReportType(this.label);
++
++  bool get isImplemented => this == ReportType.pendapatan || this == ReportType.pengeluaran;
++}
++
++class ReportRow {
++  final String title;
++  final String subtitle;
++  final int amount;
++
++  const ReportRow({required this.title, required this.subtitle, required this.amount});
++}
++
++class ReportTrendPoint {
++  final int day;
++  final int value;
++
++  const ReportTrendPoint({required this.day, required this.value});
++}
++
++/// Full report payload for one (type, month) combination — mirrors the
++/// mockup's chart + 4 stat cards + transaction list layout for both
++/// Pendapatan and Pengeluaran, since they share the exact same shape
++/// (only the underlying query and labels differ).
++class ReportData {
++  final int totalValue;
++  final int transactionCount;
++  final int averagePerTransaction;
++  final int averagePerDay;
++  final List<ReportTrendPoint> trend;
++  final List<ReportRow> rows;
++
++  const ReportData({
++    required this.totalValue,
++    required this.transactionCount,
++    required this.averagePerTransaction,
++    required this.averagePerDay,
++    required this.trend,
++    required this.rows,
++  });
++
++  factory ReportData.empty() => const ReportData(
++        totalValue: 0,
++        transactionCount: 0,
++        averagePerTransaction: 0,
++        averagePerDay: 0,
++        trend: [],
++        rows: [],
++      );
++}
+diff --git a/lib/features/laporan/presentation/laporan_screen.dart b/lib/features/laporan/presentation/laporan_screen.dart
+new file mode 100644
+index 0000000..b1cdbaf
+--- /dev/null
++++ b/lib/features/laporan/presentation/laporan_screen.dart
+@@ -0,0 +1,291 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++import 'package:intl/intl.dart';
++
++import '../../../core/theme/app_colors.dart';
++import '../../../core/theme/app_spacing.dart';
++import '../../../core/utils/currency.dart';
++import '../../../core/widgets/ios_page_header.dart';
++import '../application/laporan_provider.dart';
++import '../domain/laporan_models.dart';
++import 'widgets/month_picker_sheet.dart';
++import 'widgets/report_trend_chart.dart';
++import 'widgets/report_type_picker_sheet.dart';
++
++/// Laporan (Reports) screen, ported 1:1 from the approved HTML mockup:
++/// report-type + month filter pills, a trend chart, 4 stat cards, and a
++/// transaction list. Pendapatan/Pengeluaran are fully wired to real
++/// data; Laba/Produk/Customer show a "Segera Hadir" placeholder body
++/// (selectable in the picker, matching the mockup, but with no designed
++/// report content yet).
++class LaporanScreen extends ConsumerWidget {
++  const LaporanScreen({super.key});
++
++  @override
++  Widget build(BuildContext context, WidgetRef ref) {
++    final state = ref.watch(laporanProvider);
++    final controller = ref.read(laporanProvider.notifier);
++    final isIncome = state.reportType == ReportType.pendapatan;
++    final accentColor = isIncome ? AppColors.info : AppColors.danger;
++
++    return Scaffold(
++      backgroundColor: AppColors.background,
++      body: SafeArea(
++        child: Column(
++          children: [
++            IosPageHeader(
++              title: const Text('Laporan'),
++              trailingIcon: Icons.more_horiz_rounded,
++              onTrailingTap: () => _openTypePicker(context, ref),
++            ),
++            Padding(
++              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
++              child: Row(
++                children: [
++                  Expanded(
++                    child: _FilterPill(
++                      icon: isIncome ? Icons.trending_up_rounded : Icons.trending_down_rounded,
++                      iconColor: accentColor,
++                      label: state.reportType.label,
++                      onTap: () => _openTypePicker(context, ref),
++                    ),
++                  ),
++                  const SizedBox(width: AppSpacing.sm),
++                  _FilterPill(
++                    label: DateFormat('MMM yyyy', 'id_ID').format(state.selectedMonth),
++                    onTap: () => showModalBottomSheet(
++                      context: context,
++                      builder: (_) => MonthPickerSheet(current: state.selectedMonth, onSelect: controller.setMonth),
++                    ),
++                  ),
++                ],
++              ),
++            ),
++            const SizedBox(height: AppSpacing.lg),
++            Expanded(
++              child: state.isLoading
++                  ? Center(child: CircularProgressIndicator(color: accentColor))
++                  : !state.reportType.isImplemented
++                      ? const _ComingSoonBody()
++                      : _ReportBody(state: state, accentColor: accentColor),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++
++  void _openTypePicker(BuildContext context, WidgetRef ref) {
++    final controller = ref.read(laporanProvider.notifier);
++    showModalBottomSheet(
++      context: context,
++      backgroundColor: Colors.transparent,
++      builder: (_) => ReportTypePickerSheet(
++        current: ref.read(laporanProvider).reportType,
++        onSelect: controller.setReportType,
++      ),
++    );
++  }
++}
++
++class _FilterPill extends StatelessWidget {
++  final IconData? icon;
++  final Color? iconColor;
++  final String label;
++  final VoidCallback onTap;
++
++  const _FilterPill({this.icon, this.iconColor, required this.label, required this.onTap});
++
++  @override
++  Widget build(BuildContext context) {
++    return InkWell(
++      onTap: onTap,
++      borderRadius: BorderRadius.circular(AppRadius.pill),
++      child: Container(
++        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.md),
++        decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.pill)),
++        child: Row(
++          mainAxisAlignment: MainAxisAlignment.center,
++          children: [
++            if (icon != null) ...[
++              Container(
++                width: 26,
++                height: 26,
++                decoration: BoxDecoration(color: (iconColor ?? AppColors.textSecondary).withValues(alpha: 0.12), shape: BoxShape.circle),
++                child: Icon(icon, size: 15, color: iconColor),
++              ),
++              const SizedBox(width: AppSpacing.sm),
++            ],
++            Flexible(
++              child: Text(
++                label,
++                overflow: TextOverflow.ellipsis,
++                style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
++              ),
++            ),
++            const SizedBox(width: 4),
++            const Icon(Icons.keyboard_arrow_down_rounded, size: 18, color: AppColors.textMuted),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++class _ReportBody extends StatelessWidget {
++  final LaporanState state;
++  final Color accentColor;
++  const _ReportBody({required this.state, required this.accentColor});
++
++  @override
++  Widget build(BuildContext context) {
++    final data = state.data;
++    final isIncome = state.reportType == ReportType.pendapatan;
++
++    return ListView(
++      padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.xxl),
++      children: [
++        Container(
++          padding: const EdgeInsets.all(AppSpacing.lg),
++          decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.xl)),
++          child: ReportTrendChart(points: data.trend, color: accentColor),
++        ),
++        const SizedBox(height: AppSpacing.lg),
++        Row(
++          children: [
++            Expanded(
++              child: _StatCard(
++                icon: isIncome ? Icons.attach_money_rounded : Icons.trending_down_rounded,
++                label: isIncome ? 'Pendapatan' : 'Total Pengeluaran',
++                value: formatRupiah(data.totalValue),
++              ),
++            ),
++            const SizedBox(width: AppSpacing.md),
++            Expanded(
++              child: _StatCard(
++                icon: Icons.receipt_long_rounded,
++                label: isIncome ? 'Total Pesanan' : 'Transaksi',
++                value: '${data.transactionCount}',
++              ),
++            ),
++          ],
++        ),
++        const SizedBox(height: AppSpacing.md),
++        Row(
++          children: [
++            Expanded(
++              child: _StatCard(
++                icon: Icons.trending_up_rounded,
++                label: isIncome ? 'Rata-rata Nilai Pesanan' : 'Rata-rata per Transaksi',
++                value: formatRupiah(data.averagePerTransaction),
++              ),
++            ),
++            const SizedBox(width: AppSpacing.md),
++            Expanded(
++              child: _StatCard(
++                icon: Icons.calendar_today_rounded,
++                label: 'Rata-rata Harian',
++                value: formatRupiah(data.averagePerDay),
++              ),
++            ),
++          ],
++        ),
++        const SizedBox(height: AppSpacing.lg),
++        if (data.rows.isEmpty)
++          Padding(
++            padding: const EdgeInsets.symmetric(vertical: AppSpacing.xxl),
++            child: Center(
++              child: Text(
++                isIncome ? 'Belum ada transaksi bulan ini.' : 'Belum ada pengeluaran bulan ini.',
++                style: const TextStyle(fontSize: 13, color: AppColors.textMuted),
++              ),
++            ),
++          )
++        else
++          Container(
++            decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.lg)),
++            child: Column(
++              children: data.rows.asMap().entries.map((entry) {
++                final row = entry.value;
++                final isLast = entry.key == data.rows.length - 1;
++                return Container(
++                  decoration: BoxDecoration(border: isLast ? null : const Border(bottom: BorderSide(color: AppColors.border))),
++                  padding: const EdgeInsets.all(AppSpacing.lg),
++                  child: Row(
++                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
++                    children: [
++                      Expanded(
++                        child: Column(
++                          crossAxisAlignment: CrossAxisAlignment.start,
++                          children: [
++                            Text(row.title, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
++                            const SizedBox(height: 2),
++                            Text(row.subtitle, style: const TextStyle(fontSize: 13, color: AppColors.textMuted)),
++                          ],
++                        ),
++                      ),
++                      Text(
++                        formatRupiah(row.amount),
++                        style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: accentColor),
++                      ),
++                    ],
++                  ),
++                );
++              }).toList(),
++            ),
++          ),
++      ],
++    );
++  }
++}
++
++class _StatCard extends StatelessWidget {
++  final IconData icon;
++  final String label;
++  final String value;
++  const _StatCard({required this.icon, required this.label, required this.value});
++
++  @override
++  Widget build(BuildContext context) {
++    return Container(
++      padding: const EdgeInsets.all(AppSpacing.lg),
++      decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.lg)),
++      child: Column(
++        crossAxisAlignment: CrossAxisAlignment.start,
++        children: [
++          Row(
++            children: [
++              Icon(icon, size: 15, color: AppColors.textSecondary),
++              const SizedBox(width: 6),
++              Expanded(
++                child: Text(label, style: const TextStyle(fontSize: 12.5, color: AppColors.textSecondary), overflow: TextOverflow.ellipsis),
++              ),
++            ],
++          ),
++          const SizedBox(height: 6),
++          Text(value, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
++        ],
++      ),
++    );
++  }
++}
++
++class _ComingSoonBody extends StatelessWidget {
++  const _ComingSoonBody();
++
++  @override
++  Widget build(BuildContext context) {
++    return Center(
++      child: Column(
++        mainAxisSize: MainAxisSize.min,
++        children: [
++          const Icon(Icons.construction_rounded, size: 40, color: AppColors.textMuted),
++          const SizedBox(height: AppSpacing.md),
++          const Text('Segera Hadir', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
++          const SizedBox(height: 4),
++          const Text('Laporan ini belum tersedia.', style: TextStyle(fontSize: 13, color: AppColors.textMuted)),
++        ],
++      ),
++    );
++  }
++}
+diff --git a/lib/features/laporan/presentation/widgets/month_picker_sheet.dart b/lib/features/laporan/presentation/widgets/month_picker_sheet.dart
+new file mode 100644
+index 0000000..e61c91d
+--- /dev/null
++++ b/lib/features/laporan/presentation/widgets/month_picker_sheet.dart
+@@ -0,0 +1,62 @@
++import 'package:flutter/material.dart';
++import 'package:intl/intl.dart';
++
++import '../../../../core/theme/app_colors.dart';
++import '../../../../core/theme/app_spacing.dart';
++
++/// Month picker — the HTML mockup showed a static "Sep 2026" pill with
++/// no picker behind it; since this is a real port (not a visual-only
++/// shell), tapping it needs to actually change which month the report
++/// covers. Kept intentionally simple (prev/next month arrows) rather
++/// than a full calendar, since a report is always exactly one whole
++/// month.
++class MonthPickerSheet extends StatelessWidget {
++  final DateTime current;
++  final ValueChanged<DateTime> onSelect;
++
++  const MonthPickerSheet({super.key, required this.current, required this.onSelect});
++
++  @override
++  Widget build(BuildContext context) {
++    final now = DateTime.now();
++    return SafeArea(
++      top: false,
++      child: Container(
++        decoration: const BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.vertical(top: Radius.circular(AppRadius.xl))),
++        padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.lg, AppSpacing.xl, AppSpacing.xl),
++        child: Column(
++          mainAxisSize: MainAxisSize.min,
++          children: [
++            const Text('Pilih Bulan', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
++            const SizedBox(height: AppSpacing.lg),
++            Row(
++              mainAxisAlignment: MainAxisAlignment.spaceBetween,
++              children: [
++                IconButton(
++                  onPressed: () {
++                    onSelect(DateTime(current.year, current.month - 1, 1));
++                    Navigator.of(context).pop();
++                  },
++                  icon: const Icon(Icons.chevron_left_rounded, color: AppColors.textPrimary),
++                ),
++                Text(
++                  DateFormat('MMMM yyyy', 'id_ID').format(current),
++                  style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
++                ),
++                IconButton(
++                  onPressed: current.year == now.year && current.month == now.month
++                      ? null
++                      : () {
++                          onSelect(DateTime(current.year, current.month + 1, 1));
++                          Navigator.of(context).pop();
++                        },
++                  icon: const Icon(Icons.chevron_right_rounded, color: AppColors.textPrimary),
++                ),
++              ],
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
+diff --git a/lib/features/laporan/presentation/widgets/report_trend_chart.dart b/lib/features/laporan/presentation/widgets/report_trend_chart.dart
+new file mode 100644
+index 0000000..79e7e8d
+--- /dev/null
++++ b/lib/features/laporan/presentation/widgets/report_trend_chart.dart
+@@ -0,0 +1,153 @@
++import 'package:flutter/material.dart';
++
++import '../../../../core/theme/app_colors.dart';
++import '../../domain/laporan_models.dart';
++
++/// Line + area-fill trend chart, ported from the HTML mockup's SVG
++/// (`series-line` / `series-area` paths). Color is passed in so the same
++/// chart shape serves both Pendapatan (info blue) and Pengeluaran
++/// (danger red), matching the mockup's per-report-type accent.
++class ReportTrendChart extends StatelessWidget {
++  final List<ReportTrendPoint> points;
++  final Color color;
++
++  const ReportTrendChart({super.key, required this.points, required this.color});
++
++  @override
++  Widget build(BuildContext context) {
++    if (points.isEmpty) return const SizedBox.shrink();
++
++    final maxValue = points.map((p) => p.value).fold<int>(0, (a, b) => a > b ? a : b);
++    // Round the axis ceiling up to a "nice" step so gridline labels read
++    // like the mockup's "Rp 60.0K" style rather than an arbitrary max.
++    final axisMax = _niceCeiling(maxValue);
++
++    return SizedBox(
++      height: 220,
++      child: Row(
++        crossAxisAlignment: CrossAxisAlignment.start,
++        children: [
++          _YAxisLabels(axisMax: axisMax),
++          const SizedBox(width: 8),
++          Expanded(
++            child: CustomPaint(
++              painter: _ReportChartPainter(points: points, color: color, axisMax: axisMax),
++              size: Size.infinite,
++            ),
++          ),
++        ],
++      ),
++    );
++  }
++
++  int _niceCeiling(int value) {
++    if (value <= 0) return 10000;
++    final magnitude = value < 100000 ? 10000 : 20000;
++    return ((value / magnitude).ceil() * magnitude).clamp(magnitude, 1 << 30);
++  }
++}
++
++class _YAxisLabels extends StatelessWidget {
++  final int axisMax;
++  const _YAxisLabels({required this.axisMax});
++
++  @override
++  Widget build(BuildContext context) {
++    final steps = 4;
++    return SizedBox(
++      width: 52,
++      height: 190,
++      child: Column(
++        mainAxisAlignment: MainAxisAlignment.spaceBetween,
++        crossAxisAlignment: CrossAxisAlignment.end,
++        children: List.generate(steps + 1, (i) {
++          final value = axisMax - (axisMax / steps * i);
++          return Text(
++            _formatShort(value.round()),
++            style: const TextStyle(fontSize: 10, color: AppColors.textMuted),
++          );
++        }),
++      ),
++    );
++  }
++
++  String _formatShort(int value) {
++    if (value == 0) return 'Rp 0';
++    if (value >= 1000) return 'Rp ${(value / 1000).toStringAsFixed(1)}K';
++    return 'Rp $value';
++  }
++}
++
++class _ReportChartPainter extends CustomPainter {
++  final List<ReportTrendPoint> points;
++  final Color color;
++  final int axisMax;
++
++  _ReportChartPainter({required this.points, required this.color, required this.axisMax});
++
++  @override
++  void paint(Canvas canvas, Size size) {
++    const chartTop = 10.0;
++    final chartBottom = size.height - 30;
++    final stepX = points.length > 1 ? size.width / (points.length - 1) : size.width;
++
++    final gridPaint = Paint()
++      ..color = AppColors.border
++      ..strokeWidth = 1;
++    for (var i = 0; i <= 4; i++) {
++      final y = chartTop + (chartBottom - chartTop) / 4 * i;
++      canvas.drawLine(Offset(0, y), Offset(size.width, y), gridPaint);
++    }
++
++    Offset pointAt(int i) {
++      final x = stepX * i;
++      final y = chartBottom - (points[i].value / axisMax).clamp(0, 1) * (chartBottom - chartTop);
++      return Offset(x, y);
++    }
++
++    final linePath = Path();
++    final areaPath = Path();
++    for (var i = 0; i < points.length; i++) {
++      final p = pointAt(i);
++      if (i == 0) {
++        linePath.moveTo(p.dx, p.dy);
++        areaPath.moveTo(p.dx, chartBottom);
++        areaPath.lineTo(p.dx, p.dy);
++      } else {
++        linePath.lineTo(p.dx, p.dy);
++        areaPath.lineTo(p.dx, p.dy);
++      }
++    }
++    areaPath.lineTo(pointAt(points.length - 1).dx, chartBottom);
++    areaPath.close();
++
++    canvas.drawPath(areaPath, Paint()..color = color.withValues(alpha: 0.08));
++    canvas.drawPath(
++      linePath,
++      Paint()
++        ..color = color
++        ..strokeWidth = 2.6
++        ..style = PaintingStyle.stroke
++        ..strokeCap = StrokeCap.round
++        ..strokeJoin = StrokeJoin.round,
++    );
++
++    // X-axis day labels — sparse (every ~1/5th) to avoid crowding, same
++    // spirit as the mockup's "1 3 5 7 9 11" tick marks.
++    final labelPainter = TextPainter(textDirection: TextDirection.ltr);
++    final labelInterval = (points.length / 6).ceil().clamp(1, points.length);
++    for (var i = 0; i < points.length; i += labelInterval) {
++      final p = pointAt(i);
++      labelPainter.text = TextSpan(
++        text: '${points[i].day}',
++        style: const TextStyle(fontSize: 10, color: AppColors.textMuted),
++      );
++      labelPainter.layout();
++      labelPainter.paint(canvas, Offset(p.dx - labelPainter.width / 2, chartBottom + 12));
++    }
++  }
++
++  @override
++  bool shouldRepaint(covariant _ReportChartPainter oldDelegate) =>
++      oldDelegate.points != points || oldDelegate.color != color;
++}
+diff --git a/lib/features/laporan/presentation/widgets/report_type_picker_sheet.dart b/lib/features/laporan/presentation/widgets/report_type_picker_sheet.dart
+new file mode 100644
+index 0000000..1cb1565
+--- /dev/null
++++ b/lib/features/laporan/presentation/widgets/report_type_picker_sheet.dart
+@@ -0,0 +1,91 @@
++import 'package:flutter/material.dart';
++
++import '../../../../core/theme/app_colors.dart';
++import '../../../../core/theme/app_spacing.dart';
++import '../../domain/laporan_models.dart';
++
++/// "Pilih Jenis Laporan" picker, ported 1:1 from the HTML mockup: a
++/// bottom sheet with a close button and one row per [ReportType], each
++/// with a circular icon and a checkmark on the selected one.
++class ReportTypePickerSheet extends StatelessWidget {
++  final ReportType current;
++  final ValueChanged<ReportType> onSelect;
++
++  const ReportTypePickerSheet({super.key, required this.current, required this.onSelect});
++
++  static const _icons = {
++    ReportType.pendapatan: Icons.trending_up_rounded,
++    ReportType.pengeluaran: Icons.trending_down_rounded,
++    ReportType.laba: Icons.account_balance_wallet_outlined,
++    ReportType.produk: Icons.inventory_2_outlined,
++    ReportType.customer: Icons.people_alt_outlined,
++  };
++
++  @override
++  Widget build(BuildContext context) {
++    return SafeArea(
++      top: false,
++      child: Container(
++        decoration: const BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.vertical(top: Radius.circular(AppRadius.xl))),
++        child: Column(
++          mainAxisSize: MainAxisSize.min,
++          children: [
++            Padding(
++              padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.lg, AppSpacing.lg, AppSpacing.md),
++              child: Row(
++                mainAxisAlignment: MainAxisAlignment.spaceBetween,
++                children: [
++                  const Text('Pilih Jenis Laporan', style: TextStyle(fontSize: 19, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
++                  Material(
++                    color: AppColors.background,
++                    shape: const CircleBorder(),
++                    child: InkWell(
++                      onTap: () => Navigator.of(context).pop(),
++                      customBorder: const CircleBorder(),
++                      child: const SizedBox(
++                        width: 36,
++                        height: 36,
++                        child: Icon(Icons.close_rounded, size: 18, color: AppColors.textSecondary),
++                      ),
++                    ),
++                  ),
++                ],
++              ),
++            ),
++            ...ReportType.values.map((type) {
++              final isSelected = type == current;
++              return InkWell(
++                onTap: () {
++                  onSelect(type);
++                  Navigator.of(context).pop();
++                },
++                child: Container(
++                  decoration: const BoxDecoration(border: Border(top: BorderSide(color: AppColors.border))),
++                  padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.lg),
++                  child: Row(
++                    children: [
++                      Container(
++                        width: 40,
++                        height: 40,
++                        decoration: BoxDecoration(
++                          color: isSelected ? AppColors.info.withValues(alpha: 0.12) : AppColors.background,
++                          shape: BoxShape.circle,
++                        ),
++                        child: Icon(_icons[type], size: 19, color: isSelected ? AppColors.info : AppColors.textSecondary),
++                      ),
++                      const SizedBox(width: AppSpacing.md),
++                      Expanded(
++                        child: Text(type.label, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
++                      ),
++                      if (isSelected) const Icon(Icons.check_rounded, size: 18, color: AppColors.textPrimary),
++                    ],
++                  ),
++                ),
++              );
++            }),
++          ],
++        ),
++      ),
++    );
++  }
++}
+diff --git a/lib/features/menu_shell/presentation/menu_grid_items.dart b/lib/features/menu_shell/presentation/menu_grid_items.dart
+index 4f8b1d0..c492935 100644
+--- a/lib/features/menu_shell/presentation/menu_grid_items.dart
++++ b/lib/features/menu_shell/presentation/menu_grid_items.dart
+@@ -4,7 +4,10 @@ import '../../../core/navigation/app_nav.dart';
+ import '../../../core/theme/app_colors.dart';
+ import '../../../core/widgets/placeholder_screen.dart';
+ import '../../dompet/presentation/dompet_screen.dart';
++import '../../hpp_opname/presentation/hpp_opname_screen.dart';
++import '../../laporan/presentation/laporan_screen.dart';
+ import '../../menu_management/presentation/menu_management_screen.dart';
++import '../../pengaturan/presentation/pengaturan_screen.dart';
+ 
+ /// One tile in the swipe-up menu's 3x3 grid.
+ class MenuGridItem {
+@@ -76,9 +79,24 @@ List<MenuGridItem> buildMenuGridItems({
+     placeholderTile(label: 'Laba Rugi', icon: Icons.receipt_long_rounded, color: AppColors.tileLabaRugi),
+     placeholderTile(label: 'Kas', icon: Icons.compare_arrows_rounded, color: AppColors.tileKas),
+     placeholderTile(label: 'Pelanggan', icon: Icons.people_alt_rounded, color: AppColors.tilePelanggan),
+-    placeholderTile(label: 'Laporan', icon: Icons.pie_chart_rounded, color: AppColors.tileLaporan),
++    MenuGridItem(
++      label: 'Laporan',
++      icon: Icons.pie_chart_rounded,
++      color: AppColors.tileLaporan,
++      onTap: () => pushDestination((_) => const LaporanScreen()),
++    ),
+     placeholderTile(label: 'Staff', icon: Icons.badge_rounded, color: AppColors.tileStaff),
+-    placeholderTile(label: 'HPP', icon: Icons.calculate_rounded, color: AppColors.tileHpp),
+-    placeholderTile(label: 'Pengaturan', icon: Icons.settings_rounded, color: AppColors.tilePengaturan),
++    MenuGridItem(
++      label: 'HPP',
++      icon: Icons.calculate_rounded,
++      color: AppColors.tileHpp,
++      onTap: () => pushDestination((_) => const HppOpnameScreen()),
++    ),
++    MenuGridItem(
++      label: 'Pengaturan',
++      icon: Icons.settings_rounded,
++      color: AppColors.tilePengaturan,
++      onTap: () => pushDestination((_) => const PengaturanScreen()),
++    ),
+   ];
+ }
+diff --git a/lib/features/pengaturan/application/auto_print_provider.dart b/lib/features/pengaturan/application/auto_print_provider.dart
+new file mode 100644
+index 0000000..957ed7e
+--- /dev/null
++++ b/lib/features/pengaturan/application/auto_print_provider.dart
+@@ -0,0 +1,32 @@
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++import 'package:shared_preferences/shared_preferences.dart';
++
++/// Persists the "Cetak Struk Otomatis" toggle shown in Pengaturan, same
++/// plain-SharedPreferences pattern as [KasirGridColumnsController] (a UI
++/// preference, not business data). The setting itself has no printer to
++/// act on yet (no Bluetooth printer library wired up — see Pengaturan's
++/// "Printer Bluetooth" row), so this only persists the user's choice for
++/// whenever that feature lands.
++const _prefKey = 'auto_print_receipt';
++const _defaultValue = false;
++
++final autoPrintReceiptProvider = StateNotifierProvider<AutoPrintReceiptController, bool>((ref) {
++  return AutoPrintReceiptController();
++});
++
++class AutoPrintReceiptController extends StateNotifier<bool> {
++  AutoPrintReceiptController() : super(_defaultValue) {
++    _load();
++  }
++
++  Future<void> _load() async {
++    final prefs = await SharedPreferences.getInstance();
++    state = prefs.getBool(_prefKey) ?? _defaultValue;
++  }
++
++  Future<void> toggle() async {
++    state = !state;
++    final prefs = await SharedPreferences.getInstance();
++    await prefs.setBool(_prefKey, state);
++  }
++}
+diff --git a/lib/features/pengaturan/presentation/pengaturan_screen.dart b/lib/features/pengaturan/presentation/pengaturan_screen.dart
+new file mode 100644
+index 0000000..56704f7
+--- /dev/null
++++ b/lib/features/pengaturan/presentation/pengaturan_screen.dart
+@@ -0,0 +1,333 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../../../core/navigation/app_nav.dart';
++import '../../../core/theme/app_colors.dart';
++import '../../../core/theme/app_spacing.dart';
++import '../../../core/widgets/ios_page_header.dart';
++import '../../../core/widgets/placeholder_screen.dart';
++import '../../auth/presentation/pin_login_screen.dart';
++import '../application/auto_print_provider.dart';
++
++/// Pengaturan (Settings) screen, ported 1:1 from the approved HTML
++/// mockup's layout (account card + grouped rows). Per that mockup's
++/// scope, Bahasa/Mata Uang/Pajak and the Bantuan & Legal group were
++/// explicitly removed and are not reproduced here.
++///
++/// Rows fall into three buckets:
++/// - Real and wired: Cetak Struk Otomatis (SharedPreferences), Keluar
++///   Akun (returns to PIN login).
++/// - Real status, no action yet: Status Sinkronisasi (this app is
++///   local-first with no cloud sync built — shown as "Tidak aktif"
++///   rather than inventing a sync state), Printer Bluetooth (no
++///   Bluetooth library wired up yet — shown as "Tidak tersambung").
++/// - Not yet built, routed to [PlaceholderScreen]: Kelola Karyawan (no
++///   Staff module exists), Backup & Restore (no such feature exists).
++/// Keamanan PIN links to the existing PIN login flow's settings — since
++/// there is no separate "change PIN" screen yet, it also routes to a
++/// placeholder rather than inventing one.
++class PengaturanScreen extends ConsumerWidget {
++  const PengaturanScreen({super.key});
++
++  @override
++  Widget build(BuildContext context, WidgetRef ref) {
++    final autoPrint = ref.watch(autoPrintReceiptProvider);
++
++    return Scaffold(
++      backgroundColor: AppColors.background,
++      body: SafeArea(
++        child: Column(
++          children: [
++            const IosPageHeader(title: Text('Pengaturan')),
++            Expanded(
++              child: ListView(
++                padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, AppSpacing.xxl),
++                children: [
++                  const _AccountCard(),
++                  const SizedBox(height: AppSpacing.xl),
++                  const _GroupLabel('Akun & Keamanan'),
++                  _GroupCard(
++                    children: [
++                      _SettingsRow(
++                        icon: Icons.lock_outline_rounded,
++                        label: 'Keamanan PIN',
++                        onTap: () => AppNav.push(
++                          context,
++                          (_) => const PlaceholderScreen(
++                            title: 'Keamanan PIN',
++                            icon: Icons.lock_outline_rounded,
++                            accentColor: AppColors.textPrimary,
++                            description: 'Pengaturan ganti PIN akan segera hadir.',
++                          ),
++                        ),
++                      ),
++                      _SettingsRow(
++                        icon: Icons.people_alt_outlined,
++                        label: 'Kelola Karyawan',
++                        onTap: () => AppNav.push(
++                          context,
++                          (_) => const PlaceholderScreen(
++                            title: 'Kelola Karyawan',
++                            icon: Icons.people_alt_outlined,
++                            accentColor: AppColors.tileStaff,
++                            description: 'Manajemen karyawan & role akan segera hadir.',
++                          ),
++                        ),
++                      ),
++                      _SettingsRow(
++                        icon: Icons.sync_rounded,
++                        label: 'Status Sinkronisasi',
++                        trailingText: 'Tidak aktif',
++                        onTap: () => AppNav.push(
++                          context,
++                          (_) => const PlaceholderScreen(
++                            title: 'Status Sinkronisasi',
++                            icon: Icons.sync_rounded,
++                            accentColor: AppColors.textMuted,
++                            description: 'Aplikasi ini berjalan local-first. Sinkronisasi cloud belum tersedia.',
++                          ),
++                        ),
++                      ),
++                    ],
++                  ),
++                  const SizedBox(height: AppSpacing.xl),
++                  const _GroupLabel('Perangkat'),
++                  _GroupCard(
++                    children: [
++                      _SettingsRow(
++                        icon: Icons.bluetooth_rounded,
++                        label: 'Printer Bluetooth',
++                        trailingText: 'Tidak tersambung',
++                        onTap: () => AppNav.push(
++                          context,
++                          (_) => const PlaceholderScreen(
++                            title: 'Printer Bluetooth',
++                            icon: Icons.bluetooth_rounded,
++                            accentColor: AppColors.info,
++                            description: 'Koneksi printer struk thermal akan segera hadir.',
++                          ),
++                        ),
++                      ),
++                      _SettingsRow(
++                        icon: Icons.receipt_long_rounded,
++                        label: 'Cetak Struk Otomatis',
++                        trailing: Switch(
++                          value: autoPrint,
++                          onChanged: (_) => ref.read(autoPrintReceiptProvider.notifier).toggle(),
++                          activeColor: AppColors.brand,
++                        ),
++                      ),
++                    ],
++                  ),
++                  const SizedBox(height: AppSpacing.xl),
++                  const _GroupLabel('Data & Backup'),
++                  _GroupCard(
++                    children: [
++                      _SettingsRow(
++                        icon: Icons.cloud_upload_outlined,
++                        label: 'Backup & Restore',
++                        onTap: () => AppNav.push(
++                          context,
++                          (_) => const PlaceholderScreen(
++                            title: 'Backup & Restore',
++                            icon: Icons.cloud_upload_outlined,
++                            accentColor: AppColors.info,
++                            description: 'Backup & restore data akan segera hadir.',
++                          ),
++                        ),
++                      ),
++                    ],
++                  ),
++                  const SizedBox(height: AppSpacing.xl),
++                  _GroupCard(
++                    children: [
++                      _SettingsRow(
++                        icon: Icons.logout_rounded,
++                        label: 'Keluar Akun',
++                        labelColor: AppColors.danger,
++                        iconColor: AppColors.danger,
++                        showTrailingChevron: false,
++                        onTap: () => _confirmLogout(context),
++                      ),
++                    ],
++                  ),
++                  const SizedBox(height: AppSpacing.lg),
++                  const Center(
++                    child: Text('Mamam Kasir v1.0.0 (build 1)', style: TextStyle(fontSize: 12.5, color: AppColors.textMuted)),
++                  ),
++                ],
++              ),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++
++  void _confirmLogout(BuildContext context) {
++    showDialog(
++      context: context,
++      builder: (dialogContext) => AlertDialog(
++        title: const Text('Keluar Akun?'),
++        content: const Text('Anda akan kembali ke halaman login PIN.'),
++        actions: [
++          TextButton(onPressed: () => Navigator.of(dialogContext).pop(), child: const Text('Batal')),
++          TextButton(
++            onPressed: () {
++              Navigator.of(dialogContext).pop();
++              Navigator.of(context).pushAndRemoveUntil(
++                MaterialPageRoute(builder: (_) => const PinLoginScreen()),
++                (route) => false,
++              );
++            },
++            child: const Text('Keluar', style: TextStyle(color: AppColors.danger)),
++          ),
++        ],
++      ),
++    );
++  }
++}
++
++/// Account card — name + role badge + email, matching the mockup. Name/
++/// email/role are static placeholders (no Staff/Auth module exists to
++/// read a real logged-in identity from — same limitation noted on
++/// [SessionUser] in the dashboard feature), shown here rather than left
++/// blank so the card isn't empty; swap in real fields once that module
++/// lands.
++class _AccountCard extends StatelessWidget {
++  const _AccountCard();
++
++  @override
++  Widget build(BuildContext context) {
++    return Container(
++      padding: const EdgeInsets.all(AppSpacing.lg),
++      decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.lg)),
++      child: Row(
++        children: [
++          Container(
++            width: 52,
++            height: 52,
++            decoration: const BoxDecoration(color: AppColors.textPrimary, shape: BoxShape.circle),
++            child: const Icon(Icons.person_outline_rounded, color: Colors.white, size: 24),
++          ),
++          const SizedBox(width: AppSpacing.md),
++          Expanded(
++            child: Column(
++              crossAxisAlignment: CrossAxisAlignment.start,
++              children: [
++                Row(
++                  children: [
++                    const Flexible(
++                      child: Text('Mamam Ayam', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: AppColors.textPrimary), overflow: TextOverflow.ellipsis),
++                    ),
++                    const SizedBox(width: AppSpacing.sm),
++                    Container(
++                      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
++                      decoration: BoxDecoration(color: AppColors.textPrimary, borderRadius: BorderRadius.circular(AppRadius.pill)),
++                      child: const Text('PEMILIK', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: Colors.white, letterSpacing: 0.3)),
++                    ),
++                  ],
++                ),
++                const SizedBox(height: 2),
++                const Text('mamamayamindonesia@gmail.com', style: TextStyle(fontSize: 13, color: AppColors.textMuted), overflow: TextOverflow.ellipsis),
++              ],
++            ),
++          ),
++        ],
++      ),
++    );
++  }
++}
++
++class _GroupLabel extends StatelessWidget {
++  final String text;
++  const _GroupLabel(this.text);
++
++  @override
++  Widget build(BuildContext context) {
++    return Padding(
++      padding: const EdgeInsets.only(bottom: AppSpacing.sm, left: 4),
++      child: Text(
++        text.toUpperCase(),
++        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.textMuted, letterSpacing: 0.5),
++      ),
++    );
++  }
++}
++
++class _GroupCard extends StatelessWidget {
++  final List<Widget> children;
++  const _GroupCard({required this.children});
++
++  @override
++  Widget build(BuildContext context) {
++    return Container(
++      decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.lg)),
++      child: Column(
++        children: children.asMap().entries.map((entry) {
++          final isLast = entry.key == children.length - 1;
++          return Container(
++            decoration: BoxDecoration(border: isLast ? null : const Border(bottom: BorderSide(color: AppColors.border))),
++            child: entry.value,
++          );
++        }).toList(),
++      ),
++    );
++  }
++}
++
++class _SettingsRow extends StatelessWidget {
++  final IconData icon;
++  final String label;
++  final Color? labelColor;
++  final Color? iconColor;
++  final String? trailingText;
++  final Widget? trailing;
++  final bool showTrailingChevron;
++  final VoidCallback? onTap;
++
++  const _SettingsRow({
++    required this.icon,
++    required this.label,
++    this.labelColor,
++    this.iconColor,
++    this.trailingText,
++    this.trailing,
++    this.showTrailingChevron = true,
++    this.onTap,
++  });
++
++  @override
++  Widget build(BuildContext context) {
++    return InkWell(
++      onTap: onTap,
++      child: Padding(
++        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.md),
++        child: Row(
++          children: [
++            Container(
++              width: 34,
++              height: 34,
++              decoration: const BoxDecoration(color: AppColors.background, shape: BoxShape.circle),
++              child: Icon(icon, size: 17, color: iconColor ?? AppColors.textSecondary),
++            ),
++            const SizedBox(width: AppSpacing.md),
++            Expanded(
++              child: Text(
++                label,
++                style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: labelColor ?? AppColors.textPrimary),
++              ),
++            ),
++            if (trailingText != null) ...[
++              Text(trailingText!, style: const TextStyle(fontSize: 13.5, color: AppColors.textMuted)),
++              const SizedBox(width: 4),
++            ],
++            if (trailing != null) trailing!,
++            if (trailing == null && showTrailingChevron)
++              const Icon(Icons.chevron_right_rounded, size: 18, color: AppColors.textMuted),
++          ],
++        ),
++      ),
++    );
++  }
++}

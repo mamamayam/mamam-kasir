@@ -4,7 +4,10 @@ import '../../../core/navigation/app_nav.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/widgets/placeholder_screen.dart';
 import '../../dompet/presentation/dompet_screen.dart';
+import '../../hpp_opname/presentation/hpp_opname_screen.dart';
+import '../../laporan/presentation/laporan_screen.dart';
 import '../../menu_management/presentation/menu_management_screen.dart';
+import '../../pengaturan/presentation/pengaturan_screen.dart';
 
 /// One tile in the swipe-up menu's 3x3 grid.
 class MenuGridItem {
@@ -76,9 +79,24 @@ List<MenuGridItem> buildMenuGridItems({
     placeholderTile(label: 'Laba Rugi', icon: Icons.receipt_long_rounded, color: AppColors.tileLabaRugi),
     placeholderTile(label: 'Kas', icon: Icons.compare_arrows_rounded, color: AppColors.tileKas),
     placeholderTile(label: 'Pelanggan', icon: Icons.people_alt_rounded, color: AppColors.tilePelanggan),
-    placeholderTile(label: 'Laporan', icon: Icons.pie_chart_rounded, color: AppColors.tileLaporan),
+    MenuGridItem(
+      label: 'Laporan',
+      icon: Icons.pie_chart_rounded,
+      color: AppColors.tileLaporan,
+      onTap: () => pushDestination((_) => const LaporanScreen()),
+    ),
     placeholderTile(label: 'Staff', icon: Icons.badge_rounded, color: AppColors.tileStaff),
-    placeholderTile(label: 'HPP', icon: Icons.calculate_rounded, color: AppColors.tileHpp),
-    placeholderTile(label: 'Pengaturan', icon: Icons.settings_rounded, color: AppColors.tilePengaturan),
+    MenuGridItem(
+      label: 'HPP',
+      icon: Icons.calculate_rounded,
+      color: AppColors.tileHpp,
+      onTap: () => pushDestination((_) => const HppOpnameScreen()),
+    ),
+    MenuGridItem(
+      label: 'Pengaturan',
+      icon: Icons.settings_rounded,
+      color: AppColors.tilePengaturan,
+      onTap: () => pushDestination((_) => const PengaturanScreen()),
+    ),
   ];
 }
