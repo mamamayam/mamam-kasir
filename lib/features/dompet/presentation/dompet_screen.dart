@@ -1,12 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/navigation/app_nav.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_spacing.dart';
 import '../../../core/utils/currency.dart';
 import '../../../core/widgets/ios_page_header.dart';
 import '../application/dompet_provider.dart';
 import '../domain/dompet_models.dart';
+import 'dompet_closing_screen.dart';
 import 'widgets/cash_movement_tile.dart';
 import 'widgets/courier_outstanding_card.dart';
 
@@ -14,10 +16,8 @@ import 'widgets/courier_outstanding_card.dart';
 /// tile. Shows saldo, the PRD-mandated three-category summary (Uang di
 /// Dompet / Uang di Kurir / Kasbon Staff, deliberately never summed
 /// together — PRD §23), outstanding courier cash needing resolution,
-/// and recent cash activity.
-///
-/// Closing/"Tutup Dompet" is NOT part of this screen — that lands once
-/// Shift exists, see [[dompet-prd]].
+/// recent cash activity, and a "Tutup Dompet" entry point (header
+/// trailing icon) into [DompetClosingScreen].
 class DompetScreen extends ConsumerWidget {
   const DompetScreen({super.key});
 
@@ -34,7 +34,14 @@ class DompetScreen extends ConsumerWidget {
 
     return Scaffold(
       backgroundColor: AppColors.background,
-      appBar: IosPageHeader(title: const Text('Dompet')),
+      appBar: IosPageHeader(
+        title: const Text('Dompet'),
+        trailingIcon: Icons.lock_clock_rounded,
+        onTrailingTap: () async {
+          await AppNav.push(context, (_) => const DompetClosingScreen());
+          controller.load();
+        },
+      ),
       body: SafeArea(
         top: false,
         child: state.isLoading
@@ -49,6 +56,10 @@ class DompetScreen extends ConsumerWidget {
                     _SaldoCard(summary: state.summary),
                     const SizedBox(height: AppSpacing.lg),
                     _RingkasanRow(summary: state.summary),
+                    if (state.lastClosing != null) ...[
+                      const SizedBox(height: AppSpacing.sm),
+                      _LastClosingNote(closing: state.lastClosing!),
+                    ],
                     if (state.summary != null && state.summary!.courierBalances.isNotEmpty) ...[
                       const SizedBox(height: AppSpacing.xl),
                       const _SectionLabel(text: 'UANG DI KURIR'),
@@ -208,5 +219,33 @@ class _SectionLabel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Text(text, style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w800, color: AppColors.textMuted, letterSpacing: 0.5));
+  }
+}
+
+class _LastClosingNote extends StatelessWidget {
+  final DompetClosing closing;
+  const _LastClosingNote({required this.closing});
+
+  @override
+  Widget build(BuildContext context) {
+    final isOverdue = closing.status == DompetClosingStatus.overdueClosing;
+    final label = isOverdue ? 'Tutup Dompet terakhir (overdue)' : 'Tutup Dompet terakhir';
+    return Row(
+      children: [
+        Icon(Icons.history_rounded, size: 13, color: AppColors.textMuted),
+        const SizedBox(width: 4),
+        Expanded(
+          child: Text(
+            '$label · ${_formatDate(closing.periodEnd)}',
+            style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: isOverdue ? AppColors.warning : AppColors.textMuted),
+          ),
+        ),
+      ],
+    );
+  }
+
+  String _formatDate(DateTime dt) {
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
+    return '${dt.day} ${months[dt.month - 1]}, ${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
   }
 }

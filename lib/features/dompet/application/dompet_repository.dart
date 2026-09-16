@@ -104,7 +104,7 @@ class DompetRepository {
   CashMovement _movementFromRow(Map<String, Object?> row) {
     return CashMovement(
       id: row['id'] as String,
-      type: CashMovementType.values.firstWhere((t) => t.name == row['type'], orElse: () => CashMovementType.adjustment),
+      type: CashMovementType.fromDbValue(row['type'] as String),
       fromLocationId: row['from_location_id'] as String?,
       toLocationId: row['to_location_id'] as String?,
       amount: row['amount'] as int,
@@ -130,7 +130,7 @@ class DompetRepository {
     final db = await _db;
     await db.insert('cash_movements', {
       'id': _uuid.v4(),
-      'type': CashMovementType.cashSale.name,
+      'type': CashMovementType.cashSale.dbValue,
       'from_location_id': null,
       'to_location_id': toLocationId,
       'amount': amount,
@@ -153,7 +153,7 @@ class DompetRepository {
     final db = await _db;
     await db.insert('cash_movements', {
       'id': _uuid.v4(),
-      'type': CashMovementType.courierDeposit.name,
+      'type': CashMovementType.courierDeposit.dbValue,
       'from_location_id': courierLocationId,
       'to_location_id': 'loc-store',
       'amount': amount,
@@ -165,6 +165,72 @@ class DompetRepository {
     });
   }
 
+  /// Records a cash expense/pengeluaran movement leaving a location
+  /// (Store Cash or a courier's cash-on-hand). Used both directly and
+  /// via CashExpenseRepository (Arus Kas) for entries whose
+  /// funding_source is a real cash location — non_cash entries never
+  /// call this. Currently only Store Cash is exposed from the Arus Kas
+  /// UI; the courier param is here so a courier-funded expense is
+  /// representable in the ledger without a UI change later.
+  Future<String> recordCashExpense({
+    required String fromLocationId,
+    required int amount,
+    String? reason,
+  }) async {
+    final db = await _db;
+    final id = _uuid.v4();
+    await db.insert('cash_movements', {
+      'id': id,
+      'type': CashMovementType.expense.dbValue,
+      'from_location_id': fromLocationId,
+      'to_location_id': null,
+      'amount': amount,
+      'reference_transaction_id': null,
+      'reference_kasbon_id': null,
+      'reason': reason,
+      'created_at': DateTime.now().toIso8601String(),
+      'created_by': null,
+    });
+    return id;
+  }
+
+  /// Records a cash income movement entering a location — used for
+  /// Arus Kas "Pemasukan" entries whose funding_source is a real cash
+  /// location (e.g. capital injection, non-sales income). Distinct from
+  /// [recordCashSale], which is specifically for POS checkout sales and
+  /// carries a reference_transaction_id.
+  Future<String> recordCashIncome({
+    required String toLocationId,
+    required int amount,
+    String? reason,
+  }) async {
+    final db = await _db;
+    final id = _uuid.v4();
+    await db.insert('cash_movements', {
+      'id': id,
+      'type': CashMovementType.adjustment.dbValue,
+      'from_location_id': null,
+      'to_location_id': toLocationId,
+      'amount': amount,
+      'reference_transaction_id': null,
+      'reference_kasbon_id': null,
+      'reason': reason ?? 'Pemasukan non-penjualan',
+      'created_at': DateTime.now().toIso8601String(),
+      'created_by': null,
+    });
+    return id;
+  }
+
+  /// Deletes a cash_movement row — used only when a cash_expenses row
+  /// referencing it is deleted, to keep the two in sync. Cash movements
+  /// are otherwise immutable/never deleted (PRD §26); this is the one
+  /// exception, scoped to Arus Kas entry deletion which is itself a
+  /// user-facing "undo this entry" action, not a correction-in-place.
+  Future<void> deleteCashMovement(String movementId) async {
+    final db = await _db;
+    await db.delete('cash_movements', where: 'id = ?', whereArgs: [movementId]);
+  }
+
   // --- Kasbon ---
 
   Future<List<Kasbon>> getKasbonList({KasbonStatus? status}) async {
@@ -172,7 +238,7 @@ class DompetRepository {
     final rows = await db.query(
       'kasbon',
       where: status == null ? null : 'status = ?',
-      whereArgs: status == null ? null : [status.name],
+      whereArgs: status == null ? null : [status.dbValue],
       orderBy: 'created_at DESC',
     );
 
@@ -193,7 +259,7 @@ class DompetRepository {
       amount: row['amount'] as int,
       remainingBalance: row['remaining_balance'] as int,
       source: row['source'] as String,
-      status: KasbonStatus.values.firstWhere((s) => s.name == row['status'], orElse: () => KasbonStatus.outstanding),
+      status: KasbonStatus.fromDbValue(row['status'] as String),
       createdAt: DateTime.parse(row['created_at'] as String),
       createdBy: row['created_by'] as String?,
       repayments: repaymentRows
@@ -239,14 +305,14 @@ class DompetRepository {
       'amount': amount,
       'remaining_balance': amount,
       'source': 'Unsettled Courier Cash',
-      'status': KasbonStatus.outstanding.name,
+      'status': KasbonStatus.outstanding.dbValue,
       'created_at': now,
       'created_by': null,
     });
 
     await db.insert('cash_movements', {
       'id': _uuid.v4(),
-      'type': CashMovementType.convertToKasbon.name,
+      'type': CashMovementType.convertToKasbon.dbValue,
       'from_location_id': courierLocationId,
       'to_location_id': null,
       'amount': amount,
@@ -276,8 +342,8 @@ class DompetRepository {
     final currentRemaining = kasbonRows.first['remaining_balance'] as int;
     final newRemaining = (currentRemaining - amount).clamp(0, currentRemaining);
     final newStatus = newRemaining == 0
-        ? KasbonStatus.paid.name
-        : (newRemaining < (kasbonRows.first['amount'] as int) ? KasbonStatus.partiallyPaid.name : KasbonStatus.outstanding.name);
+        ? KasbonStatus.paid.dbValue
+        : (newRemaining < (kasbonRows.first['amount'] as int) ? KasbonStatus.partiallyPaid.dbValue : KasbonStatus.outstanding.dbValue);
 
     await db.insert('kasbon_repayments', {
       'id': _uuid.v4(),
@@ -294,5 +360,142 @@ class DompetRepository {
       where: 'id = ?',
       whereArgs: [kasbonId],
     );
+  }
+
+  // --- Tutup Dompet (closing) ---
+
+  Future<List<DompetClosing>> getClosings({int limit = 50}) async {
+    final db = await _db;
+    final rows = await db.query('dompet_closings', orderBy: 'period_end DESC', limit: limit);
+    return rows.map(_closingFromRow).toList();
+  }
+
+  Future<DompetClosing?> getLastClosing() async {
+    final db = await _db;
+    final rows = await db.query('dompet_closings', orderBy: 'period_end DESC', limit: 1);
+    if (rows.isEmpty) return null;
+    return _closingFromRow(rows.first);
+  }
+
+  DompetClosing _closingFromRow(Map<String, Object?> row) {
+    return DompetClosing(
+      id: row['id'] as String,
+      periodStart: DateTime.parse(row['period_start'] as String),
+      periodEnd: DateTime.parse(row['period_end'] as String),
+      openingBalance: row['opening_balance'] as int,
+      cashSalesTotal: row['cash_sales_total'] as int,
+      courierDepositsTotal: row['courier_deposits_total'] as int,
+      cashExpensesTotal: row['cash_expenses_total'] as int,
+      expectedCash: row['expected_cash'] as int,
+      countedCash: row['counted_cash'] as int,
+      discrepancy: row['discrepancy'] as int,
+      status: DompetClosingStatusDb.fromDbValue(row['status'] as String),
+      note: row['note'] as String?,
+      createdAt: DateTime.parse(row['created_at'] as String),
+      createdBy: row['created_by'] as String?,
+    );
+  }
+
+  /// Builds a dry-run preview of closing Store Cash right now, covering
+  /// the period since the previous closing (or the beginning of the
+  /// ledger, if this is the first-ever close). Per PRD: Expected Cash =
+  /// Opening + Cash Sales + Courier Deposits - Cash Expenses, and
+  /// closing must be blocked while any courier holds outstanding cash.
+  Future<DompetClosingPreview> buildClosingPreview() async {
+    final db = await _db;
+    final lastClosing = await getLastClosing();
+    final periodStart = lastClosing?.periodEnd ?? DateTime.fromMillisecondsSinceEpoch(0);
+    final openingBalance = lastClosing?.expectedCash ?? 0;
+
+    Future<int> sumStoreMovements(CashMovementType type, {required bool asIncoming}) async {
+      final column = asIncoming ? 'to_location_id' : 'from_location_id';
+      final result = await db.rawQuery(
+        'SELECT COALESCE(SUM(amount), 0) as total FROM cash_movements '
+        'WHERE type = ? AND $column = ? AND created_at > ?',
+        [type.dbValue, 'loc-store', periodStart.toIso8601String()],
+      );
+      return result.first['total'] as int;
+    }
+
+    final cashSalesTotal = await sumStoreMovements(CashMovementType.cashSale, asIncoming: true);
+    final courierDepositsTotal = await sumStoreMovements(CashMovementType.courierDeposit, asIncoming: true);
+    final cashExpensesTotal = await sumStoreMovements(CashMovementType.expense, asIncoming: false);
+    final expectedCash = openingBalance + cashSalesTotal + courierDepositsTotal - cashExpensesTotal;
+
+    final outstandingCouriers = await getCourierBalancesWithOutstanding();
+
+    return DompetClosingPreview(
+      periodStart: periodStart,
+      openingBalance: openingBalance,
+      cashSalesTotal: cashSalesTotal,
+      courierDepositsTotal: courierDepositsTotal,
+      cashExpensesTotal: cashExpensesTotal,
+      expectedCash: expectedCash,
+      outstandingCouriers: outstandingCouriers,
+    );
+  }
+
+  /// Commits a Tutup Dompet closing. Throws a [StateError] if any
+  /// courier still has outstanding cash — per PRD, that must be
+  /// resolved (deposited or converted to kasbon) first; there is no
+  /// "close anyway" override. If [countedCash] differs from the
+  /// preview's expected cash, the difference is recorded as its own
+  /// `adjustment` cash movement so the ledger reconciles to the counted
+  /// figure going forward, and [status] reflects whether this close is
+  /// happening on time or is an [DompetClosingStatus.overdueClosing]
+  /// (shift/day not closed before midnight — never auto-closes with
+  /// guessed numbers, and the caller must pass the real counted amount
+  /// even when overdue).
+  Future<DompetClosing> closeDompet({
+    required DompetClosingPreview preview,
+    required int countedCash,
+    DompetClosingStatus status = DompetClosingStatus.closed,
+    String? note,
+  }) async {
+    if (!preview.canClose) {
+      throw StateError('Tidak bisa tutup dompet: masih ada uang kurir yang belum diselesaikan.');
+    }
+
+    final db = await _db;
+    final id = _uuid.v4();
+    final now = DateTime.now();
+    final discrepancy = countedCash - preview.expectedCash;
+
+    await db.insert('dompet_closings', {
+      'id': id,
+      'period_start': preview.periodStart.toIso8601String(),
+      'period_end': now.toIso8601String(),
+      'opening_balance': preview.openingBalance,
+      'cash_sales_total': preview.cashSalesTotal,
+      'courier_deposits_total': preview.courierDepositsTotal,
+      'cash_expenses_total': preview.cashExpensesTotal,
+      'expected_cash': preview.expectedCash,
+      'counted_cash': countedCash,
+      'discrepancy': discrepancy,
+      'status': status.dbValue,
+      'note': note,
+      'created_at': now.toIso8601String(),
+      'created_by': null,
+    });
+
+    if (discrepancy != 0) {
+      // Positive discrepancy (counted > expected) -> cash entering Store
+      // Cash; negative -> cash leaving it. Recorded as its own
+      // adjustment movement, never by editing prior movements.
+      await db.insert('cash_movements', {
+        'id': _uuid.v4(),
+        'type': CashMovementType.adjustment.dbValue,
+        'from_location_id': discrepancy < 0 ? 'loc-store' : null,
+        'to_location_id': discrepancy > 0 ? 'loc-store' : null,
+        'amount': discrepancy.abs(),
+        'reference_transaction_id': null,
+        'reference_kasbon_id': null,
+        'reason': 'Selisih Tutup Dompet',
+        'created_at': now.toIso8601String(),
+        'created_by': null,
+      });
+    }
+
+    return (await getLastClosing())!;
   }
 }

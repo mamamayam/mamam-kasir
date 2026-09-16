@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../../core/navigation/app_nav.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/widgets/placeholder_screen.dart';
+import '../../arus_kas/presentation/arus_kas_screen.dart';
 import '../../dompet/presentation/dompet_screen.dart';
 import '../../hpp_opname/presentation/hpp_opname_screen.dart';
 import '../../laporan/presentation/laporan_screen.dart';
@@ -77,7 +78,12 @@ List<MenuGridItem> buildMenuGridItems({
       onTap: () => pushDestination((_) => const MenuManagementScreen()),
     ),
     placeholderTile(label: 'Laba Rugi', icon: Icons.receipt_long_rounded, color: AppColors.tileLabaRugi),
-    placeholderTile(label: 'Kas', icon: Icons.compare_arrows_rounded, color: AppColors.tileKas),
+    MenuGridItem(
+      label: 'Kas',
+      icon: Icons.compare_arrows_rounded,
+      color: AppColors.tileKas,
+      onTap: () => pushDestination((_) => const ArusKasScreen()),
+    ),
     placeholderTile(label: 'Pelanggan', icon: Icons.people_alt_rounded, color: AppColors.tilePelanggan),
     MenuGridItem(
       label: 'Laporan',

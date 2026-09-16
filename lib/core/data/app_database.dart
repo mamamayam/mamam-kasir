@@ -49,7 +49,13 @@ class AppDatabase {
   // mockup) and seeded them with the same sample ingredient set used in
   // that mockup so the feature isn't empty on first run — same "real,
   // editable seed data" rationale as the v6 menu/transaction seeding.
-  static const _dbVersion = 7;
+  // v8: added dompet_closings (Tutup Dompet) and cash_expenses (Arus
+  // Kas / Pengeluaran, and Pemasukan non-sales income) tables. No Shift
+  // module exists yet, so a closing's period is simply "since the
+  // previous closing" rather than tied to a shift_id — see the
+  // DompetClosing model doc comment for the reconciliation note for
+  // when Shift lands. Still pre-release, straight recreate.
+  static const _dbVersion = 8;
 
   // TODO(security-foundation): replace with a key generated once and
   // stored via flutter_secure_storage, per AGENTS.md.
@@ -296,6 +302,55 @@ class AppDatabase {
         created_at TEXT NOT NULL,
         created_by TEXT,
         FOREIGN KEY (kasbon_id) REFERENCES kasbon (id)
+      )
+    ''');
+
+    // "Tutup Dompet" closings for Store Cash. One immutable row per
+    // close — never edited after creation; a wrong close is corrected
+    // with a new adjustment movement, same principle as cash_movements.
+    // periodStart/periodEnd stand in for a shift_id until the Shift
+    // module exists (see DompetClosing's doc comment).
+    await db.execute('''
+      CREATE TABLE dompet_closings (
+        id TEXT PRIMARY KEY,
+        period_start TEXT NOT NULL,
+        period_end TEXT NOT NULL,
+        opening_balance INTEGER NOT NULL,
+        cash_sales_total INTEGER NOT NULL,
+        courier_deposits_total INTEGER NOT NULL,
+        cash_expenses_total INTEGER NOT NULL,
+        expected_cash INTEGER NOT NULL,
+        counted_cash INTEGER NOT NULL,
+        discrepancy INTEGER NOT NULL,
+        status TEXT NOT NULL, -- 'closed' | 'overdue_closing'
+        note TEXT,
+        created_at TEXT NOT NULL,
+        created_by TEXT
+      )
+    ''');
+
+    // Arus Kas (Pemasukan/Pengeluaran) entries. Cash-affecting rows
+    // (sumber_dana = a real cash_location) get a matching cash_movement
+    // so Dompet balances and Arus Kas totals stay berkesinambungan
+    // (see [[mamam-kasir-flutter]] notes on the Arus Kas HTML preview);
+    // 'non_cash' rows (transfer/QRIS/etc.) intentionally have no
+    // cash_movement_id since they never touch a physical cash balance.
+    await db.execute('''
+      CREATE TABLE cash_expenses (
+        id TEXT PRIMARY KEY,
+        direction TEXT NOT NULL, -- 'pemasukan' | 'pengeluaran'
+        category TEXT NOT NULL,
+        amount INTEGER NOT NULL,
+        transaction_date TEXT NOT NULL,
+        source_location_id TEXT, -- NULL when funding_source = 'non_cash'
+        funding_source TEXT NOT NULL, -- 'cash_location' | 'non_cash'
+        store_or_supplier_name TEXT, -- Pengeluaran only
+        detail TEXT,
+        cash_movement_id TEXT, -- NULL for non_cash rows
+        created_at TEXT NOT NULL,
+        created_by TEXT,
+        FOREIGN KEY (source_location_id) REFERENCES cash_locations (id),
+        FOREIGN KEY (cash_movement_id) REFERENCES cash_movements (id)
       )
     ''');
 

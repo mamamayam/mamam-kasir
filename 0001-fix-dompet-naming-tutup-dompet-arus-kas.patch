@@ -1,0 +1,2516 @@
+From 2bfd294a87e79d7e5ff2a74c9c11d70750ec2136 Mon Sep 17 00:00:00 2001
+From: Claude <claude@anthropic.com>
+Date: Tue, 15 Sep 2026 15:14:11 +0000
+Subject: [PATCH] Fix Dompet naming bug, add Tutup Dompet, build Arus Kas +
+ wire to Dompet
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+1. Bug fix: cash_movements.type / kasbon.status naming mismatch
+   DompetRepository wrote CashMovementType.cashSale.name ("cashSale")
+   and KasbonStatus.partiallyPaid.name ("partiallyPaid") — camelCase —
+   while the DB schema and seed data use snake_case ("cash_sale",
+   "partially_paid"). The parser's exact-match firstWhere() silently
+   fell back to `adjustment` on any mismatch, so every real cash sale
+   showed up in the UI as a generic "Penyesuaian" instead of "Penjualan
+   Cash". Added explicit dbValue/fromDbValue to both enums and updated
+   every read/write site to use them instead of .name.
+
+2. Tutup Dompet (closing), built to the real PRD shape
+   New dompet_closings table, DompetClosing/DompetClosingPreview
+   models, and repository logic: Expected Cash = Opening + Cash Sales +
+   Courier Deposits - Cash Expenses, closing blocked while any courier
+   holds outstanding cash, discrepancy recorded as its own adjustment
+   movement (ledger stays immutable). No Shift module exists yet, so a
+   closing's period is "since the previous closing" rather than tied to
+   a shift_id — documented in DompetClosing's doc comment for when
+   Shift lands. New DompetClosingScreen wired to a header action on
+   Dompet.
+
+3. Arus Kas — real Flutter screen, wired into the Dompet ledger
+   Was previously only an HTML preview; CashMovementType.expense was
+   defined but never written anywhere, and Laporan was already querying
+   cash_movements for type='expense' with no data to find. New
+   cash_expenses table + ArusKasRepository: cash-location-funded
+   entries write a matching cash_movement (recordCashExpense /
+   recordCashIncome) so Dompet balances and Arus Kas totals stay
+   traceable to each other; Non-Tunai entries skip this. Screen follows
+   the Menu Management reference pattern (dropdown title switch, date
+   filter row, floating add-form). Wired into the "Kas" grid tile.
+
+Also fixed one regression introduced while touching KasbonStatus
+(getKasbonList's status filter still used .name) and removed a dead
+_sumberDanaInitialized flag that was never read.
+
+Note: could not run flutter analyze/test in this environment (no
+Flutter SDK, restricted network) — verified manually instead: brace/
+paren balance on every touched file, every API call's signature
+against its actual declaration, and Flutter-version compatibility
+(DropdownButtonFormField.value over the newer initialValue, since
+SETUP.md pins this project to Flutter 3.27+). Please run `flutter
+analyze` on your end before merging.
+---
+ lib/core/data/app_database.dart               |  57 ++-
+ .../application/arus_kas_provider.dart        | 149 +++++++
+ .../application/arus_kas_repository.dart      | 158 ++++++++
+ .../arus_kas/domain/arus_kas_models.dart      |  62 +++
+ .../presentation/arus_kas_screen.dart         | 195 +++++++++
+ .../widgets/add_arus_kas_modal.dart           | 378 ++++++++++++++++++
+ .../widgets/arus_kas_entry_tile.dart          |  68 ++++
+ .../presentation/widgets/arus_kas_header.dart | 234 +++++++++++
+ .../dompet/application/dompet_provider.dart   |  91 +++++
+ .../dompet/application/dompet_repository.dart | 221 +++++++++-
+ lib/features/dompet/domain/dompet_models.dart | 155 ++++++-
+ .../presentation/dompet_closing_screen.dart   | 338 ++++++++++++++++
+ .../dompet/presentation/dompet_screen.dart    |  49 ++-
+ .../presentation/menu_grid_items.dart         |   8 +-
+ 14 files changed, 2145 insertions(+), 18 deletions(-)
+ create mode 100644 lib/features/arus_kas/application/arus_kas_provider.dart
+ create mode 100644 lib/features/arus_kas/application/arus_kas_repository.dart
+ create mode 100644 lib/features/arus_kas/domain/arus_kas_models.dart
+ create mode 100644 lib/features/arus_kas/presentation/arus_kas_screen.dart
+ create mode 100644 lib/features/arus_kas/presentation/widgets/add_arus_kas_modal.dart
+ create mode 100644 lib/features/arus_kas/presentation/widgets/arus_kas_entry_tile.dart
+ create mode 100644 lib/features/arus_kas/presentation/widgets/arus_kas_header.dart
+ create mode 100644 lib/features/dompet/presentation/dompet_closing_screen.dart
+
+diff --git a/lib/core/data/app_database.dart b/lib/core/data/app_database.dart
+index 4e72481..ff02556 100644
+--- a/lib/core/data/app_database.dart
++++ b/lib/core/data/app_database.dart
+@@ -49,7 +49,13 @@ class AppDatabase {
+   // mockup) and seeded them with the same sample ingredient set used in
+   // that mockup so the feature isn't empty on first run — same "real,
+   // editable seed data" rationale as the v6 menu/transaction seeding.
+-  static const _dbVersion = 7;
++  // v8: added dompet_closings (Tutup Dompet) and cash_expenses (Arus
++  // Kas / Pengeluaran, and Pemasukan non-sales income) tables. No Shift
++  // module exists yet, so a closing's period is simply "since the
++  // previous closing" rather than tied to a shift_id — see the
++  // DompetClosing model doc comment for the reconciliation note for
++  // when Shift lands. Still pre-release, straight recreate.
++  static const _dbVersion = 8;
+ 
+   // TODO(security-foundation): replace with a key generated once and
+   // stored via flutter_secure_storage, per AGENTS.md.
+@@ -299,6 +305,55 @@ class AppDatabase {
+       )
+     ''');
+ 
++    // "Tutup Dompet" closings for Store Cash. One immutable row per
++    // close — never edited after creation; a wrong close is corrected
++    // with a new adjustment movement, same principle as cash_movements.
++    // periodStart/periodEnd stand in for a shift_id until the Shift
++    // module exists (see DompetClosing's doc comment).
++    await db.execute('''
++      CREATE TABLE dompet_closings (
++        id TEXT PRIMARY KEY,
++        period_start TEXT NOT NULL,
++        period_end TEXT NOT NULL,
++        opening_balance INTEGER NOT NULL,
++        cash_sales_total INTEGER NOT NULL,
++        courier_deposits_total INTEGER NOT NULL,
++        cash_expenses_total INTEGER NOT NULL,
++        expected_cash INTEGER NOT NULL,
++        counted_cash INTEGER NOT NULL,
++        discrepancy INTEGER NOT NULL,
++        status TEXT NOT NULL, -- 'closed' | 'overdue_closing'
++        note TEXT,
++        created_at TEXT NOT NULL,
++        created_by TEXT
++      )
++    ''');
++
++    // Arus Kas (Pemasukan/Pengeluaran) entries. Cash-affecting rows
++    // (sumber_dana = a real cash_location) get a matching cash_movement
++    // so Dompet balances and Arus Kas totals stay berkesinambungan
++    // (see [[mamam-kasir-flutter]] notes on the Arus Kas HTML preview);
++    // 'non_cash' rows (transfer/QRIS/etc.) intentionally have no
++    // cash_movement_id since they never touch a physical cash balance.
++    await db.execute('''
++      CREATE TABLE cash_expenses (
++        id TEXT PRIMARY KEY,
++        direction TEXT NOT NULL, -- 'pemasukan' | 'pengeluaran'
++        category TEXT NOT NULL,
++        amount INTEGER NOT NULL,
++        transaction_date TEXT NOT NULL,
++        source_location_id TEXT, -- NULL when funding_source = 'non_cash'
++        funding_source TEXT NOT NULL, -- 'cash_location' | 'non_cash'
++        store_or_supplier_name TEXT, -- Pengeluaran only
++        detail TEXT,
++        cash_movement_id TEXT, -- NULL for non_cash rows
++        created_at TEXT NOT NULL,
++        created_by TEXT,
++        FOREIGN KEY (source_location_id) REFERENCES cash_locations (id),
++        FOREIGN KEY (cash_movement_id) REFERENCES cash_movements (id)
++      )
++    ''');
++
+     // --- HPP & Stok Opname (port of the HTML mockup) ---
+     // `ingredients` holds Agung's cost-basis (HPP) ingredient list, split
+     // into the three categories used consistently across both HPP and
+diff --git a/lib/features/arus_kas/application/arus_kas_provider.dart b/lib/features/arus_kas/application/arus_kas_provider.dart
+new file mode 100644
+index 0000000..06e15fe
+--- /dev/null
++++ b/lib/features/arus_kas/application/arus_kas_provider.dart
+@@ -0,0 +1,149 @@
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../../dompet/application/dompet_provider.dart';
++import '../domain/arus_kas_models.dart';
++import 'arus_kas_repository.dart';
++
++final arusKasRepositoryProvider = Provider<ArusKasRepository>((ref) {
++  return ArusKasRepository(ref.watch(dompetRepositoryProvider));
++});
++
++DateTime _startOfDay(DateTime d) => DateTime(d.year, d.month, d.day);
++DateTime _endOfDay(DateTime d) => DateTime(d.year, d.month, d.day, 23, 59, 59);
++
++class ArusKasState {
++  final ArusKasDirection direction;
++  final ArusKasDateFilter dateFilter;
++  final DateTime? customDate;
++  final List<ArusKasEntry> entries;
++  final int total;
++  final List<String> categories;
++  final bool isLoading;
++  final String? errorMessage;
++
++  const ArusKasState({
++    this.direction = ArusKasDirection.pengeluaran,
++    this.dateFilter = ArusKasDateFilter.bulanIni,
++    this.customDate,
++    this.entries = const [],
++    this.total = 0,
++    this.categories = const [],
++    this.isLoading = true,
++    this.errorMessage,
++  });
++
++  ArusKasState copyWith({
++    ArusKasDirection? direction,
++    ArusKasDateFilter? dateFilter,
++    DateTime? customDate,
++    List<ArusKasEntry>? entries,
++    int? total,
++    List<String>? categories,
++    bool? isLoading,
++    String? errorMessage,
++  }) {
++    return ArusKasState(
++      direction: direction ?? this.direction,
++      dateFilter: dateFilter ?? this.dateFilter,
++      customDate: customDate ?? this.customDate,
++      entries: entries ?? this.entries,
++      total: total ?? this.total,
++      categories: categories ?? this.categories,
++      isLoading: isLoading ?? this.isLoading,
++      errorMessage: errorMessage,
++    );
++  }
++
++  (DateTime?, DateTime?) get dateRange {
++    final now = DateTime.now();
++    switch (dateFilter) {
++      case ArusKasDateFilter.hariIni:
++        return (_startOfDay(now), _endOfDay(now));
++      case ArusKasDateFilter.kemarin:
++        final yesterday = now.subtract(const Duration(days: 1));
++        return (_startOfDay(yesterday), _endOfDay(yesterday));
++      case ArusKasDateFilter.bulanIni:
++        return (DateTime(now.year, now.month, 1), _endOfDay(DateTime(now.year, now.month + 1, 0)));
++      case ArusKasDateFilter.bulanKemarin:
++        final firstOfThisMonth = DateTime(now.year, now.month, 1);
++        final lastMonth = firstOfThisMonth.subtract(const Duration(days: 1));
++        return (DateTime(lastMonth.year, lastMonth.month, 1), _endOfDay(lastMonth));
++      case ArusKasDateFilter.pilihTanggal:
++        final d = customDate ?? now;
++        return (_startOfDay(d), _endOfDay(d));
++    }
++  }
++}
++
++final arusKasProvider = StateNotifierProvider.autoDispose<ArusKasController, ArusKasState>((ref) {
++  return ArusKasController(ref.watch(arusKasRepositoryProvider));
++});
++
++class ArusKasController extends StateNotifier<ArusKasState> {
++  final ArusKasRepository _repository;
++
++  ArusKasController(this._repository) : super(const ArusKasState()) {
++    load();
++  }
++
++  Future<void> load() async {
++    state = state.copyWith(isLoading: true, errorMessage: null);
++    try {
++      final (from, to) = state.dateRange;
++      final entries = await _repository.getEntries(direction: state.direction, from: from, to: to);
++      final total = await _repository.getTotal(direction: state.direction, from: from, to: to);
++      final categories = await _repository.getCategories(state.direction);
++
++      state = state.copyWith(entries: entries, total: total, categories: categories, isLoading: false);
++    } catch (e) {
++      state = state.copyWith(isLoading: false, errorMessage: 'Gagal memuat data Arus Kas: $e');
++    }
++  }
++
++  Future<void> setDirection(ArusKasDirection direction) async {
++    state = state.copyWith(direction: direction);
++    await load();
++  }
++
++  Future<void> setDateFilter(ArusKasDateFilter filter, {DateTime? customDate}) async {
++    state = state.copyWith(dateFilter: filter, customDate: customDate);
++    await load();
++  }
++
++  Future<bool> addEntry({
++    required String category,
++    required int amount,
++    required DateTime transactionDate,
++    required ArusKasFundingSource fundingSource,
++    String? sourceLocationId,
++    String? storeOrSupplierName,
++    String? detail,
++  }) async {
++    try {
++      await _repository.addEntry(
++        direction: state.direction,
++        category: category,
++        amount: amount,
++        transactionDate: transactionDate,
++        fundingSource: fundingSource,
++        sourceLocationId: sourceLocationId,
++        storeOrSupplierName: storeOrSupplierName,
++        detail: detail,
++      );
++      await load();
++      return true;
++    } catch (e) {
++      state = state.copyWith(errorMessage: 'Gagal menyimpan: $e');
++      return false;
++    }
++  }
++
++  Future<void> deleteEntry(String id) async {
++    try {
++      await _repository.deleteEntry(id);
++      await load();
++    } catch (e) {
++      state = state.copyWith(errorMessage: 'Gagal menghapus: $e');
++    }
++  }
++}
+diff --git a/lib/features/arus_kas/application/arus_kas_repository.dart b/lib/features/arus_kas/application/arus_kas_repository.dart
+new file mode 100644
+index 0000000..3cc5077
+--- /dev/null
++++ b/lib/features/arus_kas/application/arus_kas_repository.dart
+@@ -0,0 +1,158 @@
++import 'package:sqflite_sqlcipher/sqflite.dart';
++import 'package:uuid/uuid.dart';
++
++import '../../../core/data/app_database.dart';
++import '../../dompet/application/dompet_repository.dart';
++import '../domain/arus_kas_models.dart';
++
++class ArusKasRepository {
++  final _uuid = const Uuid();
++  final DompetRepository _dompetRepository;
++
++  ArusKasRepository(this._dompetRepository);
++
++  Future<Database> get _db => AppDatabase.instance.database;
++
++  /// Distinct categories used so far, per direction — feeds the
++  /// editable Kategori combobox (pick existing or type new).
++  Future<List<String>> getCategories(ArusKasDirection direction) async {
++    final db = await _db;
++    final rows = await db.rawQuery(
++      'SELECT DISTINCT category FROM cash_expenses WHERE direction = ? ORDER BY category ASC',
++      [direction.dbValue],
++    );
++    return rows.map((r) => r['category'] as String).toList();
++  }
++
++  Future<List<ArusKasEntry>> getEntries({
++    required ArusKasDirection direction,
++    DateTime? from,
++    DateTime? to,
++  }) async {
++    final db = await _db;
++    final where = StringBuffer('direction = ?');
++    final args = <Object?>[direction.dbValue];
++
++    if (from != null) {
++      where.write(' AND transaction_date >= ?');
++      args.add(from.toIso8601String());
++    }
++    if (to != null) {
++      where.write(' AND transaction_date <= ?');
++      args.add(to.toIso8601String());
++    }
++
++    final rows = await db.query('cash_expenses', where: where.toString(), whereArgs: args, orderBy: 'transaction_date DESC, created_at DESC');
++
++    // Join cash_locations for display names in one pass rather than
++    // per-row, since the location set is small.
++    final locationRows = await db.query('cash_locations');
++    final locationNames = {for (final l in locationRows) l['id'] as String: l['name'] as String};
++
++    return rows.map((row) => _entryFromRow(row, locationNames)).toList();
++  }
++
++  ArusKasEntry _entryFromRow(Map<String, Object?> row, Map<String, String> locationNames) {
++    final sourceLocationId = row['source_location_id'] as String?;
++    return ArusKasEntry(
++      id: row['id'] as String,
++      direction: ArusKasDirectionDb.fromDbValue(row['direction'] as String),
++      category: row['category'] as String,
++      amount: row['amount'] as int,
++      transactionDate: DateTime.parse(row['transaction_date'] as String),
++      sourceLocationId: sourceLocationId,
++      sourceLocationName: sourceLocationId == null ? null : locationNames[sourceLocationId],
++      fundingSource: ArusKasFundingSourceDb.fromDbValue(row['funding_source'] as String),
++      storeOrSupplierName: row['store_or_supplier_name'] as String?,
++      detail: row['detail'] as String?,
++      cashMovementId: row['cash_movement_id'] as String?,
++      createdAt: DateTime.parse(row['created_at'] as String),
++      createdBy: row['created_by'] as String?,
++    );
++  }
++
++  /// Creates an Arus Kas entry. When [fundingSource] is
++  /// [ArusKasFundingSource.cashLocation], also writes a matching
++  /// cash_movement (income for Pemasukan, expense for Pengeluaran) via
++  /// [DompetRepository] so Dompet balances and Arus Kas totals stay
++  /// berkesinambungan — 'Non-Tunai' entries skip this since they never
++  /// touch a physical cash balance.
++  Future<void> addEntry({
++    required ArusKasDirection direction,
++    required String category,
++    required int amount,
++    required DateTime transactionDate,
++    required ArusKasFundingSource fundingSource,
++    String? sourceLocationId,
++    String? storeOrSupplierName,
++    String? detail,
++  }) async {
++    if (fundingSource == ArusKasFundingSource.cashLocation && sourceLocationId == null) {
++      throw ArgumentError('sourceLocationId is required when fundingSource is cashLocation');
++    }
++
++    final db = await _db;
++    String? cashMovementId;
++
++    if (fundingSource == ArusKasFundingSource.cashLocation) {
++      cashMovementId = direction == ArusKasDirection.pengeluaran
++          ? await _dompetRepository.recordCashExpense(
++              fromLocationId: sourceLocationId!,
++              amount: amount,
++              reason: category,
++            )
++          : await _dompetRepository.recordCashIncome(
++              toLocationId: sourceLocationId!,
++              amount: amount,
++              reason: category,
++            );
++    }
++
++    await db.insert('cash_expenses', {
++      'id': _uuid.v4(),
++      'direction': direction.dbValue,
++      'category': category,
++      'amount': amount,
++      'transaction_date': transactionDate.toIso8601String(),
++      'source_location_id': fundingSource == ArusKasFundingSource.cashLocation ? sourceLocationId : null,
++      'funding_source': fundingSource.dbValue,
++      'store_or_supplier_name': direction == ArusKasDirection.pengeluaran ? storeOrSupplierName : null,
++      'detail': detail,
++      'cash_movement_id': cashMovementId,
++      'created_at': DateTime.now().toIso8601String(),
++      'created_by': null,
++    });
++  }
++
++  /// Deletes an entry, and its matching cash_movement if it had one —
++  /// keeping Dompet balances and Arus Kas in sync after an undo. This
++  /// is a user-facing "remove this entry" action, distinct from the
++  /// ledger's general immutability (see DompetRepository.deleteCashMovement).
++  Future<void> deleteEntry(String id) async {
++    final db = await _db;
++    final rows = await db.query('cash_expenses', where: 'id = ?', whereArgs: [id], limit: 1);
++    if (rows.isEmpty) return;
++
++    final cashMovementId = rows.first['cash_movement_id'] as String?;
++    if (cashMovementId != null) {
++      await _dompetRepository.deleteCashMovement(cashMovementId);
++    }
++    await db.delete('cash_expenses', where: 'id = ?', whereArgs: [id]);
++  }
++
++  Future<int> getTotal({required ArusKasDirection direction, DateTime? from, DateTime? to}) async {
++    final db = await _db;
++    final where = StringBuffer('direction = ?');
++    final args = <Object?>[direction.dbValue];
++    if (from != null) {
++      where.write(' AND transaction_date >= ?');
++      args.add(from.toIso8601String());
++    }
++    if (to != null) {
++      where.write(' AND transaction_date <= ?');
++      args.add(to.toIso8601String());
++    }
++    final result = await db.rawQuery('SELECT COALESCE(SUM(amount), 0) as total FROM cash_expenses WHERE $where', args);
++    return result.first['total'] as int;
++  }
++}
+diff --git a/lib/features/arus_kas/domain/arus_kas_models.dart b/lib/features/arus_kas/domain/arus_kas_models.dart
+new file mode 100644
+index 0000000..e51bf34
+--- /dev/null
++++ b/lib/features/arus_kas/domain/arus_kas_models.dart
+@@ -0,0 +1,62 @@
++enum ArusKasDirection { pemasukan, pengeluaran }
++
++extension ArusKasDirectionDb on ArusKasDirection {
++  String get dbValue => this == ArusKasDirection.pemasukan ? 'pemasukan' : 'pengeluaran';
++
++  static ArusKasDirection fromDbValue(String value) =>
++      value == 'pemasukan' ? ArusKasDirection.pemasukan : ArusKasDirection.pengeluaran;
++}
++
++/// How an Arus Kas entry is funded. 'cashLocation' means the amount is
++/// wired to a real Dompet cash_location (Store Cash or a courier) via a
++/// matching cash_movement — Dompet balances and Arus Kas totals stay
++/// berkesinambungan (traceable to each other). 'nonCash' (transfer/
++/// QRIS/etc.) never touches a physical cash balance and has no
++/// cash_movement.
++enum ArusKasFundingSource { cashLocation, nonCash }
++
++extension ArusKasFundingSourceDb on ArusKasFundingSource {
++  String get dbValue => this == ArusKasFundingSource.cashLocation ? 'cash_location' : 'non_cash';
++
++  static ArusKasFundingSource fromDbValue(String value) =>
++      value == 'cash_location' ? ArusKasFundingSource.cashLocation : ArusKasFundingSource.nonCash;
++}
++
++/// One Arus Kas (Pemasukan/Pengeluaran) entry.
++class ArusKasEntry {
++  final String id;
++  final ArusKasDirection direction;
++  final String category;
++  final int amount;
++  final DateTime transactionDate;
++  final String? sourceLocationId; // null when fundingSource = nonCash
++  final String? sourceLocationName; // denormalized for display, joined at read time
++  final ArusKasFundingSource fundingSource;
++  final String? storeOrSupplierName; // Pengeluaran only
++  final String? detail;
++  final String? cashMovementId; // null for nonCash entries
++  final DateTime createdAt;
++  final String? createdBy;
++
++  const ArusKasEntry({
++    required this.id,
++    required this.direction,
++    required this.category,
++    required this.amount,
++    required this.transactionDate,
++    this.sourceLocationId,
++    this.sourceLocationName,
++    required this.fundingSource,
++    this.storeOrSupplierName,
++    this.detail,
++    this.cashMovementId,
++    required this.createdAt,
++    this.createdBy,
++  });
++
++  /// Label shown in the Sumber Dana field/dropdown — "Non-Tunai" for
++  /// non-cash entries, otherwise the cash location's display name.
++  String get sourceLabel => fundingSource == ArusKasFundingSource.nonCash ? 'Non-Tunai' : (sourceLocationName ?? 'Dompet Toko');
++}
++
++enum ArusKasDateFilter { hariIni, kemarin, bulanIni, bulanKemarin, pilihTanggal }
+diff --git a/lib/features/arus_kas/presentation/arus_kas_screen.dart b/lib/features/arus_kas/presentation/arus_kas_screen.dart
+new file mode 100644
+index 0000000..caef44c
+--- /dev/null
++++ b/lib/features/arus_kas/presentation/arus_kas_screen.dart
+@@ -0,0 +1,195 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../../../core/navigation/app_nav.dart';
++import '../../../core/theme/app_colors.dart';
++import '../../../core/theme/app_spacing.dart';
++import '../../../core/utils/currency.dart';
++import '../application/arus_kas_provider.dart';
++import '../domain/arus_kas_models.dart';
++import 'widgets/add_arus_kas_modal.dart';
++import 'widgets/arus_kas_entry_tile.dart';
++import 'widgets/arus_kas_header.dart';
++
++const _dateFilterLabels = {
++  ArusKasDateFilter.hariIni: 'Hari Ini',
++  ArusKasDateFilter.kemarin: 'Kemarin',
++  ArusKasDateFilter.bulanIni: 'Bulan Ini',
++  ArusKasDateFilter.bulanKemarin: 'Bulan Kemarin',
++  ArusKasDateFilter.pilihTanggal: 'Pilih Tanggal',
++};
++
++/// Arus Kas (cash flow / Pemasukan-Pengeluaran) screen — reached from
++/// the swipe-up menu's "Kas" tile. Reference-pattern layout, same as
++/// Menu Management: dropdown title switch + add button, date-filter
++/// row, list of entries, floating "Tambah" modal form.
++///
++/// Cash-location-funded entries are wired into the Dompet ledger via
++/// ArusKasRepository so Dompet balances and Arus Kas totals stay
++/// traceable to each other (see [[mamam-kasir-flutter]] notes).
++class ArusKasScreen extends ConsumerWidget {
++  const ArusKasScreen({super.key});
++
++  @override
++  Widget build(BuildContext context, WidgetRef ref) {
++    final state = ref.watch(arusKasProvider);
++    final controller = ref.read(arusKasProvider.notifier);
++
++    ref.listen(arusKasProvider, (previous, next) {
++      if (next.errorMessage != null && next.errorMessage != previous?.errorMessage) {
++        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(next.errorMessage!), backgroundColor: AppColors.danger));
++      }
++    });
++
++    final isPemasukan = state.direction == ArusKasDirection.pemasukan;
++
++    return Scaffold(
++      backgroundColor: AppColors.background,
++      body: SafeArea(
++        child: Column(
++          children: [
++            ArusKasHeader(
++              currentDirection: state.direction,
++              onDirectionSelected: controller.setDirection,
++              onBack: () => Navigator.of(context).pop(),
++              onAdd: () => AppNav.showModal(context, builder: (_) => const AddArusKasModal()),
++            ),
++            Padding(
++              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
++              child: _TotalCard(direction: state.direction, total: state.total),
++            ),
++            const SizedBox(height: AppSpacing.sm),
++            _DateFilterRow(
++              current: state.dateFilter,
++              customDate: state.customDate,
++              onSelect: (filter) async {
++                if (filter == ArusKasDateFilter.pilihTanggal) {
++                  final picked = await showDatePicker(
++                    context: context,
++                    initialDate: state.customDate ?? DateTime.now(),
++                    firstDate: DateTime(2020),
++                    lastDate: DateTime.now().add(const Duration(days: 1)),
++                  );
++                  if (picked != null) controller.setDateFilter(filter, customDate: picked);
++                } else {
++                  controller.setDateFilter(filter);
++                }
++              },
++            ),
++            const SizedBox(height: AppSpacing.sm),
++            Expanded(
++              child: state.isLoading
++                  ? const Center(child: CircularProgressIndicator(color: AppColors.brand))
++                  : RefreshIndicator(
++                      color: AppColors.brand,
++                      onRefresh: controller.load,
++                      child: state.entries.isEmpty
++                          ? ListView(
++                              physics: const AlwaysScrollableScrollPhysics(),
++                              children: [
++                                Padding(
++                                  padding: const EdgeInsets.symmetric(vertical: AppSpacing.xxl),
++                                  child: Center(
++                                    child: Text(
++                                      isPemasukan ? 'Belum ada pemasukan pada periode ini.' : 'Belum ada pengeluaran pada periode ini.',
++                                      style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w500, color: AppColors.textMuted),
++                                    ),
++                                  ),
++                                ),
++                              ],
++                            )
++                          : ListView(
++                              physics: const AlwaysScrollableScrollPhysics(),
++                              padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.xxl),
++                              children: [
++                                Container(
++                                  padding: const EdgeInsets.all(AppSpacing.md),
++                                  decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.lg), border: Border.all(color: AppColors.border)),
++                                  child: Column(
++                                    children: state.entries
++                                        .map((e) => ArusKasEntryTile(entry: e, onDelete: () => controller.deleteEntry(e.id)))
++                                        .toList(),
++                                  ),
++                                ),
++                              ],
++                            ),
++                    ),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++class _TotalCard extends StatelessWidget {
++  final ArusKasDirection direction;
++  final int total;
++  const _TotalCard({required this.direction, required this.total});
++
++  @override
++  Widget build(BuildContext context) {
++    final isPemasukan = direction == ArusKasDirection.pemasukan;
++    final color = isPemasukan ? AppColors.success : AppColors.danger;
++    return Container(
++      width: double.infinity,
++      padding: const EdgeInsets.all(AppSpacing.md),
++      decoration: BoxDecoration(color: color.withValues(alpha: 0.08), borderRadius: BorderRadius.circular(AppRadius.lg), border: Border.all(color: color.withValues(alpha: 0.2))),
++      child: Column(
++        crossAxisAlignment: CrossAxisAlignment.start,
++        children: [
++          Text(
++            isPemasukan ? 'TOTAL PEMASUKAN' : 'TOTAL PENGELUARAN',
++            style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700, letterSpacing: 0.5, color: AppColors.textMuted),
++          ),
++          const SizedBox(height: 4),
++          Text(formatRupiah(total), style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: color)),
++        ],
++      ),
++    );
++  }
++}
++
++class _DateFilterRow extends StatelessWidget {
++  final ArusKasDateFilter current;
++  final DateTime? customDate;
++  final ValueChanged<ArusKasDateFilter> onSelect;
++
++  const _DateFilterRow({required this.current, required this.customDate, required this.onSelect});
++
++  @override
++  Widget build(BuildContext context) {
++    return SizedBox(
++      height: 34,
++      child: ListView(
++        scrollDirection: Axis.horizontal,
++        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
++        children: ArusKasDateFilter.values.map((filter) {
++          final selected = filter == current;
++          final label = filter == ArusKasDateFilter.pilihTanggal && selected && customDate != null
++              ? '${customDate!.day}/${customDate!.month}/${customDate!.year}'
++              : _dateFilterLabels[filter]!;
++          return Padding(
++            padding: const EdgeInsets.only(right: AppSpacing.sm),
++            child: InkWell(
++              onTap: () => onSelect(filter),
++              borderRadius: BorderRadius.circular(AppRadius.pill),
++              child: Container(
++                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
++                decoration: BoxDecoration(
++                  color: selected ? AppColors.brand : AppColors.surface,
++                  borderRadius: BorderRadius.circular(AppRadius.pill),
++                  border: Border.all(color: selected ? AppColors.brand : AppColors.border),
++                ),
++                child: Text(
++                  label,
++                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: selected ? Colors.white : AppColors.textSecondary),
++                ),
++              ),
++            ),
++          );
++        }).toList(),
++      ),
++    );
++  }
++}
+diff --git a/lib/features/arus_kas/presentation/widgets/add_arus_kas_modal.dart b/lib/features/arus_kas/presentation/widgets/add_arus_kas_modal.dart
+new file mode 100644
+index 0000000..0835d6b
+--- /dev/null
++++ b/lib/features/arus_kas/presentation/widgets/add_arus_kas_modal.dart
+@@ -0,0 +1,378 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../../../../core/theme/app_colors.dart';
++import '../../../../core/theme/app_spacing.dart';
++import '../../../dompet/application/dompet_provider.dart';
++import '../../../dompet/domain/dompet_models.dart';
++import '../../application/arus_kas_provider.dart';
++import '../../domain/arus_kas_models.dart';
++
++/// "Tambah Pemasukan/Pengeluaran" form, shown as a modal per the app's
++/// stack-navigation convention (temporary action layered on the Arus
++/// Kas screen). Fields, in order: Kategori (editable combobox) + Sumber
++/// Dana side by side; Jumlah + Tanggal Transaksi side by side; Nama
++/// Toko/Supplier (Pengeluaran only); Detail (optional); Simpan Data.
++///
++/// "Non-Tunai" lives inside the Sumber Dana dropdown alongside Dompet
++/// Toko and each courier — there's deliberately no separate Jenis
++/// Transaksi Tunai/Non-Tunai field, per [[mamam-kasir-flutter]] notes.
++class AddArusKasModal extends ConsumerStatefulWidget {
++  const AddArusKasModal({super.key});
++
++  @override
++  ConsumerState<AddArusKasModal> createState() => _AddArusKasModalState();
++}
++
++class _AddArusKasModalState extends ConsumerState<AddArusKasModal> {
++  final _categoryController = TextEditingController();
++  final _amountController = TextEditingController();
++  final _storeSupplierController = TextEditingController();
++  final _detailController = TextEditingController();
++
++  DateTime _transactionDate = DateTime.now();
++  // null = "Non-Tunai"; otherwise a cash_location id ('loc-store' or a courier id).
++  String? _selectedLocationId;
++
++  bool _isSaving = false;
++  String? _validationError;
++
++  @override
++  void dispose() {
++    _categoryController.dispose();
++    _amountController.dispose();
++    _storeSupplierController.dispose();
++    _detailController.dispose();
++    super.dispose();
++  }
++
++  Future<void> _pickDate() async {
++    final picked = await showDatePicker(
++      context: context,
++      initialDate: _transactionDate,
++      firstDate: DateTime(2020),
++      lastDate: DateTime.now().add(const Duration(days: 1)),
++    );
++    if (picked != null) setState(() => _transactionDate = picked);
++  }
++
++  Future<void> _handleSave(ArusKasDirection direction) async {
++    final category = _categoryController.text.trim();
++    if (category.isEmpty) {
++      setState(() => _validationError = 'Kategori wajib diisi.');
++      return;
++    }
++    final amount = int.tryParse(_amountController.text.trim());
++    if (amount == null || amount <= 0) {
++      setState(() => _validationError = 'Jumlah harus berupa angka lebih dari 0.');
++      return;
++    }
++
++    setState(() {
++      _validationError = null;
++      _isSaving = true;
++    });
++
++    final fundingSource = _selectedLocationId == null ? ArusKasFundingSource.nonCash : ArusKasFundingSource.cashLocation;
++
++    final ok = await ref.read(arusKasProvider.notifier).addEntry(
++          category: category,
++          amount: amount,
++          transactionDate: _transactionDate,
++          fundingSource: fundingSource,
++          sourceLocationId: _selectedLocationId,
++          storeOrSupplierName: direction == ArusKasDirection.pengeluaran && _storeSupplierController.text.trim().isNotEmpty
++              ? _storeSupplierController.text.trim()
++              : null,
++          detail: _detailController.text.trim().isEmpty ? null : _detailController.text.trim(),
++        );
++
++    if (!mounted) return;
++    setState(() => _isSaving = false);
++    if (ok) {
++      Navigator.of(context).pop();
++    } else {
++      setState(() => _validationError = 'Gagal menyimpan. Coba lagi.');
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final direction = ref.watch(arusKasProvider.select((s) => s.direction));
++    final categories = ref.watch(arusKasProvider.select((s) => s.categories));
++    final locationsAsync = ref.watch(cashLocationsProvider);
++    final isPengeluaran = direction == ArusKasDirection.pengeluaran;
++
++    return Padding(
++      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
++      child: Container(
++        decoration: const BoxDecoration(
++          color: AppColors.surface,
++          borderRadius: BorderRadius.vertical(top: Radius.circular(AppRadius.xl)),
++        ),
++        child: SafeArea(
++          top: false,
++          child: Column(
++            mainAxisSize: MainAxisSize.min,
++            children: [
++              Padding(
++                padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.md, AppSpacing.lg, 0),
++                child: Row(
++                  children: [
++                    Expanded(
++                      child: Text(
++                        isPengeluaran ? 'Tambah Pengeluaran' : 'Tambah Pemasukan',
++                        style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
++                      ),
++                    ),
++                    IconButton(icon: const Icon(Icons.close_rounded, color: AppColors.textMuted), onPressed: () => Navigator.of(context).pop()),
++                  ],
++                ),
++              ),
++              Flexible(
++                child: SingleChildScrollView(
++                  padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, AppSpacing.md),
++                  child: Column(
++                    crossAxisAlignment: CrossAxisAlignment.start,
++                    children: [
++                      Row(
++                        crossAxisAlignment: CrossAxisAlignment.start,
++                        children: [
++                          Expanded(
++                            child: _CategoryField(controller: _categoryController, existingCategories: categories),
++                          ),
++                          const SizedBox(width: AppSpacing.sm),
++                          Expanded(
++                            child: locationsAsync.when(
++                              data: (locations) => _SumberDanaField(
++                                locations: locations,
++                                selectedLocationId: _selectedLocationId,
++                                onChanged: (id) => setState(() => _selectedLocationId = id),
++                              ),
++                              loading: () => const _FieldSkeleton(label: 'Sumber Dana'),
++                              error: (_, __) => const _FieldSkeleton(label: 'Sumber Dana'),
++                            ),
++                          ),
++                        ],
++                      ),
++                      const SizedBox(height: AppSpacing.md),
++                      Row(
++                        crossAxisAlignment: CrossAxisAlignment.start,
++                        children: [
++                          Expanded(
++                            child: _LabeledField(
++                              label: 'Jumlah',
++                              child: TextField(
++                                controller: _amountController,
++                                keyboardType: TextInputType.number,
++                                decoration: _fieldDecoration(hint: 'Rp0'),
++                              ),
++                            ),
++                          ),
++                          const SizedBox(width: AppSpacing.sm),
++                          Expanded(
++                            child: _LabeledField(
++                              label: 'Tanggal Transaksi',
++                              child: InkWell(
++                                onTap: _pickDate,
++                                child: Container(
++                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 13),
++                                  decoration: BoxDecoration(
++                                    color: AppColors.background,
++                                    borderRadius: BorderRadius.circular(AppRadius.md),
++                                    border: Border.all(color: AppColors.border),
++                                  ),
++                                  child: Text(
++                                    '${_transactionDate.day}/${_transactionDate.month}/${_transactionDate.year}',
++                                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary),
++                                  ),
++                                ),
++                              ),
++                            ),
++                          ),
++                        ],
++                      ),
++                      if (isPengeluaran) ...[
++                        const SizedBox(height: AppSpacing.md),
++                        _LabeledField(
++                          label: 'Nama Toko/Supplier',
++                          child: TextField(controller: _storeSupplierController, decoration: _fieldDecoration(hint: 'Opsional')),
++                        ),
++                      ],
++                      const SizedBox(height: AppSpacing.md),
++                      _LabeledField(
++                        label: 'Detail',
++                        child: TextField(
++                          controller: _detailController,
++                          minLines: 2,
++                          maxLines: 4,
++                          decoration: _fieldDecoration(hint: 'Opsional'),
++                        ),
++                      ),
++                      if (_validationError != null) ...[
++                        const SizedBox(height: AppSpacing.sm),
++                        Text(_validationError!, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.danger)),
++                      ],
++                    ],
++                  ),
++                ),
++              ),
++              Container(
++                padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, AppSpacing.md),
++                decoration: const BoxDecoration(border: Border(top: BorderSide(color: AppColors.border))),
++                child: SizedBox(
++                  width: double.infinity,
++                  height: 48,
++                  child: ElevatedButton(
++                    onPressed: _isSaving ? null : () => _handleSave(direction),
++                    style: ElevatedButton.styleFrom(backgroundColor: AppColors.brand, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md))),
++                    child: _isSaving
++                        ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2.5, color: Colors.white))
++                        : const Text('Simpan Data', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: Colors.white)),
++                  ),
++                ),
++              ),
++            ],
++          ),
++        ),
++      ),
++    );
++  }
++}
++
++InputDecoration _fieldDecoration({required String hint}) {
++  return InputDecoration(
++    hintText: hint,
++    hintStyle: const TextStyle(fontSize: 13, color: AppColors.textMuted),
++    filled: true,
++    fillColor: AppColors.background,
++    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 13),
++    border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.border)),
++    enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.border)),
++    focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.brand)),
++  );
++}
++
++class _LabeledField extends StatelessWidget {
++  final String label;
++  final Widget child;
++  const _LabeledField({required this.label, required this.child});
++
++  @override
++  Widget build(BuildContext context) {
++    return Column(
++      crossAxisAlignment: CrossAxisAlignment.start,
++      children: [
++        Text(label, style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: AppColors.textSecondary)),
++        const SizedBox(height: 6),
++        child,
++      ],
++    );
++  }
++}
++
++class _FieldSkeleton extends StatelessWidget {
++  final String label;
++  const _FieldSkeleton({required this.label});
++
++  @override
++  Widget build(BuildContext context) {
++    return _LabeledField(
++      label: label,
++      child: Container(
++        height: 44,
++        decoration: BoxDecoration(color: AppColors.background, borderRadius: BorderRadius.circular(AppRadius.md), border: Border.all(color: AppColors.border)),
++      ),
++    );
++  }
++}
++
++/// Editable combobox: type a new category, or tap the dropdown affordance
++/// to pick from previously-used categories for the current direction.
++class _CategoryField extends StatelessWidget {
++  final TextEditingController controller;
++  final List<String> existingCategories;
++  const _CategoryField({required this.controller, required this.existingCategories});
++
++  @override
++  Widget build(BuildContext context) {
++    return _LabeledField(
++      label: 'Kategori',
++      child: Autocomplete<String>(
++        optionsBuilder: (textEditingValue) {
++          if (textEditingValue.text.isEmpty) return existingCategories;
++          return existingCategories.where((c) => c.toLowerCase().contains(textEditingValue.text.toLowerCase()));
++        },
++        onSelected: (selection) => controller.text = selection,
++        fieldViewBuilder: (context, fieldController, focusNode, onSubmitted) {
++          // Route every keystroke straight into our own controller (the
++          // one _handleSave reads from), instead of stacking a new
++          // listener on Autocomplete's internal controller each rebuild.
++          return TextField(
++            controller: fieldController,
++            focusNode: focusNode,
++            onChanged: (value) => controller.text = value,
++            decoration: _fieldDecoration(hint: 'Pilih atau ketik baru'),
++          );
++        },
++        optionsViewBuilder: (context, onSelected, options) {
++          return Align(
++            alignment: Alignment.topLeft,
++            child: Material(
++              elevation: 4,
++              borderRadius: BorderRadius.circular(AppRadius.md),
++              child: ConstrainedBox(
++                constraints: const BoxConstraints(maxHeight: 180),
++                child: ListView(
++                  padding: EdgeInsets.zero,
++                  shrinkWrap: true,
++                  children: options
++                      .map((o) => ListTile(dense: true, title: Text(o, style: const TextStyle(fontSize: 13)), onTap: () => onSelected(o)))
++                      .toList(),
++                ),
++              ),
++            ),
++          );
++        },
++      ),
++    );
++  }
++}
++
++/// Sumber Dana dropdown: 'Non-Tunai' plus every active cash location
++/// (Store Cash + couriers). Defaults to 'Non-Tunai' — the field mirrors
++/// what the eventual real Sumber Dana dropdown does per the HTML
++/// preview: no separate Tunai/Non-Tunai toggle, it's folded in here.
++class _SumberDanaField extends StatefulWidget {
++  final List<CashLocation> locations;
++  final String? selectedLocationId;
++  final ValueChanged<String?> onChanged;
++
++  const _SumberDanaField({
++    required this.locations,
++    required this.selectedLocationId,
++    required this.onChanged,
++  });
++
++  @override
++  State<_SumberDanaField> createState() => _SumberDanaFieldState();
++}
++
++class _SumberDanaFieldState extends State<_SumberDanaField> {
++  @override
++  Widget build(BuildContext context) {
++    return _LabeledField(
++      label: 'Sumber Dana',
++      child: DropdownButtonFormField<String?>(
++        value: widget.selectedLocationId,
++        decoration: _fieldDecoration(hint: 'Non-Tunai'),
++        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary),
++        items: [
++          const DropdownMenuItem<String?>(value: null, child: Text('Non-Tunai')),
++          ...widget.locations.map((loc) => DropdownMenuItem<String?>(value: loc.id, child: Text(loc.name))),
++        ],
++        onChanged: widget.onChanged,
++      ),
++    );
++  }
++}
+diff --git a/lib/features/arus_kas/presentation/widgets/arus_kas_entry_tile.dart b/lib/features/arus_kas/presentation/widgets/arus_kas_entry_tile.dart
+new file mode 100644
+index 0000000..7cd6984
+--- /dev/null
++++ b/lib/features/arus_kas/presentation/widgets/arus_kas_entry_tile.dart
+@@ -0,0 +1,68 @@
++import 'package:flutter/material.dart';
++import 'package:intl/intl.dart';
++
++import '../../../../core/theme/app_colors.dart';
++import '../../../../core/theme/app_spacing.dart';
++import '../../../../core/utils/currency.dart';
++import '../../domain/arus_kas_models.dart';
++
++class ArusKasEntryTile extends StatelessWidget {
++  final ArusKasEntry entry;
++  final VoidCallback onDelete;
++
++  const ArusKasEntryTile({super.key, required this.entry, required this.onDelete});
++
++  @override
++  Widget build(BuildContext context) {
++    final isPemasukan = entry.direction == ArusKasDirection.pemasukan;
++    final color = isPemasukan ? AppColors.success : AppColors.danger;
++
++    return Dismissible(
++      key: ValueKey(entry.id),
++      direction: DismissDirection.endToStart,
++      background: Container(
++        alignment: Alignment.centerRight,
++        padding: const EdgeInsets.only(right: AppSpacing.md),
++        color: AppColors.danger,
++        child: const Icon(Icons.delete_outline_rounded, color: Colors.white),
++      ),
++      onDismissed: (_) => onDelete(),
++      child: Padding(
++        padding: const EdgeInsets.only(bottom: AppSpacing.sm),
++        child: Row(
++          children: [
++            Container(
++              width: 34,
++              height: 34,
++              decoration: BoxDecoration(color: color.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(AppRadius.sm)),
++              child: Icon(isPemasukan ? Icons.arrow_downward_rounded : Icons.arrow_upward_rounded, size: 16, color: color),
++            ),
++            const SizedBox(width: AppSpacing.sm),
++            Expanded(
++              child: Column(
++                crossAxisAlignment: CrossAxisAlignment.start,
++                children: [
++                  Text(entry.category, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
++                  Text(
++                    [
++                      DateFormat('d MMM yyyy', 'id_ID').format(entry.transactionDate),
++                      entry.sourceLabel,
++                      if (entry.storeOrSupplierName != null && entry.storeOrSupplierName!.isNotEmpty) entry.storeOrSupplierName!,
++                    ].join(' · '),
++                    style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.w500, color: AppColors.textMuted),
++                    maxLines: 1,
++                    overflow: TextOverflow.ellipsis,
++                  ),
++                ],
++              ),
++            ),
++            Text(
++              '${isPemasukan ? '+' : '-'}${formatRupiah(entry.amount)}',
++              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: color),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
+diff --git a/lib/features/arus_kas/presentation/widgets/arus_kas_header.dart b/lib/features/arus_kas/presentation/widgets/arus_kas_header.dart
+new file mode 100644
+index 0000000..eb42565
+--- /dev/null
++++ b/lib/features/arus_kas/presentation/widgets/arus_kas_header.dart
+@@ -0,0 +1,234 @@
++import 'package:flutter/material.dart';
++
++import '../../../../core/theme/app_colors.dart';
++import '../../../../core/theme/app_spacing.dart';
++import '../../domain/arus_kas_models.dart';
++
++/// Title-dropdown header for Arus Kas, same interaction pattern as
++/// MenuManagementHeader's Menu/Varian switch: back + tappable title
++/// with a dropdown chevron (Pemasukan/Pengeluaran) + add button.
++class ArusKasHeader extends StatefulWidget {
++  final ArusKasDirection currentDirection;
++  final ValueChanged<ArusKasDirection> onDirectionSelected;
++  final VoidCallback onBack;
++  final VoidCallback onAdd;
++
++  const ArusKasHeader({
++    super.key,
++    required this.currentDirection,
++    required this.onDirectionSelected,
++    required this.onBack,
++    required this.onAdd,
++  });
++
++  @override
++  State<ArusKasHeader> createState() => _ArusKasHeaderState();
++}
++
++class _ArusKasHeaderState extends State<ArusKasHeader> {
++  final _dropdownKey = GlobalKey();
++  OverlayEntry? _overlayEntry;
++  bool _isOpen = false;
++
++  void _toggleDropdown() {
++    if (_isOpen) {
++      _closeDropdown();
++    } else {
++      _openDropdown();
++    }
++  }
++
++  void _openDropdown() {
++    final renderBox = _dropdownKey.currentContext?.findRenderObject() as RenderBox?;
++    if (renderBox == null) return;
++    final position = renderBox.localToGlobal(Offset.zero);
++    final size = renderBox.size;
++
++    _overlayEntry = OverlayEntry(
++      builder: (context) => Stack(
++        children: [
++          Positioned.fill(
++            child: GestureDetector(
++              onTap: _closeDropdown,
++              behavior: HitTestBehavior.translucent,
++              child: Container(color: Colors.transparent),
++            ),
++          ),
++          Positioned(
++            top: position.dy + size.height + 6,
++            left: position.dx + size.width / 2 - 90,
++            width: 180,
++            child: _DropdownMenu(
++              currentDirection: widget.currentDirection,
++              onSelect: (direction) {
++                widget.onDirectionSelected(direction);
++                _closeDropdown();
++              },
++            ),
++          ),
++        ],
++      ),
++    );
++
++    Overlay.of(context).insert(_overlayEntry!);
++    setState(() => _isOpen = true);
++  }
++
++  void _closeDropdown() {
++    _overlayEntry?.remove();
++    _overlayEntry = null;
++    if (mounted) setState(() => _isOpen = false);
++  }
++
++  @override
++  void dispose() {
++    _overlayEntry?.remove();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    return Padding(
++      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
++      child: SizedBox(
++        height: 44,
++        child: Stack(
++          alignment: Alignment.center,
++          children: [
++            Center(
++              child: GestureDetector(
++                key: _dropdownKey,
++                onTap: _toggleDropdown,
++                child: Row(
++                  mainAxisSize: MainAxisSize.min,
++                  children: [
++                    Text(
++                      widget.currentDirection == ArusKasDirection.pemasukan ? 'Pemasukan' : 'Pengeluaran',
++                      style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
++                    ),
++                    const SizedBox(width: 4),
++                    AnimatedRotation(
++                      turns: _isOpen ? 0.5 : 0,
++                      duration: const Duration(milliseconds: 180),
++                      child: const Icon(Icons.keyboard_arrow_down_rounded, size: 20, color: AppColors.textPrimary),
++                    ),
++                  ],
++                ),
++              ),
++            ),
++            Align(
++              alignment: Alignment.centerLeft,
++              child: _CircleIconButton(icon: Icons.chevron_left_rounded, onTap: widget.onBack),
++            ),
++            Align(
++              alignment: Alignment.centerRight,
++              child: _CircleIconButton(icon: Icons.add_rounded, onTap: widget.onAdd),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++class _CircleIconButton extends StatelessWidget {
++  final IconData icon;
++  final VoidCallback? onTap;
++  const _CircleIconButton({required this.icon, this.onTap});
++
++  @override
++  Widget build(BuildContext context) {
++    return Material(
++      color: AppColors.surface,
++      shape: const CircleBorder(),
++      elevation: 0,
++      child: InkWell(
++        onTap: onTap,
++        customBorder: const CircleBorder(),
++        child: Container(
++          width: 44,
++          height: 44,
++          decoration: BoxDecoration(
++            shape: BoxShape.circle,
++            boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 10, offset: const Offset(0, 2))],
++          ),
++          child: Icon(icon, size: 24, color: AppColors.textPrimary),
++        ),
++      ),
++    );
++  }
++}
++
++class _DropdownMenu extends StatelessWidget {
++  final ArusKasDirection currentDirection;
++  final ValueChanged<ArusKasDirection> onSelect;
++
++  const _DropdownMenu({required this.currentDirection, required this.onSelect});
++
++  @override
++  Widget build(BuildContext context) {
++    return Material(
++      color: Colors.transparent,
++      child: Container(
++        decoration: BoxDecoration(
++          color: AppColors.surface,
++          borderRadius: BorderRadius.circular(AppRadius.lg),
++          border: Border.all(color: AppColors.border),
++          boxShadow: [
++            BoxShadow(color: Colors.black.withValues(alpha: 0.08), blurRadius: 20, offset: const Offset(0, 6)),
++          ],
++        ),
++        padding: const EdgeInsets.symmetric(vertical: 6),
++        child: Column(
++          mainAxisSize: MainAxisSize.min,
++          children: [
++            _DropdownOption(
++              label: 'Pemasukan',
++              selected: currentDirection == ArusKasDirection.pemasukan,
++              onTap: () => onSelect(ArusKasDirection.pemasukan),
++            ),
++            _DropdownOption(
++              label: 'Pengeluaran',
++              selected: currentDirection == ArusKasDirection.pengeluaran,
++              onTap: () => onSelect(ArusKasDirection.pengeluaran),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++class _DropdownOption extends StatelessWidget {
++  final String label;
++  final bool selected;
++  final VoidCallback onTap;
++
++  const _DropdownOption({required this.label, required this.selected, required this.onTap});
++
++  @override
++  Widget build(BuildContext context) {
++    return InkWell(
++      onTap: onTap,
++      child: Container(
++        width: double.infinity,
++        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: 10),
++        color: selected ? AppColors.brand.withValues(alpha: 0.06) : Colors.transparent,
++        child: Row(
++          mainAxisAlignment: MainAxisAlignment.spaceBetween,
++          children: [
++            Text(
++              label,
++              style: TextStyle(
++                fontSize: 14,
++                fontWeight: FontWeight.w700,
++                color: selected ? AppColors.brand : AppColors.textPrimary,
++              ),
++            ),
++            if (selected) const Icon(Icons.check_rounded, size: 16, color: AppColors.brand),
++          ],
++        ),
++      ),
++    );
++  }
++}
+diff --git a/lib/features/dompet/application/dompet_provider.dart b/lib/features/dompet/application/dompet_provider.dart
+index 423c5a6..2586cce 100644
+--- a/lib/features/dompet/application/dompet_provider.dart
++++ b/lib/features/dompet/application/dompet_provider.dart
+@@ -18,6 +18,7 @@ class DompetState {
+   final DompetSummary? summary;
+   final List<CashMovement> recentMovements;
+   final List<Kasbon> outstandingKasbon;
++  final DompetClosing? lastClosing;
+   final bool isLoading;
+   final String? errorMessage;
+ 
+@@ -25,6 +26,7 @@ class DompetState {
+     this.summary,
+     this.recentMovements = const [],
+     this.outstandingKasbon = const [],
++    this.lastClosing,
+     this.isLoading = true,
+     this.errorMessage,
+   });
+@@ -33,6 +35,7 @@ class DompetState {
+     DompetSummary? summary,
+     List<CashMovement>? recentMovements,
+     List<Kasbon>? outstandingKasbon,
++    DompetClosing? lastClosing,
+     bool? isLoading,
+     String? errorMessage,
+   }) {
+@@ -40,6 +43,7 @@ class DompetState {
+       summary: summary ?? this.summary,
+       recentMovements: recentMovements ?? this.recentMovements,
+       outstandingKasbon: outstandingKasbon ?? this.outstandingKasbon,
++      lastClosing: lastClosing ?? this.lastClosing,
+       isLoading: isLoading ?? this.isLoading,
+       errorMessage: errorMessage,
+     );
+@@ -64,11 +68,13 @@ class DompetController extends StateNotifier<DompetState> {
+       final movements = await _repository.getMovements();
+       final kasbon = await _repository.getKasbonList();
+       final outstandingKasbon = kasbon.where((k) => k.status != KasbonStatus.paid).toList();
++      final lastClosing = await _repository.getLastClosing();
+ 
+       state = state.copyWith(
+         summary: summary,
+         recentMovements: movements,
+         outstandingKasbon: outstandingKasbon,
++        lastClosing: lastClosing,
+         isLoading: false,
+       );
+     } catch (e) {
+@@ -105,3 +111,88 @@ class DompetController extends StateNotifier<DompetState> {
+     }
+   }
+ }
++
++/// State for the Tutup Dompet screen — loads its own preview
++/// (independent of [dompetProvider]'s summary) so re-opening this
++/// screen always reflects the ledger as of "now", not a stale summary.
++class ClosingState {
++  final DompetClosingPreview? preview;
++  final bool isLoading;
++  final bool isSubmitting;
++  final String? errorMessage;
++  final DompetClosing? committed;
++
++  const ClosingState({
++    this.preview,
++    this.isLoading = true,
++    this.isSubmitting = false,
++    this.errorMessage,
++    this.committed,
++  });
++
++  ClosingState copyWith({
++    DompetClosingPreview? preview,
++    bool? isLoading,
++    bool? isSubmitting,
++    String? errorMessage,
++    DompetClosing? committed,
++  }) {
++    return ClosingState(
++      preview: preview ?? this.preview,
++      isLoading: isLoading ?? this.isLoading,
++      isSubmitting: isSubmitting ?? this.isSubmitting,
++      errorMessage: errorMessage,
++      committed: committed ?? this.committed,
++    );
++  }
++}
++
++final closingProvider = StateNotifierProvider.autoDispose<ClosingController, ClosingState>((ref) {
++  return ClosingController(ref.watch(dompetRepositoryProvider));
++});
++
++class ClosingController extends StateNotifier<ClosingState> {
++  final DompetRepository _repository;
++
++  ClosingController(this._repository) : super(const ClosingState()) {
++    load();
++  }
++
++  Future<void> load() async {
++    state = state.copyWith(isLoading: true, errorMessage: null);
++    try {
++      final preview = await _repository.buildClosingPreview();
++      state = state.copyWith(preview: preview, isLoading: false);
++    } catch (e) {
++      state = state.copyWith(isLoading: false, errorMessage: 'Gagal memuat ringkasan tutup dompet: $e');
++    }
++  }
++
++  /// Commits the close. [isOverdue] should be true if this close is
++  /// happening after the day it covers (per PRD's overdue-closing
++  /// rule) — the caller is still responsible for supplying the real
++  /// counted amount, never a guess.
++  Future<bool> submit({required int countedCash, String? note, bool isOverdue = false}) async {
++    final preview = state.preview;
++    if (preview == null) return false;
++    if (!preview.canClose) {
++      state = state.copyWith(errorMessage: 'Masih ada uang kurir yang belum diselesaikan.');
++      return false;
++    }
++
++    state = state.copyWith(isSubmitting: true, errorMessage: null);
++    try {
++      final closing = await _repository.closeDompet(
++        preview: preview,
++        countedCash: countedCash,
++        status: isOverdue ? DompetClosingStatus.overdueClosing : DompetClosingStatus.closed,
++        note: note,
++      );
++      state = state.copyWith(isSubmitting: false, committed: closing);
++      return true;
++    } catch (e) {
++      state = state.copyWith(isSubmitting: false, errorMessage: 'Gagal menutup dompet: $e');
++      return false;
++    }
++  }
++}
+diff --git a/lib/features/dompet/application/dompet_repository.dart b/lib/features/dompet/application/dompet_repository.dart
+index 58600f8..42012e7 100644
+--- a/lib/features/dompet/application/dompet_repository.dart
++++ b/lib/features/dompet/application/dompet_repository.dart
+@@ -104,7 +104,7 @@ class DompetRepository {
+   CashMovement _movementFromRow(Map<String, Object?> row) {
+     return CashMovement(
+       id: row['id'] as String,
+-      type: CashMovementType.values.firstWhere((t) => t.name == row['type'], orElse: () => CashMovementType.adjustment),
++      type: CashMovementType.fromDbValue(row['type'] as String),
+       fromLocationId: row['from_location_id'] as String?,
+       toLocationId: row['to_location_id'] as String?,
+       amount: row['amount'] as int,
+@@ -130,7 +130,7 @@ class DompetRepository {
+     final db = await _db;
+     await db.insert('cash_movements', {
+       'id': _uuid.v4(),
+-      'type': CashMovementType.cashSale.name,
++      'type': CashMovementType.cashSale.dbValue,
+       'from_location_id': null,
+       'to_location_id': toLocationId,
+       'amount': amount,
+@@ -153,7 +153,7 @@ class DompetRepository {
+     final db = await _db;
+     await db.insert('cash_movements', {
+       'id': _uuid.v4(),
+-      'type': CashMovementType.courierDeposit.name,
++      'type': CashMovementType.courierDeposit.dbValue,
+       'from_location_id': courierLocationId,
+       'to_location_id': 'loc-store',
+       'amount': amount,
+@@ -165,6 +165,72 @@ class DompetRepository {
+     });
+   }
+ 
++  /// Records a cash expense/pengeluaran movement leaving a location
++  /// (Store Cash or a courier's cash-on-hand). Used both directly and
++  /// via CashExpenseRepository (Arus Kas) for entries whose
++  /// funding_source is a real cash location — non_cash entries never
++  /// call this. Currently only Store Cash is exposed from the Arus Kas
++  /// UI; the courier param is here so a courier-funded expense is
++  /// representable in the ledger without a UI change later.
++  Future<String> recordCashExpense({
++    required String fromLocationId,
++    required int amount,
++    String? reason,
++  }) async {
++    final db = await _db;
++    final id = _uuid.v4();
++    await db.insert('cash_movements', {
++      'id': id,
++      'type': CashMovementType.expense.dbValue,
++      'from_location_id': fromLocationId,
++      'to_location_id': null,
++      'amount': amount,
++      'reference_transaction_id': null,
++      'reference_kasbon_id': null,
++      'reason': reason,
++      'created_at': DateTime.now().toIso8601String(),
++      'created_by': null,
++    });
++    return id;
++  }
++
++  /// Records a cash income movement entering a location — used for
++  /// Arus Kas "Pemasukan" entries whose funding_source is a real cash
++  /// location (e.g. capital injection, non-sales income). Distinct from
++  /// [recordCashSale], which is specifically for POS checkout sales and
++  /// carries a reference_transaction_id.
++  Future<String> recordCashIncome({
++    required String toLocationId,
++    required int amount,
++    String? reason,
++  }) async {
++    final db = await _db;
++    final id = _uuid.v4();
++    await db.insert('cash_movements', {
++      'id': id,
++      'type': CashMovementType.adjustment.dbValue,
++      'from_location_id': null,
++      'to_location_id': toLocationId,
++      'amount': amount,
++      'reference_transaction_id': null,
++      'reference_kasbon_id': null,
++      'reason': reason ?? 'Pemasukan non-penjualan',
++      'created_at': DateTime.now().toIso8601String(),
++      'created_by': null,
++    });
++    return id;
++  }
++
++  /// Deletes a cash_movement row — used only when a cash_expenses row
++  /// referencing it is deleted, to keep the two in sync. Cash movements
++  /// are otherwise immutable/never deleted (PRD §26); this is the one
++  /// exception, scoped to Arus Kas entry deletion which is itself a
++  /// user-facing "undo this entry" action, not a correction-in-place.
++  Future<void> deleteCashMovement(String movementId) async {
++    final db = await _db;
++    await db.delete('cash_movements', where: 'id = ?', whereArgs: [movementId]);
++  }
++
+   // --- Kasbon ---
+ 
+   Future<List<Kasbon>> getKasbonList({KasbonStatus? status}) async {
+@@ -172,7 +238,7 @@ class DompetRepository {
+     final rows = await db.query(
+       'kasbon',
+       where: status == null ? null : 'status = ?',
+-      whereArgs: status == null ? null : [status.name],
++      whereArgs: status == null ? null : [status.dbValue],
+       orderBy: 'created_at DESC',
+     );
+ 
+@@ -193,7 +259,7 @@ class DompetRepository {
+       amount: row['amount'] as int,
+       remainingBalance: row['remaining_balance'] as int,
+       source: row['source'] as String,
+-      status: KasbonStatus.values.firstWhere((s) => s.name == row['status'], orElse: () => KasbonStatus.outstanding),
++      status: KasbonStatus.fromDbValue(row['status'] as String),
+       createdAt: DateTime.parse(row['created_at'] as String),
+       createdBy: row['created_by'] as String?,
+       repayments: repaymentRows
+@@ -239,14 +305,14 @@ class DompetRepository {
+       'amount': amount,
+       'remaining_balance': amount,
+       'source': 'Unsettled Courier Cash',
+-      'status': KasbonStatus.outstanding.name,
++      'status': KasbonStatus.outstanding.dbValue,
+       'created_at': now,
+       'created_by': null,
+     });
+ 
+     await db.insert('cash_movements', {
+       'id': _uuid.v4(),
+-      'type': CashMovementType.convertToKasbon.name,
++      'type': CashMovementType.convertToKasbon.dbValue,
+       'from_location_id': courierLocationId,
+       'to_location_id': null,
+       'amount': amount,
+@@ -276,8 +342,8 @@ class DompetRepository {
+     final currentRemaining = kasbonRows.first['remaining_balance'] as int;
+     final newRemaining = (currentRemaining - amount).clamp(0, currentRemaining);
+     final newStatus = newRemaining == 0
+-        ? KasbonStatus.paid.name
+-        : (newRemaining < (kasbonRows.first['amount'] as int) ? KasbonStatus.partiallyPaid.name : KasbonStatus.outstanding.name);
++        ? KasbonStatus.paid.dbValue
++        : (newRemaining < (kasbonRows.first['amount'] as int) ? KasbonStatus.partiallyPaid.dbValue : KasbonStatus.outstanding.dbValue);
+ 
+     await db.insert('kasbon_repayments', {
+       'id': _uuid.v4(),
+@@ -295,4 +361,141 @@ class DompetRepository {
+       whereArgs: [kasbonId],
+     );
+   }
++
++  // --- Tutup Dompet (closing) ---
++
++  Future<List<DompetClosing>> getClosings({int limit = 50}) async {
++    final db = await _db;
++    final rows = await db.query('dompet_closings', orderBy: 'period_end DESC', limit: limit);
++    return rows.map(_closingFromRow).toList();
++  }
++
++  Future<DompetClosing?> getLastClosing() async {
++    final db = await _db;
++    final rows = await db.query('dompet_closings', orderBy: 'period_end DESC', limit: 1);
++    if (rows.isEmpty) return null;
++    return _closingFromRow(rows.first);
++  }
++
++  DompetClosing _closingFromRow(Map<String, Object?> row) {
++    return DompetClosing(
++      id: row['id'] as String,
++      periodStart: DateTime.parse(row['period_start'] as String),
++      periodEnd: DateTime.parse(row['period_end'] as String),
++      openingBalance: row['opening_balance'] as int,
++      cashSalesTotal: row['cash_sales_total'] as int,
++      courierDepositsTotal: row['courier_deposits_total'] as int,
++      cashExpensesTotal: row['cash_expenses_total'] as int,
++      expectedCash: row['expected_cash'] as int,
++      countedCash: row['counted_cash'] as int,
++      discrepancy: row['discrepancy'] as int,
++      status: DompetClosingStatusDb.fromDbValue(row['status'] as String),
++      note: row['note'] as String?,
++      createdAt: DateTime.parse(row['created_at'] as String),
++      createdBy: row['created_by'] as String?,
++    );
++  }
++
++  /// Builds a dry-run preview of closing Store Cash right now, covering
++  /// the period since the previous closing (or the beginning of the
++  /// ledger, if this is the first-ever close). Per PRD: Expected Cash =
++  /// Opening + Cash Sales + Courier Deposits - Cash Expenses, and
++  /// closing must be blocked while any courier holds outstanding cash.
++  Future<DompetClosingPreview> buildClosingPreview() async {
++    final db = await _db;
++    final lastClosing = await getLastClosing();
++    final periodStart = lastClosing?.periodEnd ?? DateTime.fromMillisecondsSinceEpoch(0);
++    final openingBalance = lastClosing?.expectedCash ?? 0;
++
++    Future<int> sumStoreMovements(CashMovementType type, {required bool asIncoming}) async {
++      final column = asIncoming ? 'to_location_id' : 'from_location_id';
++      final result = await db.rawQuery(
++        'SELECT COALESCE(SUM(amount), 0) as total FROM cash_movements '
++        'WHERE type = ? AND $column = ? AND created_at > ?',
++        [type.dbValue, 'loc-store', periodStart.toIso8601String()],
++      );
++      return result.first['total'] as int;
++    }
++
++    final cashSalesTotal = await sumStoreMovements(CashMovementType.cashSale, asIncoming: true);
++    final courierDepositsTotal = await sumStoreMovements(CashMovementType.courierDeposit, asIncoming: true);
++    final cashExpensesTotal = await sumStoreMovements(CashMovementType.expense, asIncoming: false);
++    final expectedCash = openingBalance + cashSalesTotal + courierDepositsTotal - cashExpensesTotal;
++
++    final outstandingCouriers = await getCourierBalancesWithOutstanding();
++
++    return DompetClosingPreview(
++      periodStart: periodStart,
++      openingBalance: openingBalance,
++      cashSalesTotal: cashSalesTotal,
++      courierDepositsTotal: courierDepositsTotal,
++      cashExpensesTotal: cashExpensesTotal,
++      expectedCash: expectedCash,
++      outstandingCouriers: outstandingCouriers,
++    );
++  }
++
++  /// Commits a Tutup Dompet closing. Throws a [StateError] if any
++  /// courier still has outstanding cash — per PRD, that must be
++  /// resolved (deposited or converted to kasbon) first; there is no
++  /// "close anyway" override. If [countedCash] differs from the
++  /// preview's expected cash, the difference is recorded as its own
++  /// `adjustment` cash movement so the ledger reconciles to the counted
++  /// figure going forward, and [status] reflects whether this close is
++  /// happening on time or is an [DompetClosingStatus.overdueClosing]
++  /// (shift/day not closed before midnight — never auto-closes with
++  /// guessed numbers, and the caller must pass the real counted amount
++  /// even when overdue).
++  Future<DompetClosing> closeDompet({
++    required DompetClosingPreview preview,
++    required int countedCash,
++    DompetClosingStatus status = DompetClosingStatus.closed,
++    String? note,
++  }) async {
++    if (!preview.canClose) {
++      throw StateError('Tidak bisa tutup dompet: masih ada uang kurir yang belum diselesaikan.');
++    }
++
++    final db = await _db;
++    final id = _uuid.v4();
++    final now = DateTime.now();
++    final discrepancy = countedCash - preview.expectedCash;
++
++    await db.insert('dompet_closings', {
++      'id': id,
++      'period_start': preview.periodStart.toIso8601String(),
++      'period_end': now.toIso8601String(),
++      'opening_balance': preview.openingBalance,
++      'cash_sales_total': preview.cashSalesTotal,
++      'courier_deposits_total': preview.courierDepositsTotal,
++      'cash_expenses_total': preview.cashExpensesTotal,
++      'expected_cash': preview.expectedCash,
++      'counted_cash': countedCash,
++      'discrepancy': discrepancy,
++      'status': status.dbValue,
++      'note': note,
++      'created_at': now.toIso8601String(),
++      'created_by': null,
++    });
++
++    if (discrepancy != 0) {
++      // Positive discrepancy (counted > expected) -> cash entering Store
++      // Cash; negative -> cash leaving it. Recorded as its own
++      // adjustment movement, never by editing prior movements.
++      await db.insert('cash_movements', {
++        'id': _uuid.v4(),
++        'type': CashMovementType.adjustment.dbValue,
++        'from_location_id': discrepancy < 0 ? 'loc-store' : null,
++        'to_location_id': discrepancy > 0 ? 'loc-store' : null,
++        'amount': discrepancy.abs(),
++        'reference_transaction_id': null,
++        'reference_kasbon_id': null,
++        'reason': 'Selisih Tutup Dompet',
++        'created_at': now.toIso8601String(),
++        'created_by': null,
++      });
++    }
++
++    return (await getLastClosing())!;
++  }
+ }
+diff --git a/lib/features/dompet/domain/dompet_models.dart b/lib/features/dompet/domain/dompet_models.dart
+index 0e4a1cb..3d26980 100644
+--- a/lib/features/dompet/domain/dompet_models.dart
++++ b/lib/features/dompet/domain/dompet_models.dart
+@@ -21,13 +21,47 @@ class CashLocation {
+ 
+ /// Ledger entry types. Matches the PRD's cash-movement vocabulary —
+ /// note there is deliberately no "will deposit later" type (PRD §17).
++///
++/// IMPORTANT: the DB column stores snake_case strings (see the
++/// `cash_movements.type` comment in app_database.dart), which do NOT
++/// match Dart's enum `.name` for the multi-word members (e.g.
++/// `cashSale.name == 'cashSale'`, not `'cash_sale'`). Always read/write
++/// this column via [dbValue]/[fromDbValue] — never `.name` or
++/// `CashMovementType.values.firstWhere((t) => t.name == ...)` directly.
++/// That exact mismatch previously caused every real cash-sale movement
++/// to silently fail to parse and fall back to [adjustment], showing up
++/// in the UI as a wall of generic "Penyesuaian" entries.
+ enum CashMovementType {
+   opening,
+   cashSale, // Store Cash or a courier location receiving payment from a sale
+   courierDeposit, // Courier -> Store Cash ("Sudah Disetor")
+   convertToKasbon, // Courier -> leaves the cash ledger, becomes Staff Debt
+   expense,
+-  adjustment,
++  adjustment;
++
++  String get dbValue {
++    switch (this) {
++      case CashMovementType.opening:
++        return 'opening';
++      case CashMovementType.cashSale:
++        return 'cash_sale';
++      case CashMovementType.courierDeposit:
++        return 'courier_deposit';
++      case CashMovementType.convertToKasbon:
++        return 'convert_to_kasbon';
++      case CashMovementType.expense:
++        return 'expense';
++      case CashMovementType.adjustment:
++        return 'adjustment';
++    }
++  }
++
++  static CashMovementType fromDbValue(String value) {
++    return CashMovementType.values.firstWhere(
++      (t) => t.dbValue == value,
++      orElse: () => CashMovementType.adjustment,
++    );
++  }
+ }
+ 
+ /// One immutable cash-movement ledger row. Never edited or deleted —
+@@ -58,7 +92,33 @@ class CashMovement {
+   });
+ }
+ 
+-enum KasbonStatus { outstanding, partiallyPaid, paid }
++/// Same snake_case-vs-camelCase trap as [CashMovementType] applies here
++/// — `partiallyPaid.name == 'partiallyPaid'`, but the DB column
++/// (`kasbon.status` comment in app_database.dart) stores
++/// `'partially_paid'`. Always use [dbValue]/[fromDbValue].
++enum KasbonStatus {
++  outstanding,
++  partiallyPaid,
++  paid;
++
++  String get dbValue {
++    switch (this) {
++      case KasbonStatus.outstanding:
++        return 'outstanding';
++      case KasbonStatus.partiallyPaid:
++        return 'partially_paid';
++      case KasbonStatus.paid:
++        return 'paid';
++    }
++  }
++
++  static KasbonStatus fromDbValue(String value) {
++    return KasbonStatus.values.firstWhere(
++      (s) => s.dbValue == value,
++      orElse: () => KasbonStatus.outstanding,
++    );
++  }
++}
+ 
+ /// Staff debt created by "Jadikan Kasbon". Per PRD §9, status/
+ /// remaining balance only change via explicit repayment records — never
+@@ -134,3 +194,94 @@ class DompetSummary {
+     required this.courierBalances,
+   });
+ }
++
++/// Status of a Dompet closing ("Tutup Dompet"). [overdueClosing] is the
++/// PRD-mandated state for a shift/day not closed before midnight — it
++/// must never auto-close with guessed numbers, and next-day movements
++/// must never be folded into it (PRD's overdue-closing invariant).
++enum DompetClosingStatus { closed, overdueClosing }
++
++/// Same snake_case DB convention as the other enums here.
++extension DompetClosingStatusDb on DompetClosingStatus {
++  String get dbValue => this == DompetClosingStatus.closed ? 'closed' : 'overdue_closing';
++
++  static DompetClosingStatus fromDbValue(String value) =>
++      value == 'overdue_closing' ? DompetClosingStatus.overdueClosing : DompetClosingStatus.closed;
++}
++
++/// One immutable "Tutup Dompet" closing record for Store Cash.
++///
++/// NOTE: this app doesn't have a Shift module yet (see [[dompet-prd]] /
++/// [[mamam-kasir-flutter]]), so a closing period here is simply "since
++/// the previous closing's periodEnd" rather than a formal shift. Once
++/// Shift exists, [periodStart]/[periodEnd] are expected to be
++/// reconciled against shift_id rather than the previous closing row —
++/// the ledger math and the courier-outstanding block below are the
++/// part of this that's meant to carry over unchanged.
++///
++/// Per PRD: Expected Cash = Opening + Cash Sales + Courier Deposits -
++/// Cash Expenses (courier outstanding is excluded until settled).
++/// [countedCash] is what the kasir physically counted; [discrepancy] =
++/// countedCash - expectedCash, and is recorded as its own `adjustment`
++/// cash movement so the ledger and the physical count reconcile to the
++/// same number going forward — this record itself is never edited.
++class DompetClosing {
++  final String id;
++  final DateTime periodStart;
++  final DateTime periodEnd;
++  final int openingBalance;
++  final int cashSalesTotal;
++  final int courierDepositsTotal;
++  final int cashExpensesTotal;
++  final int expectedCash;
++  final int countedCash;
++  final int discrepancy;
++  final DompetClosingStatus status;
++  final String? note;
++  final DateTime createdAt;
++  final String? createdBy;
++
++  const DompetClosing({
++    required this.id,
++    required this.periodStart,
++    required this.periodEnd,
++    required this.openingBalance,
++    required this.cashSalesTotal,
++    required this.courierDepositsTotal,
++    required this.cashExpensesTotal,
++    required this.expectedCash,
++    required this.countedCash,
++    required this.discrepancy,
++    required this.status,
++    this.note,
++    required this.createdAt,
++    this.createdBy,
++  });
++}
++
++/// A dry-run preview of what closing right now would look like — shown
++/// on the Tutup Dompet screen before the kasir commits. Not persisted.
++class DompetClosingPreview {
++  final DateTime periodStart;
++  final int openingBalance;
++  final int cashSalesTotal;
++  final int courierDepositsTotal;
++  final int cashExpensesTotal;
++  final int expectedCash;
++  final List<CashLocationBalance> outstandingCouriers;
++
++  const DompetClosingPreview({
++    required this.periodStart,
++    required this.openingBalance,
++    required this.cashSalesTotal,
++    required this.courierDepositsTotal,
++    required this.cashExpensesTotal,
++    required this.expectedCash,
++    required this.outstandingCouriers,
++  });
++
++  /// Per PRD: closing is blocked while any courier holds outstanding
++  /// cash — it must be resolved (deposited or converted to kasbon)
++  /// first, never carried across the close.
++  bool get canClose => outstandingCouriers.isEmpty;
++}
+diff --git a/lib/features/dompet/presentation/dompet_closing_screen.dart b/lib/features/dompet/presentation/dompet_closing_screen.dart
+new file mode 100644
+index 0000000..59e235a
+--- /dev/null
++++ b/lib/features/dompet/presentation/dompet_closing_screen.dart
+@@ -0,0 +1,338 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../../../core/theme/app_colors.dart';
++import '../../../core/theme/app_spacing.dart';
++import '../../../core/utils/currency.dart';
++import '../../../core/widgets/ios_page_header.dart';
++import '../application/dompet_provider.dart';
++import '../domain/dompet_models.dart';
++
++/// "Tutup Dompet" — closes Store Cash for the period since the previous
++/// closing. Per PRD: blocked while any courier still holds outstanding
++/// cash, computes Expected Cash from the ledger, and asks the kasir to
++/// enter the physically counted amount; any difference is recorded as
++/// its own adjustment movement rather than editing the ledger.
++///
++/// No Shift module exists yet — see [[dompet-prd]] / DompetClosing's
++/// doc comment for how this reconciles once Shift lands.
++class DompetClosingScreen extends ConsumerStatefulWidget {
++  const DompetClosingScreen({super.key});
++
++  @override
++  ConsumerState<DompetClosingScreen> createState() => _DompetClosingScreenState();
++}
++
++class _DompetClosingScreenState extends ConsumerState<DompetClosingScreen> {
++  final _countedController = TextEditingController();
++  final _noteController = TextEditingController();
++
++  @override
++  void dispose() {
++    _countedController.dispose();
++    _noteController.dispose();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final state = ref.watch(closingProvider);
++    final controller = ref.read(closingProvider.notifier);
++
++    ref.listen(closingProvider, (previous, next) {
++      if (next.errorMessage != null && next.errorMessage != previous?.errorMessage) {
++        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(next.errorMessage!), backgroundColor: AppColors.danger));
++      }
++      if (next.committed != null && previous?.committed == null) {
++        _showResultSheet(context, next.committed!);
++      }
++    });
++
++    return Scaffold(
++      backgroundColor: AppColors.background,
++      appBar: IosPageHeader(title: const Text('Tutup Dompet')),
++      body: SafeArea(
++        top: false,
++        child: state.isLoading || state.preview == null
++            ? const Center(child: CircularProgressIndicator(color: AppColors.brand))
++            : _Body(
++                preview: state.preview!,
++                countedController: _countedController,
++                noteController: _noteController,
++                isSubmitting: state.isSubmitting,
++                onSubmit: () async {
++                  final counted = int.tryParse(_countedController.text.trim());
++                  if (counted == null || counted < 0) {
++                    ScaffoldMessenger.of(context).showSnackBar(
++                      const SnackBar(content: Text('Masukkan jumlah uang fisik yang valid.'), backgroundColor: AppColors.danger),
++                    );
++                    return;
++                  }
++                  await controller.submit(
++                    countedCash: counted,
++                    note: _noteController.text.trim().isEmpty ? null : _noteController.text.trim(),
++                  );
++                },
++              ),
++      ),
++    );
++  }
++
++  void _showResultSheet(BuildContext context, DompetClosing closing) {
++    showModalBottomSheet(
++      context: context,
++      isDismissible: false,
++      enableDrag: false,
++      backgroundColor: Colors.transparent,
++      builder: (sheetContext) => _ClosingResultSheet(
++        closing: closing,
++        onDone: () {
++          Navigator.of(sheetContext).pop();
++          Navigator.of(context).pop();
++        },
++      ),
++    );
++  }
++}
++
++class _Body extends StatelessWidget {
++  final DompetClosingPreview preview;
++  final TextEditingController countedController;
++  final TextEditingController noteController;
++  final bool isSubmitting;
++  final VoidCallback onSubmit;
++
++  const _Body({
++    required this.preview,
++    required this.countedController,
++    required this.noteController,
++    required this.isSubmitting,
++    required this.onSubmit,
++  });
++
++  @override
++  Widget build(BuildContext context) {
++    return Column(
++      children: [
++        Expanded(
++          child: ListView(
++            padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.xl),
++            children: [
++              if (!preview.canClose) _BlockedCard(preview: preview),
++              const SizedBox(height: AppSpacing.lg),
++              _SectionLabel(text: 'RINGKASAN KAS'),
++              const SizedBox(height: AppSpacing.sm),
++              Container(
++                padding: const EdgeInsets.all(AppSpacing.md),
++                decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.lg), border: Border.all(color: AppColors.border)),
++                child: Column(
++                  children: [
++                    _SummaryRow(label: 'Saldo Awal', value: preview.openingBalance),
++                    _SummaryRow(label: 'Penjualan Cash', value: preview.cashSalesTotal, positive: true),
++                    _SummaryRow(label: 'Setoran Kurir', value: preview.courierDepositsTotal, positive: true),
++                    _SummaryRow(label: 'Pengeluaran Cash', value: preview.cashExpensesTotal, positive: false),
++                    const Divider(height: AppSpacing.lg, color: AppColors.border),
++                    _SummaryRow(label: 'Kas Diharapkan (Expected Cash)', value: preview.expectedCash, bold: true),
++                  ],
++                ),
++              ),
++              const SizedBox(height: AppSpacing.xl),
++              _SectionLabel(text: 'HITUNG FISIK'),
++              const SizedBox(height: AppSpacing.sm),
++              TextField(
++                controller: countedController,
++                enabled: preview.canClose && !isSubmitting,
++                keyboardType: TextInputType.number,
++                decoration: InputDecoration(
++                  hintText: 'Jumlah uang fisik dihitung',
++                  filled: true,
++                  fillColor: AppColors.surface,
++                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.border)),
++                  enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.border)),
++                ),
++              ),
++              const SizedBox(height: AppSpacing.md),
++              TextField(
++                controller: noteController,
++                enabled: preview.canClose && !isSubmitting,
++                minLines: 2,
++                maxLines: 4,
++                decoration: InputDecoration(
++                  hintText: 'Catatan (opsional)',
++                  filled: true,
++                  fillColor: AppColors.surface,
++                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.border)),
++                  enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.border)),
++                ),
++              ),
++            ],
++          ),
++        ),
++        Container(
++          padding: EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, AppSpacing.sm + MediaQuery.of(context).padding.bottom),
++          decoration: const BoxDecoration(color: AppColors.surface, border: Border(top: BorderSide(color: AppColors.border))),
++          child: SizedBox(
++            width: double.infinity,
++            height: 50,
++            child: ElevatedButton(
++              onPressed: preview.canClose && !isSubmitting ? onSubmit : null,
++              style: ElevatedButton.styleFrom(
++                backgroundColor: AppColors.brand,
++                disabledBackgroundColor: AppColors.border,
++                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
++              ),
++              child: isSubmitting
++                  ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2.5, color: Colors.white))
++                  : const Text('Tutup Dompet', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: Colors.white)),
++            ),
++          ),
++        ),
++      ],
++    );
++  }
++}
++
++class _BlockedCard extends StatelessWidget {
++  final DompetClosingPreview preview;
++  const _BlockedCard({required this.preview});
++
++  @override
++  Widget build(BuildContext context) {
++    return Container(
++      padding: const EdgeInsets.all(AppSpacing.md),
++      decoration: BoxDecoration(
++        color: AppColors.danger.withValues(alpha: 0.08),
++        borderRadius: BorderRadius.circular(AppRadius.lg),
++        border: Border.all(color: AppColors.danger.withValues(alpha: 0.25)),
++      ),
++      child: Column(
++        crossAxisAlignment: CrossAxisAlignment.start,
++        children: [
++          Row(
++            children: [
++              const Icon(Icons.error_rounded, size: 18, color: AppColors.danger),
++              const SizedBox(width: AppSpacing.sm),
++              const Expanded(
++                child: Text(
++                  'Belum bisa tutup dompet',
++                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: AppColors.danger),
++                ),
++              ),
++            ],
++          ),
++          const SizedBox(height: 6),
++          const Text(
++            'Selesaikan dulu uang kurir berikut (setor atau jadikan kasbon) sebelum menutup dompet.',
++            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: AppColors.textSecondary),
++          ),
++          const SizedBox(height: AppSpacing.sm),
++          ...preview.outstandingCouriers.map(
++            (b) => Padding(
++              padding: const EdgeInsets.only(top: 4),
++              child: Row(
++                mainAxisAlignment: MainAxisAlignment.spaceBetween,
++                children: [
++                  Text(b.location.name, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
++                  Text(formatRupiah(b.balance), style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800, color: AppColors.danger)),
++                ],
++              ),
++            ),
++          ),
++        ],
++      ),
++    );
++  }
++}
++
++class _SummaryRow extends StatelessWidget {
++  final String label;
++  final int value;
++  final bool? positive;
++  final bool bold;
++  const _SummaryRow({required this.label, required this.value, this.positive, this.bold = false});
++
++  @override
++  Widget build(BuildContext context) {
++    final color = bold
++        ? AppColors.textPrimary
++        : positive == null
++            ? AppColors.textPrimary
++            : (positive! ? AppColors.success : AppColors.danger);
++    final sign = positive == null ? '' : (positive! ? '+' : '-');
++
++    return Padding(
++      padding: const EdgeInsets.symmetric(vertical: 5),
++      child: Row(
++        mainAxisAlignment: MainAxisAlignment.spaceBetween,
++        children: [
++          Text(label, style: TextStyle(fontSize: bold ? 13 : 12.5, fontWeight: bold ? FontWeight.w800 : FontWeight.w600, color: AppColors.textSecondary)),
++          Text(
++            '$sign${formatRupiah(value)}',
++            style: TextStyle(fontSize: bold ? 14 : 12.5, fontWeight: FontWeight.w800, color: color),
++          ),
++        ],
++      ),
++    );
++  }
++}
++
++class _SectionLabel extends StatelessWidget {
++  final String text;
++  const _SectionLabel({required this.text});
++
++  @override
++  Widget build(BuildContext context) {
++    return Text(text, style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w800, color: AppColors.textMuted, letterSpacing: 0.5));
++  }
++}
++
++class _ClosingResultSheet extends StatelessWidget {
++  final DompetClosing closing;
++  final VoidCallback onDone;
++  const _ClosingResultSheet({required this.closing, required this.onDone});
++
++  @override
++  Widget build(BuildContext context) {
++    final hasDiscrepancy = closing.discrepancy != 0;
++    return Container(
++      padding: EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.lg, AppSpacing.lg, AppSpacing.lg + MediaQuery.of(context).padding.bottom),
++      decoration: const BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.vertical(top: Radius.circular(AppRadius.xl))),
++      child: Column(
++        mainAxisSize: MainAxisSize.min,
++        children: [
++          Container(
++            width: 56,
++            height: 56,
++            decoration: BoxDecoration(color: AppColors.success.withValues(alpha: 0.1), shape: BoxShape.circle),
++            child: const Icon(Icons.check_rounded, color: AppColors.success, size: 30),
++          ),
++          const SizedBox(height: AppSpacing.md),
++          const Text('Dompet Ditutup', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
++          const SizedBox(height: AppSpacing.sm),
++          Text(
++            'Kas Diharapkan: ${formatRupiah(closing.expectedCash)}\nKas Dihitung: ${formatRupiah(closing.countedCash)}',
++            textAlign: TextAlign.center,
++            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textSecondary),
++          ),
++          if (hasDiscrepancy) ...[
++            const SizedBox(height: AppSpacing.sm),
++            Text(
++              closing.discrepancy > 0 ? 'Selisih lebih ${formatRupiah(closing.discrepancy)}' : 'Selisih kurang ${formatRupiah(closing.discrepancy.abs())}',
++              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: closing.discrepancy > 0 ? AppColors.success : AppColors.danger),
++            ),
++          ],
++          const SizedBox(height: AppSpacing.lg),
++          SizedBox(
++            width: double.infinity,
++            height: 48,
++            child: ElevatedButton(
++              onPressed: onDone,
++              style: ElevatedButton.styleFrom(backgroundColor: AppColors.brand, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md))),
++              child: const Text('Selesai', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: Colors.white)),
++            ),
++          ),
++        ],
++      ),
++    );
++  }
++}
+diff --git a/lib/features/dompet/presentation/dompet_screen.dart b/lib/features/dompet/presentation/dompet_screen.dart
+index c53054d..05d7859 100644
+--- a/lib/features/dompet/presentation/dompet_screen.dart
++++ b/lib/features/dompet/presentation/dompet_screen.dart
+@@ -1,12 +1,14 @@
+ import 'package:flutter/material.dart';
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
++import '../../../core/navigation/app_nav.dart';
+ import '../../../core/theme/app_colors.dart';
+ import '../../../core/theme/app_spacing.dart';
+ import '../../../core/utils/currency.dart';
+ import '../../../core/widgets/ios_page_header.dart';
+ import '../application/dompet_provider.dart';
+ import '../domain/dompet_models.dart';
++import 'dompet_closing_screen.dart';
+ import 'widgets/cash_movement_tile.dart';
+ import 'widgets/courier_outstanding_card.dart';
+ 
+@@ -14,10 +16,8 @@ import 'widgets/courier_outstanding_card.dart';
+ /// tile. Shows saldo, the PRD-mandated three-category summary (Uang di
+ /// Dompet / Uang di Kurir / Kasbon Staff, deliberately never summed
+ /// together — PRD §23), outstanding courier cash needing resolution,
+-/// and recent cash activity.
+-///
+-/// Closing/"Tutup Dompet" is NOT part of this screen — that lands once
+-/// Shift exists, see [[dompet-prd]].
++/// recent cash activity, and a "Tutup Dompet" entry point (header
++/// trailing icon) into [DompetClosingScreen].
+ class DompetScreen extends ConsumerWidget {
+   const DompetScreen({super.key});
+ 
+@@ -34,7 +34,14 @@ class DompetScreen extends ConsumerWidget {
+ 
+     return Scaffold(
+       backgroundColor: AppColors.background,
+-      appBar: IosPageHeader(title: const Text('Dompet')),
++      appBar: IosPageHeader(
++        title: const Text('Dompet'),
++        trailingIcon: Icons.lock_clock_rounded,
++        onTrailingTap: () async {
++          await AppNav.push(context, (_) => const DompetClosingScreen());
++          controller.load();
++        },
++      ),
+       body: SafeArea(
+         top: false,
+         child: state.isLoading
+@@ -49,6 +56,10 @@ class DompetScreen extends ConsumerWidget {
+                     _SaldoCard(summary: state.summary),
+                     const SizedBox(height: AppSpacing.lg),
+                     _RingkasanRow(summary: state.summary),
++                    if (state.lastClosing != null) ...[
++                      const SizedBox(height: AppSpacing.sm),
++                      _LastClosingNote(closing: state.lastClosing!),
++                    ],
+                     if (state.summary != null && state.summary!.courierBalances.isNotEmpty) ...[
+                       const SizedBox(height: AppSpacing.xl),
+                       const _SectionLabel(text: 'UANG DI KURIR'),
+@@ -210,3 +221,31 @@ class _SectionLabel extends StatelessWidget {
+     return Text(text, style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w800, color: AppColors.textMuted, letterSpacing: 0.5));
+   }
+ }
++
++class _LastClosingNote extends StatelessWidget {
++  final DompetClosing closing;
++  const _LastClosingNote({required this.closing});
++
++  @override
++  Widget build(BuildContext context) {
++    final isOverdue = closing.status == DompetClosingStatus.overdueClosing;
++    final label = isOverdue ? 'Tutup Dompet terakhir (overdue)' : 'Tutup Dompet terakhir';
++    return Row(
++      children: [
++        Icon(Icons.history_rounded, size: 13, color: AppColors.textMuted),
++        const SizedBox(width: 4),
++        Expanded(
++          child: Text(
++            '$label · ${_formatDate(closing.periodEnd)}',
++            style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: isOverdue ? AppColors.warning : AppColors.textMuted),
++          ),
++        ),
++      ],
++    );
++  }
++
++  String _formatDate(DateTime dt) {
++    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
++    return '${dt.day} ${months[dt.month - 1]}, ${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
++  }
++}
+diff --git a/lib/features/menu_shell/presentation/menu_grid_items.dart b/lib/features/menu_shell/presentation/menu_grid_items.dart
+index c492935..0ce4feb 100644
+--- a/lib/features/menu_shell/presentation/menu_grid_items.dart
++++ b/lib/features/menu_shell/presentation/menu_grid_items.dart
+@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
+ import '../../../core/navigation/app_nav.dart';
+ import '../../../core/theme/app_colors.dart';
+ import '../../../core/widgets/placeholder_screen.dart';
++import '../../arus_kas/presentation/arus_kas_screen.dart';
+ import '../../dompet/presentation/dompet_screen.dart';
+ import '../../hpp_opname/presentation/hpp_opname_screen.dart';
+ import '../../laporan/presentation/laporan_screen.dart';
+@@ -77,7 +78,12 @@ List<MenuGridItem> buildMenuGridItems({
+       onTap: () => pushDestination((_) => const MenuManagementScreen()),
+     ),
+     placeholderTile(label: 'Laba Rugi', icon: Icons.receipt_long_rounded, color: AppColors.tileLabaRugi),
+-    placeholderTile(label: 'Kas', icon: Icons.compare_arrows_rounded, color: AppColors.tileKas),
++    MenuGridItem(
++      label: 'Kas',
++      icon: Icons.compare_arrows_rounded,
++      color: AppColors.tileKas,
++      onTap: () => pushDestination((_) => const ArusKasScreen()),
++    ),
+     placeholderTile(label: 'Pelanggan', icon: Icons.people_alt_rounded, color: AppColors.tilePelanggan),
+     MenuGridItem(
+       label: 'Laporan',
+-- 
+2.43.0
+
