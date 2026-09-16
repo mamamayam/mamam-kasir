@@ -1,6 +1,14 @@
 # mamam_kasir
 
-A new Flutter project.
+Aplikasi POS/kasir "Mamam Kasir" — Flutter + Supabase.
+
+## Sebelum mulai kerja (WAJIB untuk AI agent)
+
+Baca **`AGENTS.md`** di root repo ini dulu — golden rules bisnis,
+arsitektur, dan pointer ke standar komponen UI
+(`docs/component-standards-prompt.md`) yang wajib diikuti sebelum
+membuat atau mengedit widget apa pun. Dokumen PRD/arsitektur/kontrak
+lengkap ada di `docs/handoff/`.
 
 ## Getting Started
 
