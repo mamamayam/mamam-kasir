@@ -19,6 +19,7 @@ class HistoryState {
   final OrderType? orderTypeFilter; // null = semua
   final String? paymentMethodFilter; // null = semua
   final HistorySortKey sortKey;
+  final HistoryStatusFilter statusFilter;
 
   const HistoryState({
     this.transactions = const [],
@@ -31,6 +32,7 @@ class HistoryState {
     this.orderTypeFilter,
     this.paymentMethodFilter,
     this.sortKey = HistorySortKey.dateDesc,
+    this.statusFilter = HistoryStatusFilter.diproses,
   });
 
   HistoryState copyWith({
@@ -46,6 +48,7 @@ class HistoryState {
     String? paymentMethodFilter,
     bool clearPaymentMethodFilter = false,
     HistorySortKey? sortKey,
+    HistoryStatusFilter? statusFilter,
   }) {
     return HistoryState(
       transactions: transactions ?? this.transactions,
@@ -58,6 +61,7 @@ class HistoryState {
       orderTypeFilter: clearOrderTypeFilter ? null : (orderTypeFilter ?? this.orderTypeFilter),
       paymentMethodFilter: clearPaymentMethodFilter ? null : (paymentMethodFilter ?? this.paymentMethodFilter),
       sortKey: sortKey ?? this.sortKey,
+      statusFilter: statusFilter ?? this.statusFilter,
     );
   }
 
@@ -97,6 +101,17 @@ class HistoryState {
         t.total.toString().contains(q);
   }
 
+  bool _matchesStatus(Transaction t) {
+    switch (statusFilter) {
+      case HistoryStatusFilter.diproses:
+        return t.status == TransactionStatus.open;
+      case HistoryStatusFilter.selesai:
+        return t.status == TransactionStatus.paid;
+      case HistoryStatusFilter.dibatalkan:
+        return t.status == TransactionStatus.canceled;
+    }
+  }
+
   /// Filtered by everything except the payment-method filter — used for
   /// the payment breakdown card, which should always show the full
   /// composition within the active date/search/order-type filter (same
@@ -105,7 +120,7 @@ class HistoryState {
   /// PRD-sanctioned).
   List<Transaction> get _filteredForBreakdown {
     return transactions.where((t) {
-      return _matchesSearch(t) && _withinDateRange(t.createdAt) && (orderTypeFilter == null || t.orderType == orderTypeFilter);
+      return _matchesStatus(t) && _matchesSearch(t) && _withinDateRange(t.createdAt) && (orderTypeFilter == null || t.orderType == orderTypeFilter);
     }).toList();
   }
 
@@ -188,12 +203,33 @@ class HistoryController extends StateNotifier<HistoryState> {
 
   void setSortKey(HistorySortKey key) => state = state.copyWith(sortKey: key);
 
+  void setStatusFilter(HistoryStatusFilter filter) => state = state.copyWith(statusFilter: filter);
+
   Future<void> cancelTransaction(String transactionId, {String? reason}) async {
     try {
       await _repository.cancelTransaction(transactionId, reason: reason);
       await load();
     } catch (e) {
       state = state.copyWith(errorMessage: 'Gagal membatalkan transaksi: $e');
+    }
+  }
+
+  Future<void> completeTransaction(
+    String transactionId, {
+    required String paymentMethodLabel,
+    required int amountPaid,
+    String? cashLocationId,
+  }) async {
+    try {
+      await _repository.completeTransaction(
+        transactionId,
+        paymentMethodLabel: paymentMethodLabel,
+        amountPaid: amountPaid,
+        cashLocationId: cashLocationId,
+      );
+      await load();
+    } catch (e) {
+      state = state.copyWith(errorMessage: 'Gagal menyelesaikan pesanan: $e');
     }
   }
 }

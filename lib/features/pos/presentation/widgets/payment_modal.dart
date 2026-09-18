@@ -5,6 +5,7 @@ import '../../../../core/navigation/app_nav.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/theme/app_spacing.dart';
 import '../../../../core/utils/currency.dart';
+import '../../../../core/widgets/app_button.dart';
 import '../../../../core/widgets/app_sheet_header.dart';
 import '../../../dompet/presentation/widgets/cash_location_picker.dart';
 import '../../application/cart_provider.dart';
@@ -96,6 +97,62 @@ class _PaymentModalState extends ConsumerState<PaymentModal> {
     );
   }
 
+  /// "Proses Pesanan" — saves the transaction as `open` (Diproses):
+  /// order type, items, and totals are recorded, but no payment method
+  /// or amount is captured (nothing has been paid yet). Per
+  /// [PosRepository.saveTransaction]'s gating, an `open` status never
+  /// creates a `cash_movements` row — the sale only counts toward
+  /// Dompet/Dashboard/Laporan once [HistoryRepository.completeTransaction]
+  /// later moves it to `paid` (see Transaction Detail's "Selesaikan
+  /// Pesanan" action). Reachable for Ojol always, and for other order
+  /// types whenever the cashier hasn't entered a payment yet (see the
+  /// button's dynamic label/action logic in `build`).
+  Future<void> _saveAsOpen({
+    required CartState cartState,
+    required CheckoutTotals totals,
+    required PaymentModalState paymentState,
+  }) async {
+    setState(() => _isSaving = true);
+
+    final repository = ref.read(posRepositoryProvider);
+    final transaction = await repository.saveTransaction(
+      status: TransactionStatus.open,
+      orderType: cartState.orderType,
+      customerId: cartState.customer?.id,
+      customerName: cartState.customer?.name ?? (cartState.guestName.isNotEmpty ? cartState.guestName : null),
+      ojolPlatform: cartState.orderType == OrderType.ojol ? paymentState.ojolPlatform : null,
+      ojolOrderNumber: cartState.orderType == OrderType.ojol ? paymentState.orderNumber : null,
+      items: cartState.cart,
+      subtotal: totals.subtotal,
+      voucherId: cartState.appliedVoucher?.id,
+      voucherCode: cartState.appliedVoucher?.code,
+      voucherDiscount: totals.voucherDiscount,
+      manualDiscount: cartState.manualDiscount,
+      manualDiscountAmount: totals.manualDiscountAmount,
+      taxAmount: totals.taxAmount,
+      serviceAmount: totals.serviceAmount,
+      deliveryFee: totals.deliveryFee,
+      roundingAdjustment: totals.roundingAdjustment,
+      total: totals.roundedTotal,
+      paymentMethodLabel: null,
+      amountPaid: 0,
+      changeAmount: 0,
+      splitPayments: const [],
+      cashLocationId: null,
+    );
+
+    if (!mounted) return;
+
+    ref.read(cartProvider.notifier).resetDraft();
+    ref.read(paymentModalProvider.notifier).close();
+
+    Navigator.of(context).pop();
+    AppNav.showModal(
+      context,
+      builder: (_) => ReceiptModal(transaction: transaction, changeAmount: 0),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final cartState = ref.watch(cartProvider);
@@ -119,6 +176,24 @@ class _PaymentModalState extends ConsumerState<PaymentModal> {
         : paymentState.isSplitMode
             ? remaining <= 0 && paymentState.splitPayments.isNotEmpty
             : paidSoFar >= totals.roundedTotal && (!requiresCashLocation || paymentState.cashLocationId != null);
+
+    // Dynamic checkout button, per Agung's direction: Ojol always goes
+    // through "Diproses" first (it must wait on delivery regardless of
+    // payment). For every other order type, whether anything has been
+    // paid decides both the label and what gets saved — no separate
+    // "Diproses" button sits alongside this one; entering a payment and
+    // pressing this same button is what turns the save into "Selesai"
+    // instead of "Diproses".
+    final hasEnteredPayment = !isOjol && paidSoFar > 0;
+    final canProceedAsOpen = !isOjol && !hasEnteredPayment; // untouched payment fields — always postable as Diproses
+    final buttonLabel = isOjol || !hasEnteredPayment ? 'Proses Pesanan' : 'Konfirmasi Pembayaran';
+    final buttonEnabled = isOjol || canProceedAsOpen || canConfirm;
+    void Function()? onButtonPressed;
+    if (!_isSaving && buttonEnabled) {
+      onButtonPressed = (isOjol || canProceedAsOpen)
+          ? () => _saveAsOpen(cartState: cartState, totals: totals, paymentState: paymentState)
+          : () => _finalizePayment(cartState: cartState, totals: totals, paymentState: paymentState);
+    }
 
     // Full-height, matching CartDrawer — still a modal layer (not a page
     // route), just sized to read like the reference design's Checkout
@@ -179,24 +254,10 @@ class _PaymentModalState extends ConsumerState<PaymentModal> {
                     border: const Border(top: BorderSide(color: AppColors.border)),
                     boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 16, offset: const Offset(0, -4))],
                   ),
-                  child: SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton(
-                      onPressed: (!canConfirm || _isSaving)
-                          ? null
-                          : () => _finalizePayment(cartState: cartState, totals: totals, paymentState: paymentState),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: AppColors.brand,
-                        foregroundColor: Colors.white,
-                        disabledBackgroundColor: AppColors.border,
-                        padding: const EdgeInsets.symmetric(vertical: 15),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
-                        elevation: 0,
-                      ),
-                      child: _isSaving
-                          ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2.4, color: Colors.white))
-                          : const Text('Konfirmasi Pembayaran', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
-                    ),
+                  child: AppButton.primary(
+                    label: buttonLabel,
+                    onPressed: onButtonPressed,
+                    isLoading: _isSaving,
                   ),
                 ),
               ],

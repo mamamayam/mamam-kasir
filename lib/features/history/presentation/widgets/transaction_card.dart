@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/theme/app_spacing.dart';
 import '../../../../core/utils/currency.dart';
+import '../../../../core/widgets/app_status_badge.dart';
 import '../../../pos/domain/order_models.dart';
 import '../../../pos/domain/transaction.dart';
 
@@ -51,21 +52,7 @@ class TransactionCard extends StatelessWidget {
                       ],
                     ),
                   ),
-                  if (isCanceled)
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                      decoration: BoxDecoration(color: AppColors.danger.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(AppRadius.sm)),
-                      child: const Text('DIBATALKAN', style: TextStyle(fontSize: 9, fontWeight: FontWeight.w800, color: AppColors.danger, letterSpacing: 0.3)),
-                    )
-                  else if (transaction.paymentMethodLabel != null)
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                      decoration: BoxDecoration(color: AppColors.success.withValues(alpha: 0.08), borderRadius: BorderRadius.circular(AppRadius.sm)),
-                      child: Text(
-                        transaction.paymentMethodLabel!,
-                        style: const TextStyle(fontSize: 9.5, fontWeight: FontWeight.w800, color: AppColors.success, letterSpacing: 0.2),
-                      ),
-                    ),
+                  _StatusBadgeForTransaction(transaction: transaction),
                 ],
               ),
               const SizedBox(height: AppSpacing.sm),
@@ -90,5 +77,31 @@ class TransactionCard extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+/// Explicit 3-way branch on [Transaction.status] — previously this was
+/// an if/else-if that treated "not canceled" as "has a payment method,
+/// show it green", which silently mis-rendered an `open` (Diproses)
+/// transaction (no payment method yet) as if it were paid the moment
+/// any payment method string happened to be present. Each status now
+/// gets its own explicit badge rather than being inferred from what
+/// other fields happen to be set.
+class _StatusBadgeForTransaction extends StatelessWidget {
+  final Transaction transaction;
+  const _StatusBadgeForTransaction({required this.transaction});
+
+  @override
+  Widget build(BuildContext context) {
+    if (transaction.isCanceled) {
+      return const AppStatusBadge('Dibatalkan', AppColors.danger);
+    }
+    if (transaction.isOpen) {
+      return const AppStatusBadge('Diproses', AppColors.warning);
+    }
+    // isPaid — payment method may still be null in edge cases (e.g. a
+    // legacy row), so fall back to a generic paid label rather than
+    // rendering an empty badge.
+    return AppStatusBadge(transaction.paymentMethodLabel ?? 'Selesai', AppColors.success);
   }
 }

@@ -2,12 +2,18 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 
+import '../../../core/navigation/app_nav.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_spacing.dart';
 import '../../../core/utils/currency.dart';
+import '../../../core/widgets/app_button.dart';
+import '../../../core/widgets/app_status_badge.dart';
 import '../../../core/widgets/ios_page_header.dart';
+import '../../dompet/presentation/widgets/cash_location_picker.dart';
+import '../../pos/application/cart_provider.dart';
 import '../../pos/domain/order_models.dart';
 import '../../pos/domain/transaction.dart';
+import '../../pos/presentation/widgets/cart_drawer.dart';
 import '../application/history_provider.dart';
 
 /// Transaction detail screen. Reached via [AppNav.push] from
@@ -62,9 +68,95 @@ class TransactionDetailScreen extends ConsumerWidget {
     Navigator.of(context).pop();
   }
 
+  /// "Selesaikan Pesanan" — for an `open` (Diproses) transaction that
+  /// was never paid at checkout. Since no payment method was captured
+  /// then, this dialog asks for one now (dropdown), with the same
+  /// cash-location requirement as normal checkout when the order is
+  /// Delivery + Tunai (reusing [CashLocationPicker] rather than
+  /// re-deciding that rule here).
+  Future<void> _confirmComplete(BuildContext context, WidgetRef ref) async {
+    PaymentMethod? selectedMethod;
+    String? selectedCashLocationId;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) {
+          final requiresCashLocation = transaction.orderType == OrderType.delivery && selectedMethod == PaymentMethod.tunai;
+          final canConfirm = selectedMethod != null && (!requiresCashLocation || selectedCashLocationId != null);
+
+          return AlertDialog(
+            title: const Text('Selesaikan Pesanan?'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Transaksi ${transaction.displayNumber} akan ditandai Selesai dan masuk ke Dompet/Laporan.',
+                  style: const TextStyle(fontSize: 13),
+                ),
+                const SizedBox(height: AppSpacing.md),
+                DropdownButtonFormField<PaymentMethod>(
+                  value: selectedMethod,
+                  decoration: const InputDecoration(labelText: 'Metode Pembayaran', isDense: true, border: OutlineInputBorder()),
+                  items: const [PaymentMethod.tunai, PaymentMethod.qris, PaymentMethod.transfer]
+                      .map((m) => DropdownMenuItem(value: m, child: Text(m.label)))
+                      .toList(),
+                  onChanged: (m) => setDialogState(() {
+                    selectedMethod = m;
+                    selectedCashLocationId = null;
+                  }),
+                ),
+                if (requiresCashLocation) ...[
+                  const SizedBox(height: AppSpacing.md),
+                  CashLocationPicker(
+                    selectedLocationId: selectedCashLocationId,
+                    onChanged: (id) => setDialogState(() => selectedCashLocationId = id),
+                  ),
+                ],
+              ],
+            ),
+            actions: [
+              TextButton(onPressed: () => Navigator.of(dialogContext).pop(false), child: const Text('Batal')),
+              TextButton(
+                onPressed: canConfirm ? () => Navigator.of(dialogContext).pop(true) : null,
+                child: const Text('Selesaikan', style: TextStyle(color: AppColors.success)),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+
+    if (confirmed != true) return;
+    if (!context.mounted) return;
+
+    await ref.read(historyProvider.notifier).completeTransaction(
+          transaction.id,
+          paymentMethodLabel: selectedMethod!.label,
+          amountPaid: transaction.total,
+          cashLocationId: selectedCashLocationId,
+        );
+
+    if (!context.mounted) return;
+    Navigator.of(context).pop();
+  }
+
+  /// "Edit Pesanan" — loads this transaction into the cart draft (see
+  /// [CartController.loadFromTransaction]) and opens [CartDrawer] on
+  /// top of it, same as the mockup's "detail screen first, then an
+  /// explicit Edit action" flow (chosen specifically so the cart never
+  /// ends up silently holding an in-progress edit if the app is closed
+  /// while just browsing history).
+  void _editOrder(BuildContext context, WidgetRef ref) {
+    ref.read(cartProvider.notifier).loadFromTransaction(transaction);
+    AppNav.showModal(context, builder: (_) => const CartDrawer());
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final isCanceled = transaction.isCanceled;
+    final isOpen = transaction.isOpen;
 
     return Scaffold(
       backgroundColor: AppColors.background,
@@ -78,11 +170,15 @@ class TransactionDetailScreen extends ConsumerWidget {
                 children: [
                   if (isCanceled) _CanceledBanner(reason: transaction.cancelReason, canceledAt: transaction.canceledAt),
                   if (isCanceled) const SizedBox(height: AppSpacing.lg),
+                  if (isOpen) ...[
+                    const Align(alignment: Alignment.centerLeft, child: AppStatusBadge('Diproses', AppColors.warning)),
+                    const SizedBox(height: AppSpacing.lg),
+                  ],
                   _DetailCard(transaction: transaction),
                 ],
               ),
             ),
-            if (!isCanceled)
+            if (isOpen)
               Container(
                 padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.md, AppSpacing.xl, AppSpacing.xl),
                 decoration: BoxDecoration(
@@ -90,19 +186,26 @@ class TransactionDetailScreen extends ConsumerWidget {
                   border: const Border(top: BorderSide(color: AppColors.border)),
                   boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 16, offset: const Offset(0, -4))],
                 ),
-                child: SizedBox(
-                  width: double.infinity,
-                  child: OutlinedButton(
-                    onPressed: () => _confirmCancel(context, ref),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: AppColors.danger,
-                      side: const BorderSide(color: AppColors.danger),
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
-                    ),
-                    child: const Text('Batalkan Transaksi', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800)),
-                  ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    AppButton.secondary(label: 'Edit Pesanan', onPressed: () => _editOrder(context, ref)),
+                    const SizedBox(height: AppSpacing.sm),
+                    AppButton.primary(label: 'Selesaikan Pesanan', onPressed: () => _confirmComplete(context, ref)),
+                    const SizedBox(height: AppSpacing.sm),
+                    AppButton.danger(label: 'Batalkan Pesanan', onPressed: () => _confirmCancel(context, ref)),
+                  ],
                 ),
+              )
+            else if (!isCanceled)
+              Container(
+                padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.md, AppSpacing.xl, AppSpacing.xl),
+                decoration: BoxDecoration(
+                  color: AppColors.surface,
+                  border: const Border(top: BorderSide(color: AppColors.border)),
+                  boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 16, offset: const Offset(0, -4))],
+                ),
+                child: AppButton.danger(label: 'Batalkan Transaksi', onPressed: () => _confirmCancel(context, ref)),
               ),
           ],
         ),

@@ -5,7 +5,9 @@ import '../../../../core/navigation/app_nav.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/theme/app_spacing.dart';
 import '../../../../core/utils/currency.dart';
+import '../../../../core/widgets/app_button.dart';
 import '../../../../core/widgets/app_sheet_header.dart';
+import '../../../history/application/history_provider.dart';
 import '../../application/cart_provider.dart';
 import '../../application/pos_catalog_provider.dart';
 import '../../domain/cart_item.dart';
@@ -21,6 +23,48 @@ import 'payment_modal.dart';
 /// qty controls, and the entry point into [PaymentModal].
 class CartDrawer extends ConsumerWidget {
   const CartDrawer({super.key});
+
+  /// "Simpan Perubahan" — commits an edited `open` (Diproses)
+  /// transaction's new items/totals back to the SAME row via
+  /// [HistoryRepository.updateOpenTransaction] (never a new INSERT —
+  /// see that method's doc comment), then clears the cart draft's edit
+  /// mode and closes back to wherever "Edit Pesanan" was opened from.
+  Future<void> _saveEdit(BuildContext context, WidgetRef ref, CartState cartState, CheckoutTotals totals) async {
+    final repository = ref.read(historyRepositoryProvider);
+
+    // Neither a linked Customer nor a guest name were touched during
+    // this edit — fall back to the transaction's original
+    // customerId/customerName snapshot rather than overwriting a real
+    // customer link with null (see CartState.editingOriginalCustomerId's
+    // doc comment).
+    final customerUntouched = cartState.customer == null && cartState.guestName.isEmpty;
+    final customerId = cartState.customer?.id ?? (customerUntouched ? cartState.editingOriginalCustomerId : null);
+    final customerName = cartState.customer?.name ??
+        (cartState.guestName.isNotEmpty ? cartState.guestName : (customerUntouched ? cartState.editingOriginalCustomerName : null));
+
+    await repository.updateOpenTransaction(
+      transactionId: cartState.editingTransactionId!,
+      items: cartState.cart,
+      orderType: cartState.orderType,
+      customerId: customerId,
+      customerName: customerName,
+      subtotal: totals.subtotal,
+      voucherId: cartState.appliedVoucher?.id,
+      voucherCode: cartState.appliedVoucher?.code,
+      voucherDiscount: totals.voucherDiscount,
+      manualDiscountAmount: totals.manualDiscountAmount,
+      taxAmount: totals.taxAmount,
+      serviceAmount: totals.serviceAmount,
+      deliveryFee: totals.deliveryFee,
+      roundingAdjustment: totals.roundingAdjustment,
+      total: totals.roundedTotal,
+    );
+
+    if (!context.mounted) return;
+
+    ref.read(cartProvider.notifier).resetDraft();
+    Navigator.of(context).pop();
+  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -45,7 +89,11 @@ class CartDrawer extends ConsumerWidget {
             bottom: false,
             child: Column(
               children: [
-                const AppSheetHeader(title: 'Checkout'),
+                AppSheetHeader(title: cartState.isEditingExisting ? 'Edit Pesanan' : 'Checkout'),
+                if (cartState.isEditingExisting) ...[
+                  const SizedBox(height: AppSpacing.sm),
+                  _EditingBanner(displayNumber: cartState.editingDisplayNumber!),
+                ],
                 if (cartState.cart.isEmpty)
                   const Expanded(
                     child: Center(
@@ -83,19 +131,22 @@ class CartDrawer extends ConsumerWidget {
                 _BottomBar(
                   total: totals.roundedTotal,
                   enabled: cartState.cart.isNotEmpty,
-                  onCheckout: () {
-                    // Stack semantics: push PaymentModal ON TOP of this
-                    // sheet rather than popping CartDrawer first — so
-                    // closing the payment screen returns to the cart
-                    // exactly as it was, instead of dropping all the way
-                    // back to the bare Kasir grid. See AppNav's doc
-                    // comment. (Contrast with PaymentModal's own
-                    // "success" transition to ReceiptModal, which
-                    // deliberately DOES pop first — the cart has already
-                    // been reset by then, so there's nothing left to
-                    // return to.)
-                    AppNav.showModal(context, builder: (_) => const PaymentModal());
-                  },
+                  label: cartState.isEditingExisting ? 'Simpan Perubahan' : null,
+                  onCheckout: cartState.isEditingExisting
+                      ? () => _saveEdit(context, ref, cartState, totals)
+                      : () {
+                          // Stack semantics: push PaymentModal ON TOP of this
+                          // sheet rather than popping CartDrawer first — so
+                          // closing the payment screen returns to the cart
+                          // exactly as it was, instead of dropping all the way
+                          // back to the bare Kasir grid. See AppNav's doc
+                          // comment. (Contrast with PaymentModal's own
+                          // "success" transition to ReceiptModal, which
+                          // deliberately DOES pop first — the cart has already
+                          // been reset by then, so there's nothing left to
+                          // return to.)
+                          AppNav.showModal(context, builder: (_) => const PaymentModal());
+                        },
                 ),
               ],
             ),
@@ -672,7 +723,10 @@ class _BottomBar extends StatelessWidget {
   final int total;
   final bool enabled;
   final VoidCallback onCheckout;
-  const _BottomBar({required this.total, required this.enabled, required this.onCheckout});
+  /// Overrides the default "Bayar" label — used for "Simpan Perubahan"
+  /// when [CartState.isEditingExisting] (see [CartDrawer.build]).
+  final String? label;
+  const _BottomBar({required this.total, required this.enabled, required this.onCheckout, this.label});
 
   @override
   Widget build(BuildContext context) {
@@ -683,20 +737,9 @@ class _BottomBar extends StatelessWidget {
         border: const Border(top: BorderSide(color: AppColors.border)),
         boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 16, offset: const Offset(0, -4))],
       ),
-      child: SizedBox(
-        width: double.infinity,
-        child: ElevatedButton(
-          onPressed: enabled ? onCheckout : null,
-          style: ElevatedButton.styleFrom(
-            backgroundColor: AppColors.brand,
-            foregroundColor: Colors.white,
-            disabledBackgroundColor: AppColors.border,
-            padding: const EdgeInsets.symmetric(vertical: 15),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
-            elevation: 0,
-          ),
-          child: Text('Bayar • ${formatRupiah(total)}', style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
-        ),
+      child: AppButton.primary(
+        label: '${label ?? 'Bayar'} • ${formatRupiah(total)}',
+        onPressed: enabled ? onCheckout : null,
       ),
     );
   }
@@ -717,6 +760,43 @@ class _SectionCard extends StatelessWidget {
         border: Border.all(color: AppColors.border),
       ),
       child: child,
+    );
+  }
+}
+
+/// Shown at the top of [CartDrawer] whenever [CartState.isEditingExisting]
+/// — makes it visually unmistakable that this draft is editing an
+/// existing Diproses transaction in place, not building a new order
+/// (per the mockup's rationale: an ambiguous cart here risks the
+/// cashier accidentally double-submitting an order instead of updating
+/// the one they meant to).
+class _EditingBanner extends StatelessWidget {
+  final String displayNumber;
+  const _EditingBanner({required this.displayNumber});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
+      padding: const EdgeInsets.all(AppSpacing.md),
+      decoration: BoxDecoration(
+        color: AppColors.warning.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(AppRadius.md),
+        border: Border.all(color: AppColors.warning.withValues(alpha: 0.3)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.edit_note_rounded, size: 18, color: AppColors.warning),
+          const SizedBox(width: AppSpacing.sm),
+          Expanded(
+            child: Text(
+              'Mengedit pesanan $displayNumber. Perubahan disimpan ke pesanan yang sama, bukan pesanan baru.',
+              style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w500, color: AppColors.textSecondary),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

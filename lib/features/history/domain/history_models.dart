@@ -53,3 +53,23 @@ class PaymentMethodBreakdown {
 
   const PaymentMethodBreakdown({required this.method, required this.total, required this.count});
 }
+
+/// Order-lifecycle status tab (Diproses/Selesai/Dibatalkan), mapped 1:1
+/// to [TransactionStatus] — see that enum's doc comment for the
+/// business rules (Diproses = not yet paid, editable; Selesai = paid,
+/// counted in Dompet/Dashboard/Laporan; Dibatalkan = canceled, excluded
+/// from omzet, never editable again).
+enum HistoryStatusFilter { diproses, selesai, dibatalkan }
+
+extension HistoryStatusFilterX on HistoryStatusFilter {
+  String get label {
+    switch (this) {
+      case HistoryStatusFilter.diproses:
+        return 'Diproses';
+      case HistoryStatusFilter.selesai:
+        return 'Selesai';
+      case HistoryStatusFilter.dibatalkan:
+        return 'Dibatalkan';
+    }
+  }
+}

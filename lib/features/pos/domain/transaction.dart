@@ -72,6 +72,13 @@ class Transaction {
 
   bool get isCanceled => status == TransactionStatus.canceled;
 
+  /// "Diproses" in the UI — not yet paid, still editable, excluded from
+  /// Dompet/Dashboard/Laporan until [HistoryRepository.completeTransaction]
+  /// moves it to [isPaid].
+  bool get isOpen => status == TransactionStatus.open;
+
+  bool get isPaid => status == TransactionStatus.paid;
+
   int get hppTotal => items.fold(0, (sum, item) => sum + (item.hpp * item.qty));
   int get totalQty => items.fold(0, (sum, item) => sum + item.qty);
 }

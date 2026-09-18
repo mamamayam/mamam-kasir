@@ -6,6 +6,7 @@ import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_spacing.dart';
 import '../../../core/widgets/date_filter_tabs.dart';
 import '../../../core/widgets/ios_page_header.dart';
+import '../../../core/widgets/sliding_pill_tabs.dart';
 import '../../pos/domain/order_models.dart';
 import '../application/history_provider.dart';
 import '../domain/history_models.dart';
@@ -101,6 +102,15 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
                 ],
               ),
             ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
+              child: SlidingPillTabs(
+                labels: HistoryStatusFilter.values.map((s) => s.label).toList(),
+                selectedIndex: HistoryStatusFilter.values.indexOf(state.statusFilter),
+                onSelected: (i) => controller.setStatusFilter(HistoryStatusFilter.values[i]),
+              ),
+            ),
+            const SizedBox(height: AppSpacing.sm),
             DateFilterTabs<HistoryDateFilter>(
               options: const [
                 HistoryDateFilter.hariIni,

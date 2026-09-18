@@ -1,0 +1,994 @@
+diff --git a/lib/features/history/application/history_provider.dart b/lib/features/history/application/history_provider.dart
+index 87838f7..0fbfcc7 100644
+--- a/lib/features/history/application/history_provider.dart
++++ b/lib/features/history/application/history_provider.dart
+@@ -19,6 +19,7 @@ class HistoryState {
+   final OrderType? orderTypeFilter; // null = semua
+   final String? paymentMethodFilter; // null = semua
+   final HistorySortKey sortKey;
++  final HistoryStatusFilter statusFilter;
+ 
+   const HistoryState({
+     this.transactions = const [],
+@@ -31,6 +32,7 @@ class HistoryState {
+     this.orderTypeFilter,
+     this.paymentMethodFilter,
+     this.sortKey = HistorySortKey.dateDesc,
++    this.statusFilter = HistoryStatusFilter.diproses,
+   });
+ 
+   HistoryState copyWith({
+@@ -46,6 +48,7 @@ class HistoryState {
+     String? paymentMethodFilter,
+     bool clearPaymentMethodFilter = false,
+     HistorySortKey? sortKey,
++    HistoryStatusFilter? statusFilter,
+   }) {
+     return HistoryState(
+       transactions: transactions ?? this.transactions,
+@@ -58,6 +61,7 @@ class HistoryState {
+       orderTypeFilter: clearOrderTypeFilter ? null : (orderTypeFilter ?? this.orderTypeFilter),
+       paymentMethodFilter: clearPaymentMethodFilter ? null : (paymentMethodFilter ?? this.paymentMethodFilter),
+       sortKey: sortKey ?? this.sortKey,
++      statusFilter: statusFilter ?? this.statusFilter,
+     );
+   }
+ 
+@@ -97,6 +101,17 @@ class HistoryState {
+         t.total.toString().contains(q);
+   }
+ 
++  bool _matchesStatus(Transaction t) {
++    switch (statusFilter) {
++      case HistoryStatusFilter.diproses:
++        return t.status == TransactionStatus.open;
++      case HistoryStatusFilter.selesai:
++        return t.status == TransactionStatus.paid;
++      case HistoryStatusFilter.dibatalkan:
++        return t.status == TransactionStatus.canceled;
++    }
++  }
++
+   /// Filtered by everything except the payment-method filter — used for
+   /// the payment breakdown card, which should always show the full
+   /// composition within the active date/search/order-type filter (same
+@@ -105,7 +120,7 @@ class HistoryState {
+   /// PRD-sanctioned).
+   List<Transaction> get _filteredForBreakdown {
+     return transactions.where((t) {
+-      return _matchesSearch(t) && _withinDateRange(t.createdAt) && (orderTypeFilter == null || t.orderType == orderTypeFilter);
++      return _matchesStatus(t) && _matchesSearch(t) && _withinDateRange(t.createdAt) && (orderTypeFilter == null || t.orderType == orderTypeFilter);
+     }).toList();
+   }
+ 
+@@ -188,6 +203,8 @@ class HistoryController extends StateNotifier<HistoryState> {
+ 
+   void setSortKey(HistorySortKey key) => state = state.copyWith(sortKey: key);
+ 
++  void setStatusFilter(HistoryStatusFilter filter) => state = state.copyWith(statusFilter: filter);
++
+   Future<void> cancelTransaction(String transactionId, {String? reason}) async {
+     try {
+       await _repository.cancelTransaction(transactionId, reason: reason);
+@@ -196,4 +213,23 @@ class HistoryController extends StateNotifier<HistoryState> {
+       state = state.copyWith(errorMessage: 'Gagal membatalkan transaksi: $e');
+     }
+   }
++
++  Future<void> completeTransaction(
++    String transactionId, {
++    required String paymentMethodLabel,
++    required int amountPaid,
++    String? cashLocationId,
++  }) async {
++    try {
++      await _repository.completeTransaction(
++        transactionId,
++        paymentMethodLabel: paymentMethodLabel,
++        amountPaid: amountPaid,
++        cashLocationId: cashLocationId,
++      );
++      await load();
++    } catch (e) {
++      state = state.copyWith(errorMessage: 'Gagal menyelesaikan pesanan: $e');
++    }
++  }
+ }
+diff --git a/lib/features/history/application/history_repository.dart b/lib/features/history/application/history_repository.dart
+index 13bdeaf..8b5b614 100644
+--- a/lib/features/history/application/history_repository.dart
++++ b/lib/features/history/application/history_repository.dart
+@@ -1,8 +1,10 @@
+ import 'dart:convert';
+ 
+ import 'package:sqflite_sqlcipher/sqflite.dart';
++import 'package:uuid/uuid.dart';
+ 
+ import '../../../core/data/app_database.dart';
++import '../../dompet/application/dompet_repository.dart';
+ import '../../pos/domain/cart_item.dart';
+ import '../../pos/domain/order_models.dart';
+ import '../../pos/domain/transaction.dart' as txn;
+@@ -12,6 +14,8 @@ import '../../pos/domain/transaction.dart' as txn;
+ /// permission is explicitly UNSPECIFIED there, so no delete method
+ /// exists here at all, not even a disabled one.
+ class HistoryRepository {
++  final DompetRepository _dompetRepository = DompetRepository();
++
+   Future<Database> get _db => AppDatabase.instance.database;
+ 
+   Future<List<txn.Transaction>> getTransactions() async {
+@@ -113,4 +117,117 @@ class HistoryRepository {
+       whereArgs: [transactionId, txn.TransactionStatus.canceled.name],
+     );
+   }
++
++  /// "Edit Pesanan" — overwrites an `open` (Diproses) transaction's
++  /// items and recomputed totals in place. This updates the SAME row
++  /// (matching the business rule that editing a Diproses order never
++  /// creates a second transaction) — line items are replaced wholesale
++  /// (delete + re-insert) rather than diffed, since the cart draft that
++  /// produces [items] already represents the full new state, not a
++  /// delta. Only `open` transactions can be edited (per PRD: paid/
++  /// canceled transactions are immutable) — the `where` clause enforces
++  /// this the same way [cancelTransaction] guards its own status
++  /// transition.
++  Future<void> updateOpenTransaction({
++    required String transactionId,
++    required List<CartItem> items,
++    required OrderType orderType,
++    String? customerId,
++    String? customerName,
++    required int subtotal,
++    String? voucherId,
++    String? voucherCode,
++    required int voucherDiscount,
++    required int manualDiscountAmount,
++    required int taxAmount,
++    required int serviceAmount,
++    required int deliveryFee,
++    required int roundingAdjustment,
++    required int total,
++  }) async {
++    final db = await _db;
++    final uuid = const Uuid();
++
++    final updated = await db.update(
++      'transactions',
++      {
++        'order_type': orderType.label,
++        'customer_id': customerId,
++        'customer_name': customerName,
++        'subtotal': subtotal,
++        'voucher_id': voucherId,
++        'voucher_code': voucherCode,
++        'voucher_discount': voucherDiscount,
++        'manual_discount_amount': manualDiscountAmount,
++        'tax_amount': taxAmount,
++        'service_amount': serviceAmount,
++        'delivery_fee': deliveryFee,
++        'rounding_adjustment': roundingAdjustment,
++        'total': total,
++      },
++      where: 'id = ? AND status = ?',
++      whereArgs: [transactionId, txn.TransactionStatus.open.name],
++    );
++
++    if (updated == 0) return; // not open (anymore) — nothing to edit
++
++    await db.delete('transaction_items', where: 'transaction_id = ?', whereArgs: [transactionId]);
++    for (final item in items) {
++      await db.insert('transaction_items', {
++        'id': uuid.v4(),
++        'transaction_id': transactionId,
++        'menu_item_id': item.menuItemId,
++        'name': item.name,
++        'variant_name': item.variantName,
++        'variant_selected_json': item.variantSelectedOptions.isEmpty ? null : jsonEncode(item.variantSelectedOptions),
++        'price': item.price,
++        'hpp': item.hpp,
++        'qty': item.qty,
++        'note': item.note.isEmpty ? null : item.note,
++      });
++    }
++  }
++
++  /// "Selesaikan Pesanan" — moves an `open` (Diproses) transaction to
++  /// `paid`. This is the one place besides checkout itself where a
++  /// `cash_movements` row can be created (see [PosRepository.
++  /// saveTransaction]'s gating comment) — an `open` transaction never
++  /// created one when it was first saved (no payment was recorded yet),
++  /// so completing it here is the actual moment the sale counts toward
++  /// Dompet/Dashboard/Laporan, matching the business rule that Diproses
++  /// orders are excluded from all three until marked done.
++  Future<void> completeTransaction(
++    String transactionId, {
++    required String paymentMethodLabel,
++    required int amountPaid,
++    String? cashLocationId,
++  }) async {
++    final db = await _db;
++    final now = DateTime.now().toIso8601String();
++
++    final updated = await db.update(
++      'transactions',
++      {
++        'status': txn.TransactionStatus.paid.name,
++        'paid_at': now,
++        'payment_method': paymentMethodLabel,
++        'amount_paid': amountPaid,
++      },
++      where: 'id = ? AND status = ?',
++      whereArgs: [transactionId, txn.TransactionStatus.open.name],
++    );
++
++    // Guards the same way saveTransaction does: only a real cash
++    // location + a positive amount creates a ledger entry. `updated ==
++    // 0` means the row wasn't actually `open` (already completed/
++    // canceled by something else) — skip the cash movement rather than
++    // recording money for a status change that didn't happen.
++    if (updated > 0 && cashLocationId != null && amountPaid > 0) {
++      await _dompetRepository.recordCashSale(
++        toLocationId: cashLocationId,
++        amount: amountPaid,
++        transactionId: transactionId,
++      );
++    }
++  }
+ }
+diff --git a/lib/features/history/domain/history_models.dart b/lib/features/history/domain/history_models.dart
+index 2429572..d37fcae 100644
+--- a/lib/features/history/domain/history_models.dart
++++ b/lib/features/history/domain/history_models.dart
+@@ -53,3 +53,23 @@ class PaymentMethodBreakdown {
+ 
+   const PaymentMethodBreakdown({required this.method, required this.total, required this.count});
+ }
++
++/// Order-lifecycle status tab (Diproses/Selesai/Dibatalkan), mapped 1:1
++/// to [TransactionStatus] — see that enum's doc comment for the
++/// business rules (Diproses = not yet paid, editable; Selesai = paid,
++/// counted in Dompet/Dashboard/Laporan; Dibatalkan = canceled, excluded
++/// from omzet, never editable again).
++enum HistoryStatusFilter { diproses, selesai, dibatalkan }
++
++extension HistoryStatusFilterX on HistoryStatusFilter {
++  String get label {
++    switch (this) {
++      case HistoryStatusFilter.diproses:
++        return 'Diproses';
++      case HistoryStatusFilter.selesai:
++        return 'Selesai';
++      case HistoryStatusFilter.dibatalkan:
++        return 'Dibatalkan';
++    }
++  }
++}
+diff --git a/lib/features/history/presentation/history_screen.dart b/lib/features/history/presentation/history_screen.dart
+index 847b61c..14dbda8 100644
+--- a/lib/features/history/presentation/history_screen.dart
++++ b/lib/features/history/presentation/history_screen.dart
+@@ -6,6 +6,7 @@ import '../../../core/theme/app_colors.dart';
+ import '../../../core/theme/app_spacing.dart';
+ import '../../../core/widgets/date_filter_tabs.dart';
+ import '../../../core/widgets/ios_page_header.dart';
++import '../../../core/widgets/sliding_pill_tabs.dart';
+ import '../../pos/domain/order_models.dart';
+ import '../application/history_provider.dart';
+ import '../domain/history_models.dart';
+@@ -101,6 +102,15 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
+                 ],
+               ),
+             ),
++            Padding(
++              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
++              child: SlidingPillTabs(
++                labels: HistoryStatusFilter.values.map((s) => s.label).toList(),
++                selectedIndex: HistoryStatusFilter.values.indexOf(state.statusFilter),
++                onSelected: (i) => controller.setStatusFilter(HistoryStatusFilter.values[i]),
++              ),
++            ),
++            const SizedBox(height: AppSpacing.sm),
+             DateFilterTabs<HistoryDateFilter>(
+               options: const [
+                 HistoryDateFilter.hariIni,
+diff --git a/lib/features/history/presentation/transaction_detail_screen.dart b/lib/features/history/presentation/transaction_detail_screen.dart
+index e8f7149..cd422bf 100644
+--- a/lib/features/history/presentation/transaction_detail_screen.dart
++++ b/lib/features/history/presentation/transaction_detail_screen.dart
+@@ -2,12 +2,18 @@ import 'package:flutter/material.dart';
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ import 'package:intl/intl.dart';
+ 
++import '../../../core/navigation/app_nav.dart';
+ import '../../../core/theme/app_colors.dart';
+ import '../../../core/theme/app_spacing.dart';
+ import '../../../core/utils/currency.dart';
++import '../../../core/widgets/app_button.dart';
++import '../../../core/widgets/app_status_badge.dart';
+ import '../../../core/widgets/ios_page_header.dart';
++import '../../dompet/presentation/widgets/cash_location_picker.dart';
++import '../../pos/application/cart_provider.dart';
+ import '../../pos/domain/order_models.dart';
+ import '../../pos/domain/transaction.dart';
++import '../../pos/presentation/widgets/cart_drawer.dart';
+ import '../application/history_provider.dart';
+ 
+ /// Transaction detail screen. Reached via [AppNav.push] from
+@@ -62,9 +68,95 @@ class TransactionDetailScreen extends ConsumerWidget {
+     Navigator.of(context).pop();
+   }
+ 
++  /// "Selesaikan Pesanan" — for an `open` (Diproses) transaction that
++  /// was never paid at checkout. Since no payment method was captured
++  /// then, this dialog asks for one now (dropdown), with the same
++  /// cash-location requirement as normal checkout when the order is
++  /// Delivery + Tunai (reusing [CashLocationPicker] rather than
++  /// re-deciding that rule here).
++  Future<void> _confirmComplete(BuildContext context, WidgetRef ref) async {
++    PaymentMethod? selectedMethod;
++    String? selectedCashLocationId;
++
++    final confirmed = await showDialog<bool>(
++      context: context,
++      builder: (dialogContext) => StatefulBuilder(
++        builder: (dialogContext, setDialogState) {
++          final requiresCashLocation = transaction.orderType == OrderType.delivery && selectedMethod == PaymentMethod.tunai;
++          final canConfirm = selectedMethod != null && (!requiresCashLocation || selectedCashLocationId != null);
++
++          return AlertDialog(
++            title: const Text('Selesaikan Pesanan?'),
++            content: Column(
++              mainAxisSize: MainAxisSize.min,
++              crossAxisAlignment: CrossAxisAlignment.start,
++              children: [
++                Text(
++                  'Transaksi ${transaction.displayNumber} akan ditandai Selesai dan masuk ke Dompet/Laporan.',
++                  style: const TextStyle(fontSize: 13),
++                ),
++                const SizedBox(height: AppSpacing.md),
++                DropdownButtonFormField<PaymentMethod>(
++                  value: selectedMethod,
++                  decoration: const InputDecoration(labelText: 'Metode Pembayaran', isDense: true, border: OutlineInputBorder()),
++                  items: const [PaymentMethod.tunai, PaymentMethod.qris, PaymentMethod.transfer]
++                      .map((m) => DropdownMenuItem(value: m, child: Text(m.label)))
++                      .toList(),
++                  onChanged: (m) => setDialogState(() {
++                    selectedMethod = m;
++                    selectedCashLocationId = null;
++                  }),
++                ),
++                if (requiresCashLocation) ...[
++                  const SizedBox(height: AppSpacing.md),
++                  CashLocationPicker(
++                    selectedLocationId: selectedCashLocationId,
++                    onChanged: (id) => setDialogState(() => selectedCashLocationId = id),
++                  ),
++                ],
++              ],
++            ),
++            actions: [
++              TextButton(onPressed: () => Navigator.of(dialogContext).pop(false), child: const Text('Batal')),
++              TextButton(
++                onPressed: canConfirm ? () => Navigator.of(dialogContext).pop(true) : null,
++                child: const Text('Selesaikan', style: TextStyle(color: AppColors.success)),
++              ),
++            ],
++          );
++        },
++      ),
++    );
++
++    if (confirmed != true) return;
++    if (!context.mounted) return;
++
++    await ref.read(historyProvider.notifier).completeTransaction(
++          transaction.id,
++          paymentMethodLabel: selectedMethod!.label,
++          amountPaid: transaction.total,
++          cashLocationId: selectedCashLocationId,
++        );
++
++    if (!context.mounted) return;
++    Navigator.of(context).pop();
++  }
++
++  /// "Edit Pesanan" — loads this transaction into the cart draft (see
++  /// [CartController.loadFromTransaction]) and opens [CartDrawer] on
++  /// top of it, same as the mockup's "detail screen first, then an
++  /// explicit Edit action" flow (chosen specifically so the cart never
++  /// ends up silently holding an in-progress edit if the app is closed
++  /// while just browsing history).
++  void _editOrder(BuildContext context, WidgetRef ref) {
++    ref.read(cartProvider.notifier).loadFromTransaction(transaction);
++    AppNav.showModal(context, builder: (_) => const CartDrawer());
++  }
++
+   @override
+   Widget build(BuildContext context, WidgetRef ref) {
+     final isCanceled = transaction.isCanceled;
++    final isOpen = transaction.isOpen;
+ 
+     return Scaffold(
+       backgroundColor: AppColors.background,
+@@ -78,11 +170,15 @@ class TransactionDetailScreen extends ConsumerWidget {
+                 children: [
+                   if (isCanceled) _CanceledBanner(reason: transaction.cancelReason, canceledAt: transaction.canceledAt),
+                   if (isCanceled) const SizedBox(height: AppSpacing.lg),
++                  if (isOpen) ...[
++                    const Align(alignment: Alignment.centerLeft, child: AppStatusBadge('Diproses', AppColors.warning)),
++                    const SizedBox(height: AppSpacing.lg),
++                  ],
+                   _DetailCard(transaction: transaction),
+                 ],
+               ),
+             ),
+-            if (!isCanceled)
++            if (isOpen)
+               Container(
+                 padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.md, AppSpacing.xl, AppSpacing.xl),
+                 decoration: BoxDecoration(
+@@ -90,19 +186,26 @@ class TransactionDetailScreen extends ConsumerWidget {
+                   border: const Border(top: BorderSide(color: AppColors.border)),
+                   boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 16, offset: const Offset(0, -4))],
+                 ),
+-                child: SizedBox(
+-                  width: double.infinity,
+-                  child: OutlinedButton(
+-                    onPressed: () => _confirmCancel(context, ref),
+-                    style: OutlinedButton.styleFrom(
+-                      foregroundColor: AppColors.danger,
+-                      side: const BorderSide(color: AppColors.danger),
+-                      padding: const EdgeInsets.symmetric(vertical: 14),
+-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
+-                    ),
+-                    child: const Text('Batalkan Transaksi', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800)),
+-                  ),
++                child: Column(
++                  mainAxisSize: MainAxisSize.min,
++                  children: [
++                    AppButton.secondary(label: 'Edit Pesanan', onPressed: () => _editOrder(context, ref)),
++                    const SizedBox(height: AppSpacing.sm),
++                    AppButton.primary(label: 'Selesaikan Pesanan', onPressed: () => _confirmComplete(context, ref)),
++                    const SizedBox(height: AppSpacing.sm),
++                    AppButton.danger(label: 'Batalkan Pesanan', onPressed: () => _confirmCancel(context, ref)),
++                  ],
++                ),
++              )
++            else if (!isCanceled)
++              Container(
++                padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.md, AppSpacing.xl, AppSpacing.xl),
++                decoration: BoxDecoration(
++                  color: AppColors.surface,
++                  border: const Border(top: BorderSide(color: AppColors.border)),
++                  boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 16, offset: const Offset(0, -4))],
+                 ),
++                child: AppButton.danger(label: 'Batalkan Transaksi', onPressed: () => _confirmCancel(context, ref)),
+               ),
+           ],
+         ),
+diff --git a/lib/features/history/presentation/widgets/transaction_card.dart b/lib/features/history/presentation/widgets/transaction_card.dart
+index c4ef153..558721a 100644
+--- a/lib/features/history/presentation/widgets/transaction_card.dart
++++ b/lib/features/history/presentation/widgets/transaction_card.dart
+@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
+ import '../../../../core/theme/app_colors.dart';
+ import '../../../../core/theme/app_spacing.dart';
+ import '../../../../core/utils/currency.dart';
++import '../../../../core/widgets/app_status_badge.dart';
+ import '../../../pos/domain/order_models.dart';
+ import '../../../pos/domain/transaction.dart';
+ 
+@@ -51,21 +52,7 @@ class TransactionCard extends StatelessWidget {
+                       ],
+                     ),
+                   ),
+-                  if (isCanceled)
+-                    Container(
+-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+-                      decoration: BoxDecoration(color: AppColors.danger.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(AppRadius.sm)),
+-                      child: const Text('DIBATALKAN', style: TextStyle(fontSize: 9, fontWeight: FontWeight.w800, color: AppColors.danger, letterSpacing: 0.3)),
+-                    )
+-                  else if (transaction.paymentMethodLabel != null)
+-                    Container(
+-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+-                      decoration: BoxDecoration(color: AppColors.success.withValues(alpha: 0.08), borderRadius: BorderRadius.circular(AppRadius.sm)),
+-                      child: Text(
+-                        transaction.paymentMethodLabel!,
+-                        style: const TextStyle(fontSize: 9.5, fontWeight: FontWeight.w800, color: AppColors.success, letterSpacing: 0.2),
+-                      ),
+-                    ),
++                  _StatusBadgeForTransaction(transaction: transaction),
+                 ],
+               ),
+               const SizedBox(height: AppSpacing.sm),
+@@ -92,3 +79,29 @@ class TransactionCard extends StatelessWidget {
+     );
+   }
+ }
++
++/// Explicit 3-way branch on [Transaction.status] — previously this was
++/// an if/else-if that treated "not canceled" as "has a payment method,
++/// show it green", which silently mis-rendered an `open` (Diproses)
++/// transaction (no payment method yet) as if it were paid the moment
++/// any payment method string happened to be present. Each status now
++/// gets its own explicit badge rather than being inferred from what
++/// other fields happen to be set.
++class _StatusBadgeForTransaction extends StatelessWidget {
++  final Transaction transaction;
++  const _StatusBadgeForTransaction({required this.transaction});
++
++  @override
++  Widget build(BuildContext context) {
++    if (transaction.isCanceled) {
++      return const AppStatusBadge('Dibatalkan', AppColors.danger);
++    }
++    if (transaction.isOpen) {
++      return const AppStatusBadge('Diproses', AppColors.warning);
++    }
++    // isPaid — payment method may still be null in edge cases (e.g. a
++    // legacy row), so fall back to a generic paid label rather than
++    // rendering an empty badge.
++    return AppStatusBadge(transaction.paymentMethodLabel ?? 'Selesai', AppColors.success);
++  }
++}
+diff --git a/lib/features/pos/application/cart_provider.dart b/lib/features/pos/application/cart_provider.dart
+index b72027d..4c7a4fc 100644
+--- a/lib/features/pos/application/cart_provider.dart
++++ b/lib/features/pos/application/cart_provider.dart
+@@ -6,6 +6,7 @@ import '../domain/cart_state.dart';
+ import '../domain/checkout_calculator.dart';
+ import '../domain/customer.dart';
+ import '../domain/order_models.dart';
++import '../domain/transaction.dart';
+ import 'pos_repository.dart';
+ 
+ final posRepositoryProvider = Provider<PosRepository>((ref) => PosRepository());
+@@ -144,4 +145,33 @@ class CartController extends StateNotifier<CartState> {
+   void resetDraft() {
+     state = CartState.empty;
+   }
++
++  /// "Edit Pesanan" entry point — replaces whatever draft is currently
++  /// in [cartProvider] with a copy of an existing `open` (Diproses)
++  /// transaction's items/order type/delivery fee/manual discount, and
++  /// marks the draft as editing that transaction via
++  /// [CartState.editingTransactionId]. [CartDrawer] reads that flag to
++  /// show the "editing X" banner and change its save action to an
++  /// UPDATE (see [HistoryRepository.updateOpenTransaction]) instead of
++  /// a new checkout.
++  ///
++  /// Note: [Transaction.customerId]/[voucherId] are stored as plain
++  /// IDs/codes on the transaction row, not full snapshot objects, so
++  /// this does not re-populate [CartState.customer]/[appliedVoucher] —
++  /// only the guest name (when there was no linked customer) carries
++  /// over. Re-attaching a specific customer or voucher, if needed, is a
++  /// manual step in the cart itself after loading.
++  void loadFromTransaction(Transaction transaction) {
++    state = CartState(
++      cart: transaction.items,
++      guestName: transaction.customerId == null ? (transaction.customerName ?? '') : '',
++      orderType: transaction.orderType,
++      deliveryFee: transaction.deliveryFee,
++      manualDiscount: transaction.manualDiscount ?? ManualDiscount.none,
++      editingTransactionId: transaction.id,
++      editingDisplayNumber: transaction.displayNumber,
++      editingOriginalCustomerId: transaction.customerId,
++      editingOriginalCustomerName: transaction.customerName,
++    );
++  }
+ }
+diff --git a/lib/features/pos/domain/cart_state.dart b/lib/features/pos/domain/cart_state.dart
+index 8251cb7..d5637e4 100644
+--- a/lib/features/pos/domain/cart_state.dart
++++ b/lib/features/pos/domain/cart_state.dart
+@@ -33,6 +33,33 @@ class CartState {
+   final Voucher? appliedVoucher;
+   final ManualDiscount manualDiscount;
+ 
++  /// Non-null while this draft represents an edit of an existing `open`
++  /// (Diproses) transaction rather than a brand-new order — see
++  /// [CartController.loadFromTransaction] and Transaction Detail's
++  /// "Edit Pesanan" action. [CartDrawer] uses this to show the "editing
++  /// X" banner and change its bottom-bar action from "Bayar" to "Simpan
++  /// Perubahan" (an UPDATE of that transaction, not a new INSERT).
++  final String? editingTransactionId;
++
++  /// [Transaction.displayNumber] for [editingTransactionId] — carried
++  /// alongside the raw ID purely so the edit-mode banner can show the
++  /// same friendly order number used everywhere else in the UI (e.g.
++  /// "ORD-4F21A9") instead of a raw UUID. Always non-null together with
++  /// [editingTransactionId].
++  final String? editingDisplayNumber;
++
++  /// Snapshot of the transaction's original customerId/customerName at
++  /// the moment [CartController.loadFromTransaction] ran. [CartState]
++  /// only tracks a full [Customer] object or a plain [guestName] — it
++  /// has no field for "linked to customer X, unchanged" — so without
++  /// this snapshot, saving an edit that never touched the customer
++  /// section would read `customer == null` and silently overwrite a
++  /// real customer link with null. [CartDrawer._saveEdit] falls back to
++  /// these when [customer] is null and [guestName] is empty (i.e.
++  /// neither was touched during this edit).
++  final String? editingOriginalCustomerId;
++  final String? editingOriginalCustomerName;
++
+   const CartState({
+     this.cart = const [],
+     this.customer,
+@@ -42,6 +69,10 @@ class CartState {
+     this.deliveryCourierNote,
+     this.appliedVoucher,
+     this.manualDiscount = ManualDiscount.none,
++    this.editingTransactionId,
++    this.editingDisplayNumber,
++    this.editingOriginalCustomerId,
++    this.editingOriginalCustomerName,
+   });
+ 
+   CartState copyWith({
+@@ -54,6 +85,11 @@ class CartState {
+     Voucher? appliedVoucher,
+     bool clearVoucher = false,
+     ManualDiscount? manualDiscount,
++    String? editingTransactionId,
++    String? editingDisplayNumber,
++    bool clearEditingTransactionId = false,
++    String? editingOriginalCustomerId,
++    String? editingOriginalCustomerName,
+   }) {
+     return CartState(
+       cart: cart ?? this.cart,
+@@ -63,8 +99,16 @@ class CartState {
+       deliveryFee: deliveryFee ?? this.deliveryFee,
+       appliedVoucher: clearVoucher ? null : (appliedVoucher ?? this.appliedVoucher),
+       manualDiscount: manualDiscount ?? this.manualDiscount,
++      editingTransactionId: clearEditingTransactionId ? null : (editingTransactionId ?? this.editingTransactionId),
++      editingDisplayNumber: clearEditingTransactionId ? null : (editingDisplayNumber ?? this.editingDisplayNumber),
++      editingOriginalCustomerId:
++          clearEditingTransactionId ? null : (editingOriginalCustomerId ?? this.editingOriginalCustomerId),
++      editingOriginalCustomerName:
++          clearEditingTransactionId ? null : (editingOriginalCustomerName ?? this.editingOriginalCustomerName),
+     );
+   }
+ 
++  bool get isEditingExisting => editingTransactionId != null;
++
+   static const empty = CartState();
+ }
+diff --git a/lib/features/pos/domain/transaction.dart b/lib/features/pos/domain/transaction.dart
+index 88c731f..cba89be 100644
+--- a/lib/features/pos/domain/transaction.dart
++++ b/lib/features/pos/domain/transaction.dart
+@@ -72,6 +72,13 @@ class Transaction {
+ 
+   bool get isCanceled => status == TransactionStatus.canceled;
+ 
++  /// "Diproses" in the UI — not yet paid, still editable, excluded from
++  /// Dompet/Dashboard/Laporan until [HistoryRepository.completeTransaction]
++  /// moves it to [isPaid].
++  bool get isOpen => status == TransactionStatus.open;
++
++  bool get isPaid => status == TransactionStatus.paid;
++
+   int get hppTotal => items.fold(0, (sum, item) => sum + (item.hpp * item.qty));
+   int get totalQty => items.fold(0, (sum, item) => sum + item.qty);
+ }
+diff --git a/lib/features/pos/presentation/widgets/cart_drawer.dart b/lib/features/pos/presentation/widgets/cart_drawer.dart
+index e9d8517..0e29e00 100644
+--- a/lib/features/pos/presentation/widgets/cart_drawer.dart
++++ b/lib/features/pos/presentation/widgets/cart_drawer.dart
+@@ -5,7 +5,9 @@ import '../../../../core/navigation/app_nav.dart';
+ import '../../../../core/theme/app_colors.dart';
+ import '../../../../core/theme/app_spacing.dart';
+ import '../../../../core/utils/currency.dart';
++import '../../../../core/widgets/app_button.dart';
+ import '../../../../core/widgets/app_sheet_header.dart';
++import '../../../history/application/history_provider.dart';
+ import '../../application/cart_provider.dart';
+ import '../../application/pos_catalog_provider.dart';
+ import '../../domain/cart_item.dart';
+@@ -22,6 +24,48 @@ import 'payment_modal.dart';
+ class CartDrawer extends ConsumerWidget {
+   const CartDrawer({super.key});
+ 
++  /// "Simpan Perubahan" — commits an edited `open` (Diproses)
++  /// transaction's new items/totals back to the SAME row via
++  /// [HistoryRepository.updateOpenTransaction] (never a new INSERT —
++  /// see that method's doc comment), then clears the cart draft's edit
++  /// mode and closes back to wherever "Edit Pesanan" was opened from.
++  Future<void> _saveEdit(BuildContext context, WidgetRef ref, CartState cartState, CheckoutTotals totals) async {
++    final repository = ref.read(historyRepositoryProvider);
++
++    // Neither a linked Customer nor a guest name were touched during
++    // this edit — fall back to the transaction's original
++    // customerId/customerName snapshot rather than overwriting a real
++    // customer link with null (see CartState.editingOriginalCustomerId's
++    // doc comment).
++    final customerUntouched = cartState.customer == null && cartState.guestName.isEmpty;
++    final customerId = cartState.customer?.id ?? (customerUntouched ? cartState.editingOriginalCustomerId : null);
++    final customerName = cartState.customer?.name ??
++        (cartState.guestName.isNotEmpty ? cartState.guestName : (customerUntouched ? cartState.editingOriginalCustomerName : null));
++
++    await repository.updateOpenTransaction(
++      transactionId: cartState.editingTransactionId!,
++      items: cartState.cart,
++      orderType: cartState.orderType,
++      customerId: customerId,
++      customerName: customerName,
++      subtotal: totals.subtotal,
++      voucherId: cartState.appliedVoucher?.id,
++      voucherCode: cartState.appliedVoucher?.code,
++      voucherDiscount: totals.voucherDiscount,
++      manualDiscountAmount: totals.manualDiscountAmount,
++      taxAmount: totals.taxAmount,
++      serviceAmount: totals.serviceAmount,
++      deliveryFee: totals.deliveryFee,
++      roundingAdjustment: totals.roundingAdjustment,
++      total: totals.roundedTotal,
++    );
++
++    if (!context.mounted) return;
++
++    ref.read(cartProvider.notifier).resetDraft();
++    Navigator.of(context).pop();
++  }
++
+   @override
+   Widget build(BuildContext context, WidgetRef ref) {
+     final cartState = ref.watch(cartProvider);
+@@ -45,7 +89,11 @@ class CartDrawer extends ConsumerWidget {
+             bottom: false,
+             child: Column(
+               children: [
+-                const AppSheetHeader(title: 'Checkout'),
++                AppSheetHeader(title: cartState.isEditingExisting ? 'Edit Pesanan' : 'Checkout'),
++                if (cartState.isEditingExisting) ...[
++                  const SizedBox(height: AppSpacing.sm),
++                  _EditingBanner(displayNumber: cartState.editingDisplayNumber!),
++                ],
+                 if (cartState.cart.isEmpty)
+                   const Expanded(
+                     child: Center(
+@@ -83,19 +131,22 @@ class CartDrawer extends ConsumerWidget {
+                 _BottomBar(
+                   total: totals.roundedTotal,
+                   enabled: cartState.cart.isNotEmpty,
+-                  onCheckout: () {
+-                    // Stack semantics: push PaymentModal ON TOP of this
+-                    // sheet rather than popping CartDrawer first — so
+-                    // closing the payment screen returns to the cart
+-                    // exactly as it was, instead of dropping all the way
+-                    // back to the bare Kasir grid. See AppNav's doc
+-                    // comment. (Contrast with PaymentModal's own
+-                    // "success" transition to ReceiptModal, which
+-                    // deliberately DOES pop first — the cart has already
+-                    // been reset by then, so there's nothing left to
+-                    // return to.)
+-                    AppNav.showModal(context, builder: (_) => const PaymentModal());
+-                  },
++                  label: cartState.isEditingExisting ? 'Simpan Perubahan' : null,
++                  onCheckout: cartState.isEditingExisting
++                      ? () => _saveEdit(context, ref, cartState, totals)
++                      : () {
++                          // Stack semantics: push PaymentModal ON TOP of this
++                          // sheet rather than popping CartDrawer first — so
++                          // closing the payment screen returns to the cart
++                          // exactly as it was, instead of dropping all the way
++                          // back to the bare Kasir grid. See AppNav's doc
++                          // comment. (Contrast with PaymentModal's own
++                          // "success" transition to ReceiptModal, which
++                          // deliberately DOES pop first — the cart has already
++                          // been reset by then, so there's nothing left to
++                          // return to.)
++                          AppNav.showModal(context, builder: (_) => const PaymentModal());
++                        },
+                 ),
+               ],
+             ),
+@@ -672,7 +723,10 @@ class _BottomBar extends StatelessWidget {
+   final int total;
+   final bool enabled;
+   final VoidCallback onCheckout;
+-  const _BottomBar({required this.total, required this.enabled, required this.onCheckout});
++  /// Overrides the default "Bayar" label — used for "Simpan Perubahan"
++  /// when [CartState.isEditingExisting] (see [CartDrawer.build]).
++  final String? label;
++  const _BottomBar({required this.total, required this.enabled, required this.onCheckout, this.label});
+ 
+   @override
+   Widget build(BuildContext context) {
+@@ -683,20 +737,9 @@ class _BottomBar extends StatelessWidget {
+         border: const Border(top: BorderSide(color: AppColors.border)),
+         boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 16, offset: const Offset(0, -4))],
+       ),
+-      child: SizedBox(
+-        width: double.infinity,
+-        child: ElevatedButton(
+-          onPressed: enabled ? onCheckout : null,
+-          style: ElevatedButton.styleFrom(
+-            backgroundColor: AppColors.brand,
+-            foregroundColor: Colors.white,
+-            disabledBackgroundColor: AppColors.border,
+-            padding: const EdgeInsets.symmetric(vertical: 15),
+-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
+-            elevation: 0,
+-          ),
+-          child: Text('Bayar • ${formatRupiah(total)}', style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
+-        ),
++      child: AppButton.primary(
++        label: '${label ?? 'Bayar'} • ${formatRupiah(total)}',
++        onPressed: enabled ? onCheckout : null,
+       ),
+     );
+   }
+@@ -720,3 +763,40 @@ class _SectionCard extends StatelessWidget {
+     );
+   }
+ }
++
++/// Shown at the top of [CartDrawer] whenever [CartState.isEditingExisting]
++/// — makes it visually unmistakable that this draft is editing an
++/// existing Diproses transaction in place, not building a new order
++/// (per the mockup's rationale: an ambiguous cart here risks the
++/// cashier accidentally double-submitting an order instead of updating
++/// the one they meant to).
++class _EditingBanner extends StatelessWidget {
++  final String displayNumber;
++  const _EditingBanner({required this.displayNumber});
++
++  @override
++  Widget build(BuildContext context) {
++    return Container(
++      margin: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
++      padding: const EdgeInsets.all(AppSpacing.md),
++      decoration: BoxDecoration(
++        color: AppColors.warning.withValues(alpha: 0.1),
++        borderRadius: BorderRadius.circular(AppRadius.md),
++        border: Border.all(color: AppColors.warning.withValues(alpha: 0.3)),
++      ),
++      child: Row(
++        crossAxisAlignment: CrossAxisAlignment.start,
++        children: [
++          const Icon(Icons.edit_note_rounded, size: 18, color: AppColors.warning),
++          const SizedBox(width: AppSpacing.sm),
++          Expanded(
++            child: Text(
++              'Mengedit pesanan $displayNumber. Perubahan disimpan ke pesanan yang sama, bukan pesanan baru.',
++              style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w500, color: AppColors.textSecondary),
++            ),
++          ),
++        ],
++      ),
++    );
++  }
++}
+diff --git a/lib/features/pos/presentation/widgets/payment_modal.dart b/lib/features/pos/presentation/widgets/payment_modal.dart
+index 2b7063e..cec84c9 100644
+--- a/lib/features/pos/presentation/widgets/payment_modal.dart
++++ b/lib/features/pos/presentation/widgets/payment_modal.dart
+@@ -5,6 +5,7 @@ import '../../../../core/navigation/app_nav.dart';
+ import '../../../../core/theme/app_colors.dart';
+ import '../../../../core/theme/app_spacing.dart';
+ import '../../../../core/utils/currency.dart';
++import '../../../../core/widgets/app_button.dart';
+ import '../../../../core/widgets/app_sheet_header.dart';
+ import '../../../dompet/presentation/widgets/cash_location_picker.dart';
+ import '../../application/cart_provider.dart';
+@@ -96,6 +97,62 @@ class _PaymentModalState extends ConsumerState<PaymentModal> {
+     );
+   }
+ 
++  /// "Proses Pesanan" — saves the transaction as `open` (Diproses):
++  /// order type, items, and totals are recorded, but no payment method
++  /// or amount is captured (nothing has been paid yet). Per
++  /// [PosRepository.saveTransaction]'s gating, an `open` status never
++  /// creates a `cash_movements` row — the sale only counts toward
++  /// Dompet/Dashboard/Laporan once [HistoryRepository.completeTransaction]
++  /// later moves it to `paid` (see Transaction Detail's "Selesaikan
++  /// Pesanan" action). Reachable for Ojol always, and for other order
++  /// types whenever the cashier hasn't entered a payment yet (see the
++  /// button's dynamic label/action logic in `build`).
++  Future<void> _saveAsOpen({
++    required CartState cartState,
++    required CheckoutTotals totals,
++    required PaymentModalState paymentState,
++  }) async {
++    setState(() => _isSaving = true);
++
++    final repository = ref.read(posRepositoryProvider);
++    final transaction = await repository.saveTransaction(
++      status: TransactionStatus.open,
++      orderType: cartState.orderType,
++      customerId: cartState.customer?.id,
++      customerName: cartState.customer?.name ?? (cartState.guestName.isNotEmpty ? cartState.guestName : null),
++      ojolPlatform: cartState.orderType == OrderType.ojol ? paymentState.ojolPlatform : null,
++      ojolOrderNumber: cartState.orderType == OrderType.ojol ? paymentState.orderNumber : null,
++      items: cartState.cart,
++      subtotal: totals.subtotal,
++      voucherId: cartState.appliedVoucher?.id,
++      voucherCode: cartState.appliedVoucher?.code,
++      voucherDiscount: totals.voucherDiscount,
++      manualDiscount: cartState.manualDiscount,
++      manualDiscountAmount: totals.manualDiscountAmount,
++      taxAmount: totals.taxAmount,
++      serviceAmount: totals.serviceAmount,
++      deliveryFee: totals.deliveryFee,
++      roundingAdjustment: totals.roundingAdjustment,
++      total: totals.roundedTotal,
++      paymentMethodLabel: null,
++      amountPaid: 0,
++      changeAmount: 0,
++      splitPayments: const [],
++      cashLocationId: null,
++    );
++
++    if (!mounted) return;
++
++    ref.read(cartProvider.notifier).resetDraft();
++    ref.read(paymentModalProvider.notifier).close();
++
++    Navigator.of(context).pop();
++    AppNav.showModal(
++      context,
++      builder: (_) => ReceiptModal(transaction: transaction, changeAmount: 0),
++    );
++  }
++
+   @override
+   Widget build(BuildContext context) {
+     final cartState = ref.watch(cartProvider);
+@@ -120,6 +177,24 @@ class _PaymentModalState extends ConsumerState<PaymentModal> {
+             ? remaining <= 0 && paymentState.splitPayments.isNotEmpty
+             : paidSoFar >= totals.roundedTotal && (!requiresCashLocation || paymentState.cashLocationId != null);
+ 
++    // Dynamic checkout button, per Agung's direction: Ojol always goes
++    // through "Diproses" first (it must wait on delivery regardless of
++    // payment). For every other order type, whether anything has been
++    // paid decides both the label and what gets saved — no separate
++    // "Diproses" button sits alongside this one; entering a payment and
++    // pressing this same button is what turns the save into "Selesai"
++    // instead of "Diproses".
++    final hasEnteredPayment = !isOjol && paidSoFar > 0;
++    final canProceedAsOpen = !isOjol && !hasEnteredPayment; // untouched payment fields — always postable as Diproses
++    final buttonLabel = isOjol || !hasEnteredPayment ? 'Proses Pesanan' : 'Konfirmasi Pembayaran';
++    final buttonEnabled = isOjol || canProceedAsOpen || canConfirm;
++    void Function()? onButtonPressed;
++    if (!_isSaving && buttonEnabled) {
++      onButtonPressed = (isOjol || canProceedAsOpen)
++          ? () => _saveAsOpen(cartState: cartState, totals: totals, paymentState: paymentState)
++          : () => _finalizePayment(cartState: cartState, totals: totals, paymentState: paymentState);
++    }
++
+     // Full-height, matching CartDrawer — still a modal layer (not a page
+     // route), just sized to read like the reference design's Checkout
+     // screen instead of a half-screen sheet.
+@@ -179,24 +254,10 @@ class _PaymentModalState extends ConsumerState<PaymentModal> {
+                     border: const Border(top: BorderSide(color: AppColors.border)),
+                     boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 16, offset: const Offset(0, -4))],
+                   ),
+-                  child: SizedBox(
+-                    width: double.infinity,
+-                    child: ElevatedButton(
+-                      onPressed: (!canConfirm || _isSaving)
+-                          ? null
+-                          : () => _finalizePayment(cartState: cartState, totals: totals, paymentState: paymentState),
+-                      style: ElevatedButton.styleFrom(
+-                        backgroundColor: AppColors.brand,
+-                        foregroundColor: Colors.white,
+-                        disabledBackgroundColor: AppColors.border,
+-                        padding: const EdgeInsets.symmetric(vertical: 15),
+-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
+-                        elevation: 0,
+-                      ),
+-                      child: _isSaving
+-                          ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2.4, color: Colors.white))
+-                          : const Text('Konfirmasi Pembayaran', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
+-                    ),
++                  child: AppButton.primary(
++                    label: buttonLabel,
++                    onPressed: onButtonPressed,
++                    isLoading: _isSaving,
+                   ),
+                 ),
+               ],

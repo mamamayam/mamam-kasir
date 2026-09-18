@@ -6,6 +6,7 @@ import '../domain/cart_state.dart';
 import '../domain/checkout_calculator.dart';
 import '../domain/customer.dart';
 import '../domain/order_models.dart';
+import '../domain/transaction.dart';
 import 'pos_repository.dart';
 
 final posRepositoryProvider = Provider<PosRepository>((ref) => PosRepository());
@@ -143,5 +144,34 @@ class CartController extends StateNotifier<CartState> {
 
   void resetDraft() {
     state = CartState.empty;
+  }
+
+  /// "Edit Pesanan" entry point — replaces whatever draft is currently
+  /// in [cartProvider] with a copy of an existing `open` (Diproses)
+  /// transaction's items/order type/delivery fee/manual discount, and
+  /// marks the draft as editing that transaction via
+  /// [CartState.editingTransactionId]. [CartDrawer] reads that flag to
+  /// show the "editing X" banner and change its save action to an
+  /// UPDATE (see [HistoryRepository.updateOpenTransaction]) instead of
+  /// a new checkout.
+  ///
+  /// Note: [Transaction.customerId]/[voucherId] are stored as plain
+  /// IDs/codes on the transaction row, not full snapshot objects, so
+  /// this does not re-populate [CartState.customer]/[appliedVoucher] —
+  /// only the guest name (when there was no linked customer) carries
+  /// over. Re-attaching a specific customer or voucher, if needed, is a
+  /// manual step in the cart itself after loading.
+  void loadFromTransaction(Transaction transaction) {
+    state = CartState(
+      cart: transaction.items,
+      guestName: transaction.customerId == null ? (transaction.customerName ?? '') : '',
+      orderType: transaction.orderType,
+      deliveryFee: transaction.deliveryFee,
+      manualDiscount: transaction.manualDiscount ?? ManualDiscount.none,
+      editingTransactionId: transaction.id,
+      editingDisplayNumber: transaction.displayNumber,
+      editingOriginalCustomerId: transaction.customerId,
+      editingOriginalCustomerName: transaction.customerName,
+    );
   }
 }

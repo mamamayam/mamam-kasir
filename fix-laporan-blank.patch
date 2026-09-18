@@ -1,0 +1,16 @@
+diff --git a/src/features/reports/ReportsView.jsx b/src/features/reports/ReportsView.jsx
+index 9c83079..86f480d 100644
+--- a/src/features/reports/ReportsView.jsx
++++ b/src/features/reports/ReportsView.jsx
+@@ -100,8 +100,9 @@ const ReportsView = () => {
+   const bestSellers = useMemo(() => {
+     const itemCounts = {};
+     filteredSales.forEach(order => {
+-      order.items.forEach(item => {
+-        itemCounts[item.name] = (itemCounts[item.name] || 0) + item.qty;
++      (order.items || []).forEach(item => {
++        if (!item?.name) return;
++        itemCounts[item.name] = (itemCounts[item.name] || 0) + (item.qty || 0);
+       });
+     });
+     return Object.entries(itemCounts)
