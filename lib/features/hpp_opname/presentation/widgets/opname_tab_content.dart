@@ -5,10 +5,10 @@ import 'package:intl/intl.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/theme/app_spacing.dart';
 import '../../../../core/utils/currency.dart';
+import '../../../../core/widgets/sliding_pill_tabs.dart';
 import '../../application/hpp_opname_provider.dart';
 import '../../domain/hpp_opname_models.dart';
 import 'hpp_tab_content.dart';
-import 'sliding_pill_tabs.dart';
 
 /// Stok Opname tab: Riwayat (history) / Input Baru sub-tabs, ported 1:1
 /// from the HTML mockup.

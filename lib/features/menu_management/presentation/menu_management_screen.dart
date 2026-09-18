@@ -4,11 +4,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/navigation/app_nav.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_spacing.dart';
+import '../../../core/widgets/app_dropdown_title.dart';
+import '../../../core/widgets/ios_page_header.dart';
 import '../application/menu_management_provider.dart';
 import '../domain/menu_management_models.dart';
 import 'widgets/add_menu_item_modal.dart';
 import 'widgets/menu_item_card.dart';
-import 'widgets/menu_management_header.dart';
 import 'widgets/variant_group_card.dart';
 
 /// Menu / Varian management screen.
@@ -60,11 +61,15 @@ class _MenuManagementScreenState extends ConsumerState<MenuManagementScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            MenuManagementHeader(
-              currentTab: state.tab,
-              onTabSelected: controller.setTab,
-              onBack: () => Navigator.of(context).pop(),
-              onAdd: () => AppNav.showModal(context, builder: (_) => const AddMenuItemModal()),
+            IosPageHeader(
+              title: AppDropdownTitle<MenuManagementTab>(
+                selected: state.tab,
+                options: const [MenuManagementTab.menu, MenuManagementTab.varian],
+                labelBuilder: (tab) => tab == MenuManagementTab.menu ? 'Menu' : 'Varian',
+                onSelected: controller.setTab,
+              ),
+              trailingIcon: Icons.add_rounded,
+              onTrailingTap: () => AppNav.showModal(context, builder: (_) => const AddMenuItemModal()),
             ),
             _SearchRow(
               controller: _searchController,

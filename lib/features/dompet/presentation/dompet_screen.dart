@@ -5,6 +5,8 @@ import '../../../core/navigation/app_nav.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_spacing.dart';
 import '../../../core/utils/currency.dart';
+import '../../../core/widgets/app_card_shell.dart';
+import '../../../core/widgets/app_empty_state.dart';
 import '../../../core/widgets/ios_page_header.dart';
 import '../application/dompet_provider.dart';
 import '../domain/dompet_models.dart';
@@ -34,75 +36,80 @@ class DompetScreen extends ConsumerWidget {
 
     return Scaffold(
       backgroundColor: AppColors.background,
-      appBar: IosPageHeader(
-        title: const Text('Dompet'),
-        trailingIcon: Icons.lock_clock_rounded,
-        onTrailingTap: () async {
-          await AppNav.push(context, (_) => const DompetClosingScreen());
-          controller.load();
-        },
-      ),
       body: SafeArea(
-        top: false,
-        child: state.isLoading
-            ? const Center(child: CircularProgressIndicator(color: AppColors.brand))
-            : RefreshIndicator(
-                color: AppColors.brand,
-                onRefresh: controller.load,
-                child: ListView(
-                  physics: const AlwaysScrollableScrollPhysics(),
-                  padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.xxl),
-                  children: [
-                    _SaldoCard(summary: state.summary),
-                    const SizedBox(height: AppSpacing.lg),
-                    _RingkasanRow(summary: state.summary),
-                    if (state.lastClosing != null) ...[
-                      const SizedBox(height: AppSpacing.sm),
-                      _LastClosingNote(closing: state.lastClosing!),
-                    ],
-                    if (state.summary != null && state.summary!.courierBalances.isNotEmpty) ...[
-                      const SizedBox(height: AppSpacing.xl),
-                      const _SectionLabel(text: 'UANG DI KURIR'),
-                      const SizedBox(height: AppSpacing.sm),
-                      ...state.summary!.courierBalances.map((balance) => Padding(
-                            padding: const EdgeInsets.only(bottom: AppSpacing.sm),
-                            child: CourierOutstandingCard(
-                              balance: balance,
-                              onDeposit: (amount) => controller.recordCourierDeposit(
-                                courierLocationId: balance.location.id,
-                                amount: amount,
+        child: Column(
+          children: [
+            IosPageHeader(
+              title: const Text('Dompet'),
+              trailingIcon: Icons.lock_clock_rounded,
+              onTrailingTap: () async {
+                await AppNav.push(context, (_) => const DompetClosingScreen());
+                controller.load();
+              },
+            ),
+            Expanded(
+              child: state.isLoading
+                  ? const Center(child: CircularProgressIndicator(color: AppColors.brand))
+                  : RefreshIndicator(
+                      color: AppColors.brand,
+                      onRefresh: controller.load,
+                      child: ListView(
+                        physics: const AlwaysScrollableScrollPhysics(),
+                        padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.xxl),
+                        children: [
+                          _SaldoCard(summary: state.summary),
+                          const SizedBox(height: AppSpacing.lg),
+                          _RingkasanRow(summary: state.summary),
+                          if (state.lastClosing != null) ...[
+                            const SizedBox(height: AppSpacing.sm),
+                            _LastClosingNote(closing: state.lastClosing!),
+                          ],
+                          if (state.summary != null && state.summary!.courierBalances.isNotEmpty) ...[
+                            const SizedBox(height: AppSpacing.xl),
+                            const _SectionLabel(text: 'UANG DI KURIR'),
+                            const SizedBox(height: AppSpacing.sm),
+                            ...state.summary!.courierBalances.map((balance) => Padding(
+                                  padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+                                  child: CourierOutstandingCard(
+                                    balance: balance,
+                                    onDeposit: (amount) => controller.recordCourierDeposit(
+                                      courierLocationId: balance.location.id,
+                                      amount: amount,
+                                    ),
+                                    onConvertToKasbon: () => controller.convertToKasbon(
+                                      courierLocationId: balance.location.id,
+                                      courierName: balance.location.name,
+                                      amount: balance.balance,
+                                    ),
+                                  ),
+                                )),
+                          ],
+                          const SizedBox(height: AppSpacing.xl),
+                          const _SectionLabel(text: 'AKTIVITAS CASH'),
+                          const SizedBox(height: AppSpacing.sm),
+                          if (state.recentMovements.isEmpty)
+                            Padding(
+                              padding: const EdgeInsets.symmetric(vertical: AppSpacing.xl),
+                              child: const AppEmptyState(
+                                icon: Icons.receipt_long_rounded,
+                                title: 'Belum ada aktivitas',
+                                subtitle: 'Aktivitas cash akan muncul di sini.',
                               ),
-                              onConvertToKasbon: () => controller.convertToKasbon(
-                                courierLocationId: balance.location.id,
-                                courierName: balance.location.name,
-                                amount: balance.balance,
+                            )
+                          else
+                            AppCardShell(
+                              child: Column(
+                                children: state.recentMovements
+                                    .map((m) => CashMovementTile(movement: m, locationNames: _locationNameLookup(state.summary)))
+                                    .toList(),
                               ),
                             ),
-                          )),
-                    ],
-                    const SizedBox(height: AppSpacing.xl),
-                    const _SectionLabel(text: 'AKTIVITAS CASH'),
-                    const SizedBox(height: AppSpacing.sm),
-                    if (state.recentMovements.isEmpty)
-                      const Padding(
-                        padding: EdgeInsets.symmetric(vertical: AppSpacing.lg),
-                        child: Center(
-                          child: Text('Belum ada aktivitas.', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w500, color: AppColors.textMuted)),
-                        ),
-                      )
-                    else
-                      Container(
-                        padding: const EdgeInsets.all(AppSpacing.md),
-                        decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.lg), border: Border.all(color: AppColors.border)),
-                        child: Column(
-                          children: state.recentMovements
-                              .map((m) => CashMovementTile(movement: m, locationNames: _locationNameLookup(state.summary)))
-                              .toList(),
-                        ),
+                        ],
                       ),
-                  ],
-                ),
-              ),
+                    ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -190,9 +197,8 @@ class _RingkasanChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
+    return AppCardShell(
       padding: const EdgeInsets.all(AppSpacing.sm),
-      decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.md), border: Border.all(color: AppColors.border)),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [

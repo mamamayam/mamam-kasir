@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/theme/app_colors.dart';
+import '../../../core/widgets/app_pin_keypad.dart';
 import '../../dashboard/presentation/dashboard_screen.dart';
 import '../domain/pin_auth_state.dart';
 import 'pin_auth_controller.dart';
@@ -65,9 +66,9 @@ class PinLoginScreen extends ConsumerWidget {
                 ),
               ),
               const SizedBox(height: 28),
-              _PinDots(state: state),
+              AppPinDots(length: PinAuthState.pinLength, filledCount: state.enteredDigits.length, isError: state.isError),
               const Spacer(flex: 2),
-              _Keypad(
+              AppPinKeypad(
                 disabled: state.isLocked,
                 onDigit: (d) => _handleDigit(ref, context, d),
                 onBackspace: () => ref.read(pinAuthControllerProvider.notifier).backspace(),
@@ -92,110 +93,3 @@ class PinLoginScreen extends ConsumerWidget {
   }
 }
 
-class _PinDots extends StatelessWidget {
-  final PinAuthState state;
-  const _PinDots({required this.state});
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: List.generate(PinAuthState.pinLength, (i) {
-        final filled = i < state.enteredDigits.length;
-        final color = state.isError
-            ? AppColors.danger
-            : filled
-                ? AppColors.brand
-                : AppColors.border;
-        return AnimatedContainer(
-          duration: const Duration(milliseconds: 150),
-          margin: const EdgeInsets.symmetric(horizontal: 8),
-          width: 16,
-          height: 16,
-          decoration: BoxDecoration(
-            color: filled || state.isError ? color : Colors.transparent,
-            border: Border.all(color: color, width: 2),
-            shape: BoxShape.circle,
-          ),
-        );
-      }),
-    );
-  }
-}
-
-class _Keypad extends StatelessWidget {
-  final bool disabled;
-  final ValueChanged<String> onDigit;
-  final VoidCallback onBackspace;
-
-  const _Keypad({required this.disabled, required this.onDigit, required this.onBackspace});
-
-  @override
-  Widget build(BuildContext context) {
-    const rows = [
-      ['1', '2', '3'],
-      ['4', '5', '6'],
-      ['7', '8', '9'],
-      ['', '0', 'back'],
-    ];
-
-    return Column(
-      children: rows.map((row) {
-        return Padding(
-          padding: const EdgeInsets.symmetric(vertical: 6),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-            children: row.map((key) {
-              if (key.isEmpty) {
-                return const SizedBox(width: 72, height: 72);
-              }
-              if (key == 'back') {
-                return _KeypadButton(
-                  disabled: disabled,
-                  onTap: onBackspace,
-                  child: const Icon(Icons.backspace_outlined, size: 22, color: AppColors.textSecondary),
-                );
-              }
-              return _KeypadButton(
-                disabled: disabled,
-                onTap: () => onDigit(key),
-                child: Text(
-                  key,
-                  style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w700, color: AppColors.textPrimary),
-                ),
-              );
-            }).toList(),
-          ),
-        );
-      }).toList(),
-    );
-  }
-}
-
-class _KeypadButton extends StatelessWidget {
-  final bool disabled;
-  final VoidCallback onTap;
-  final Widget child;
-
-  const _KeypadButton({required this.disabled, required this.onTap, required this.child});
-
-  @override
-  Widget build(BuildContext context) {
-    return Opacity(
-      opacity: disabled ? 0.4 : 1,
-      child: Material(
-        color: Colors.transparent,
-        shape: const CircleBorder(),
-        child: InkWell(
-          onTap: disabled ? null : onTap,
-          customBorder: const CircleBorder(),
-          child: SizedBox(
-            width: 72,
-            height: 72,
-            child: Center(child: child),
-          ),
-        ),
-      ),
-    );
-  }
-}

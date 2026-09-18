@@ -36,8 +36,6 @@ class DashboardScreen extends ConsumerStatefulWidget {
 class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   double _pullDistance = 0;
   bool _isRefreshing = false;
-  double _dragStartY = 0;
-  bool _isDragging = false;
 
   static const double _pullTriggerThreshold = 60;
   static const double _maxPullDistance = 80;
@@ -50,46 +48,52 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     super.dispose();
   }
 
-  void _handleDragStart(DragStartDetails details) {
-    // Only start tracking a pull if the content is already scrolled to
-    // the top — otherwise this would fight with normal list scrolling.
-    _dragStartY = details.globalPosition.dy;
-    _isDragging = true;
-  }
-
-  void _handleDragUpdate(DragUpdateDetails details, ScrollController controller) {
-    if (!_isDragging) return;
-    if (controller.hasClients && controller.offset > 0) return;
-
-    final delta = details.globalPosition.dy - _dragStartY;
-    if (delta <= 0) return;
-
-    setState(() {
-      _pullDistance = (delta * 0.4).clamp(0, _maxPullDistance);
-    });
-  }
-
-  Future<void> _handleDragEnd(DragEndDetails details) async {
-    _isDragging = false;
-    if (_pullDistance >= _pullTriggerThreshold) {
-      setState(() {
-        _isRefreshing = true;
-        _pullDistance = 34;
-      });
-      // Local-DB refresh only for now. Once Supabase sync lands (docs/07
-      // §19), add the sync pull call INSIDE DashboardController.load()
-      // (push pending -> server validation -> pull, then re-read local
-      // DB) — this widget doesn't need to change at all when that
-      // happens, since it just awaits whatever load() does.
-      await ref.read(dashboardProvider.notifier).load();
-      if (!mounted) return;
-      setState(() {
-        _isRefreshing = false;
-        _pullDistance = 0;
-      });
-    } else {
-      setState(() => _pullDistance = 0);
+  // Pull-to-refresh via ScrollNotification rather than a GestureDetector
+  // wrapping the SingleChildScrollView: a GestureDetector's drag
+  // recognizer competes with the Scrollable's own internal recognizer
+  // for the same touch in the gesture arena, and on real devices
+  // (unlike the emulator's mouse-drag simulation) the Scrollable wins
+  // that race far more often — onVerticalDragStart/Update then never
+  // fire at all, so the pull silently does nothing. A
+  // NotificationListener instead listens to notifications the
+  // Scrollable itself dispatches as it scrolls, so it always sees the
+  // gesture regardless of who "owns" it.
+  bool _handleScrollNotification(ScrollNotification notification) {
+    // Overscrolling past the top (content already at offset 0 and the
+    // user keeps dragging down) is exactly the "pulling to refresh"
+    // gesture — dragOverscrollAmount is negative while pulling down.
+    if (notification is OverscrollNotification && notification.dragDetails != null) {
+      if (_scrollController.hasClients && _scrollController.offset <= 0 && notification.overscroll < 0 && !_isRefreshing) {
+        setState(() {
+          _pullDistance = (_pullDistance - notification.overscroll * 0.4).clamp(0, _maxPullDistance);
+        });
+      }
+    } else if (notification is ScrollEndNotification) {
+      if (_pullDistance >= _pullTriggerThreshold && !_isRefreshing) {
+        _triggerRefresh();
+      } else if (!_isRefreshing && _pullDistance > 0) {
+        setState(() => _pullDistance = 0);
+      }
     }
+    return false;
+  }
+
+  Future<void> _triggerRefresh() async {
+    setState(() {
+      _isRefreshing = true;
+      _pullDistance = 34;
+    });
+    // Local-DB refresh only for now. Once Supabase sync lands (docs/07
+    // §19), add the sync pull call INSIDE DashboardController.load()
+    // (push pending -> server validation -> pull, then re-read local
+    // DB) — this widget doesn't need to change at all when that
+    // happens, since it just awaits whatever load() does.
+    await ref.read(dashboardProvider.notifier).load();
+    if (!mounted) return;
+    setState(() {
+      _isRefreshing = false;
+      _pullDistance = 0;
+    });
   }
 
   @override
@@ -114,12 +118,11 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                 Expanded(
                   child: state.isLoading && metrics == null
                       ? const Center(child: CircularProgressIndicator(color: AppColors.brand))
-                      : GestureDetector(
-                          onVerticalDragStart: _handleDragStart,
-                          onVerticalDragUpdate: (d) => _handleDragUpdate(d, _scrollController),
-                          onVerticalDragEnd: _handleDragEnd,
+                      : NotificationListener<ScrollNotification>(
+                          onNotification: _handleScrollNotification,
                           child: SingleChildScrollView(
                             controller: _scrollController,
+                            physics: const AlwaysScrollableScrollPhysics(),
                             padding: const EdgeInsets.fromLTRB(
                               AppSpacing.lg,
                               AppSpacing.md,

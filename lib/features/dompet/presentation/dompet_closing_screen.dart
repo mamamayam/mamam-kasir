@@ -4,6 +4,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_spacing.dart';
 import '../../../core/utils/currency.dart';
+import '../../../core/widgets/app_button.dart';
+import '../../../core/widgets/app_card_shell.dart';
+import '../../../core/widgets/app_text_field.dart';
 import '../../../core/widgets/ios_page_header.dart';
 import '../application/dompet_provider.dart';
 import '../domain/dompet_models.dart';
@@ -50,30 +53,35 @@ class _DompetClosingScreenState extends ConsumerState<DompetClosingScreen> {
 
     return Scaffold(
       backgroundColor: AppColors.background,
-      appBar: IosPageHeader(title: const Text('Tutup Dompet')),
       body: SafeArea(
-        top: false,
-        child: state.isLoading || state.preview == null
-            ? const Center(child: CircularProgressIndicator(color: AppColors.brand))
-            : _Body(
-                preview: state.preview!,
-                countedController: _countedController,
-                noteController: _noteController,
-                isSubmitting: state.isSubmitting,
-                onSubmit: () async {
-                  final counted = int.tryParse(_countedController.text.trim());
-                  if (counted == null || counted < 0) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('Masukkan jumlah uang fisik yang valid.'), backgroundColor: AppColors.danger),
-                    );
-                    return;
-                  }
-                  await controller.submit(
-                    countedCash: counted,
-                    note: _noteController.text.trim().isEmpty ? null : _noteController.text.trim(),
-                  );
-                },
-              ),
+        child: Column(
+          children: [
+            const IosPageHeader(title: Text('Tutup Dompet')),
+            Expanded(
+              child: state.isLoading || state.preview == null
+                  ? const Center(child: CircularProgressIndicator(color: AppColors.brand))
+                  : _Body(
+                      preview: state.preview!,
+                      countedController: _countedController,
+                      noteController: _noteController,
+                      isSubmitting: state.isSubmitting,
+                      onSubmit: () async {
+                        final counted = int.tryParse(_countedController.text.trim());
+                        if (counted == null || counted < 0) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Masukkan jumlah uang fisik yang valid.'), backgroundColor: AppColors.danger),
+                          );
+                          return;
+                        }
+                        await controller.submit(
+                          countedCash: counted,
+                          note: _noteController.text.trim().isEmpty ? null : _noteController.text.trim(),
+                        );
+                      },
+                    ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -122,16 +130,14 @@ class _Body extends StatelessWidget {
               const SizedBox(height: AppSpacing.lg),
               _SectionLabel(text: 'RINGKASAN KAS'),
               const SizedBox(height: AppSpacing.sm),
-              Container(
-                padding: const EdgeInsets.all(AppSpacing.md),
-                decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.lg), border: Border.all(color: AppColors.border)),
+              AppCardShell(
                 child: Column(
                   children: [
                     _SummaryRow(label: 'Saldo Awal', value: preview.openingBalance),
                     _SummaryRow(label: 'Penjualan Cash', value: preview.cashSalesTotal, positive: true),
                     _SummaryRow(label: 'Setoran Kurir', value: preview.courierDepositsTotal, positive: true),
                     _SummaryRow(label: 'Pengeluaran Cash', value: preview.cashExpensesTotal, positive: false),
-                    const Divider(height: AppSpacing.lg, color: AppColors.border),
+                    const Divider(height: AppSpacing.lg),
                     _SummaryRow(label: 'Kas Diharapkan (Expected Cash)', value: preview.expectedCash, bold: true),
                   ],
                 ),
@@ -139,31 +145,19 @@ class _Body extends StatelessWidget {
               const SizedBox(height: AppSpacing.xl),
               _SectionLabel(text: 'HITUNG FISIK'),
               const SizedBox(height: AppSpacing.sm),
-              TextField(
+              AppTextField.form(
                 controller: countedController,
                 enabled: preview.canClose && !isSubmitting,
                 keyboardType: TextInputType.number,
-                decoration: InputDecoration(
-                  hintText: 'Jumlah uang fisik dihitung',
-                  filled: true,
-                  fillColor: AppColors.surface,
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.border)),
-                  enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.border)),
-                ),
+                hintText: 'Jumlah uang fisik dihitung',
               ),
               const SizedBox(height: AppSpacing.md),
-              TextField(
+              AppTextField.form(
                 controller: noteController,
                 enabled: preview.canClose && !isSubmitting,
                 minLines: 2,
                 maxLines: 4,
-                decoration: InputDecoration(
-                  hintText: 'Catatan (opsional)',
-                  filled: true,
-                  fillColor: AppColors.surface,
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.border)),
-                  enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.border)),
-                ),
+                hintText: 'Catatan (opsional)',
               ),
             ],
           ),
@@ -171,20 +165,10 @@ class _Body extends StatelessWidget {
         Container(
           padding: EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, AppSpacing.sm + MediaQuery.of(context).padding.bottom),
           decoration: const BoxDecoration(color: AppColors.surface, border: Border(top: BorderSide(color: AppColors.border))),
-          child: SizedBox(
-            width: double.infinity,
-            height: 50,
-            child: ElevatedButton(
-              onPressed: preview.canClose && !isSubmitting ? onSubmit : null,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: AppColors.brand,
-                disabledBackgroundColor: AppColors.border,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
-              ),
-              child: isSubmitting
-                  ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2.5, color: Colors.white))
-                  : const Text('Tutup Dompet', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: Colors.white)),
-            ),
+          child: AppButton.primary(
+            label: 'Tutup Dompet',
+            onPressed: preview.canClose && !isSubmitting ? onSubmit : null,
+            isLoading: isSubmitting,
           ),
         ),
       ],
@@ -198,13 +182,9 @@ class _BlockedCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(AppSpacing.md),
-      decoration: BoxDecoration(
-        color: AppColors.danger.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(AppRadius.lg),
-        border: Border.all(color: AppColors.danger.withValues(alpha: 0.25)),
-      ),
+    return AppCardShell(
+      backgroundColor: AppColors.danger.withValues(alpha: 0.08),
+      borderColor: AppColors.danger.withValues(alpha: 0.25),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -322,15 +302,7 @@ class _ClosingResultSheet extends StatelessWidget {
             ),
           ],
           const SizedBox(height: AppSpacing.lg),
-          SizedBox(
-            width: double.infinity,
-            height: 48,
-            child: ElevatedButton(
-              onPressed: onDone,
-              style: ElevatedButton.styleFrom(backgroundColor: AppColors.brand, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md))),
-              child: const Text('Selesai', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: Colors.white)),
-            ),
-          ),
+          AppButton.primary(label: 'Selesai', onPressed: onDone),
         ],
       ),
     );

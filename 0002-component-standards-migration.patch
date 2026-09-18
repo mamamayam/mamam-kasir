@@ -1,0 +1,3185 @@
+From fd60a439fe8f0ff838ca8b2eb6125bdee1e88e41 Mon Sep 17 00:00:00 2001
+From: Claude <claude@anthropic.com>
+Date: Wed, 16 Sep 2026 11:40:31 +0000
+Subject: [PATCH] Add shared component library, migrate Dompet/Arus Kas +
+ others to it
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Component standards doc introduced a set of shared widgets that didn't
+exist anywhere in the codebase yet. Built them from scratch and
+migrated existing screens — including Dompet and Arus Kas from the
+previous patch — to use them instead of ad hoc inline styling, per
+"gw mau app gw seragam, gak ngasal di komponen2nya".
+
+New shared widgets (lib/core/widgets/):
+- app_button.dart — AppButton.primary/secondary/danger
+- app_card_shell.dart — AppCardShell (the standard card skin)
+- app_text_field.dart — AppTextField.search/form
+- app_icon_button.dart — AppIconButton.standard/stepper
+- app_empty_state.dart — AppEmptyState
+- app_status_badge.dart — AppStatusBadge
+- app_item_thumbnail.dart — AppItemThumbnail (photo or deterministic
+  initials avatar)
+- app_pin_keypad.dart — AppPinKeypad + AppPinDots, extracted from the
+  existing PIN login screen (already matched the spec) rather than
+  reimplemented; pin_login_screen.dart now uses it
+- app_dropdown_title.dart — AppDropdownTitle<T>, the tappable
+  dropdown-chevron title IosPageHeader's own doc comment already
+  anticipated ("callers needing a tappable title with a dropdown
+  chevron... can still center it the same way")
+- date_filter_tabs.dart — DateFilterTabs<T>, generalized from
+  Riwayat's existing chip-row filter (the proven implementation, not a
+  new one) so Arus Kas could reuse it instead of its own private copy
+- sliding_pill_tabs.dart — moved from hpp_opname's own widgets folder,
+  since it was already the correct, working implementation and had two
+  real call sites there
+
+Consolidated three duplicate header widgets found along the way
+(ArusKasHeader from the last patch, MenuManagementHeader, and
+HppOpnameHeader) — all three independently reimplemented the same
+Overlay-based dropdown-title header from scratch, which is exactly
+what AppSheetHeader's doc comment warns against for modals and what
+IosPageHeader was already set up to support for full-page screens.
+All three screens now build AppDropdownTitle and pass it as
+IosPageHeader's title, and the three duplicate files are gone.
+
+Also standardized on the app's existing IosPageHeader placement
+convention (embedded as the first Column child inside body: SafeArea,
+not Scaffold.appBar) — Dompet, Dompet Closing, Arus Kas, and HPP
+Opname now match the other five screens using IosPageHeader instead of
+introducing a second pattern.
+
+Added dialogTheme to app_theme.dart per the standards doc §16 (radius
+20, title/content text style) so AlertDialog usages across the app
+share one definition instead of repeating style inline; cleaned up one
+redundant inline content style left over from before the theme
+existed.
+
+Refactored to use the new widgets: dompet_screen.dart,
+dompet_closing_screen.dart, arus_kas_screen.dart,
+add_arus_kas_modal.dart, courier_outstanding_card.dart (also swapped
+its inline TextField/InputDecoration for AppTextField.form, and its
+two color-coded OutlinedButtons for AppButton.secondary + icon, since
+the standards doc's button variants are a closed set and courier
+resolution isn't a case it names).
+
+Dashboard pull-to-refresh: already implemented (InlineRefreshIndicator
++ custom drag detection, wired to the provider) — not touched this
+pass. Reported as not working in the Android emulator but untested on
+a real device yet; likely an emulator drag-simulation quirk rather
+than a real bug, but worth confirming on-device before assuming it's
+fine.
+
+Verified manually (brace/paren balance, every constructor call against
+its actual signature, Flutter-version-safe API choices) since this
+environment has no Flutter SDK to run flutter analyze — please run it
+before merging.
+---
+ lib/core/theme/app_theme.dart                 |   8 +
+ lib/core/widgets/app_button.dart              | 127 +++++++++
+ lib/core/widgets/app_card_shell.dart          |  55 ++++
+ lib/core/widgets/app_dropdown_title.dart      | 173 ++++++++++++
+ lib/core/widgets/app_empty_state.dart         |  35 +++
+ lib/core/widgets/app_icon_button.dart         |  66 +++++
+ lib/core/widgets/app_item_thumbnail.dart      | 102 +++++++
+ lib/core/widgets/app_pin_keypad.dart          | 118 +++++++++
+ lib/core/widgets/app_status_badge.dart        |  33 +++
+ lib/core/widgets/app_text_field.dart          | 138 ++++++++++
+ lib/core/widgets/date_filter_tabs.dart        |  64 +++++
+ .../widgets/sliding_pill_tabs.dart            |  21 +-
+ .../presentation/arus_kas_screen.dart         | 128 ++++-----
+ .../widgets/add_arus_kas_modal.dart           | 250 +++++++++---------
+ .../presentation/widgets/arus_kas_header.dart | 234 ----------------
+ .../auth/presentation/pin_login_screen.dart   | 112 +-------
+ .../presentation/dompet_closing_screen.dart   | 118 ++++-----
+ .../dompet/presentation/dompet_screen.dart    | 138 +++++-----
+ .../widgets/courier_outstanding_card.dart     |  45 ++--
+ .../history/presentation/history_screen.dart  |  14 +-
+ .../widgets/date_filter_tabs.dart             |  53 ----
+ .../presentation/hpp_opname_screen.dart       |  19 +-
+ .../widgets/hpp_opname_header.dart            | 235 ----------------
+ .../presentation/widgets/hpp_tab_content.dart |   2 +-
+ .../widgets/opname_tab_content.dart           |   2 +-
+ .../presentation/menu_management_screen.dart  |  17 +-
+ .../widgets/menu_management_header.dart       | 231 ----------------
+ 27 files changed, 1285 insertions(+), 1253 deletions(-)
+ create mode 100644 lib/core/widgets/app_button.dart
+ create mode 100644 lib/core/widgets/app_card_shell.dart
+ create mode 100644 lib/core/widgets/app_dropdown_title.dart
+ create mode 100644 lib/core/widgets/app_empty_state.dart
+ create mode 100644 lib/core/widgets/app_icon_button.dart
+ create mode 100644 lib/core/widgets/app_item_thumbnail.dart
+ create mode 100644 lib/core/widgets/app_pin_keypad.dart
+ create mode 100644 lib/core/widgets/app_status_badge.dart
+ create mode 100644 lib/core/widgets/app_text_field.dart
+ create mode 100644 lib/core/widgets/date_filter_tabs.dart
+ rename lib/{features/hpp_opname/presentation => core}/widgets/sliding_pill_tabs.dart (77%)
+ delete mode 100644 lib/features/arus_kas/presentation/widgets/arus_kas_header.dart
+ delete mode 100644 lib/features/history/presentation/widgets/date_filter_tabs.dart
+ delete mode 100644 lib/features/hpp_opname/presentation/widgets/hpp_opname_header.dart
+ delete mode 100644 lib/features/menu_management/presentation/widgets/menu_management_header.dart
+
+diff --git a/lib/core/theme/app_theme.dart b/lib/core/theme/app_theme.dart
+index 2daaf05..0f433a3 100644
+--- a/lib/core/theme/app_theme.dart
++++ b/lib/core/theme/app_theme.dart
+@@ -41,6 +41,14 @@ class AppTheme {
+         thickness: 1,
+         space: 1,
+       ),
++      dialogTheme: DialogThemeData(
++        backgroundColor: AppColors.surface,
++        surfaceTintColor: Colors.transparent,
++        elevation: 0,
++        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
++        titleTextStyle: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
++        contentTextStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.textSecondary),
++      ),
+     );
+   }
+ }
+diff --git a/lib/core/widgets/app_button.dart b/lib/core/widgets/app_button.dart
+new file mode 100644
+index 0000000..8b66d9c
+--- /dev/null
++++ b/lib/core/widgets/app_button.dart
+@@ -0,0 +1,127 @@
++import 'package:flutter/material.dart';
++
++import '../theme/app_colors.dart';
++import '../theme/app_spacing.dart';
++
++enum _AppButtonVariant { primary, secondary, danger }
++
++/// Shared button — three fixed variants per the component standards
++/// doc §5. Do not add ad hoc variants; extend this widget instead if a
++/// new case is genuinely needed.
++///
++/// - [AppButton.primary]: main CTA (Bayar, Simpan, Konfirmasi) — filled
++///   [AppColors.brand], white w800/15 text, [AppRadius.lg].
++/// - [AppButton.secondary]: secondary action (Batal, etc.) — outlined
++///   [AppColors.border], [AppColors.textPrimary] w700 text.
++/// - [AppButton.danger]: destructive action (Hapus, etc.) — filled
++///   [AppColors.danger].
++///
++/// All variants are full-width by default (set [fullWidth] to false to
++/// opt out). Pass [isLoading] to show a small spinner in place of the
++/// label and disable taps while an action is in flight.
++class AppButton extends StatelessWidget {
++  final String label;
++  final VoidCallback? onPressed;
++  final _AppButtonVariant _variant;
++  final bool fullWidth;
++  final bool isLoading;
++  final IconData? icon;
++
++  const AppButton.primary({
++    super.key,
++    required this.label,
++    required this.onPressed,
++    this.fullWidth = true,
++    this.isLoading = false,
++    this.icon,
++  }) : _variant = _AppButtonVariant.primary;
++
++  const AppButton.secondary({
++    super.key,
++    required this.label,
++    required this.onPressed,
++    this.fullWidth = true,
++    this.isLoading = false,
++    this.icon,
++  }) : _variant = _AppButtonVariant.secondary;
++
++  const AppButton.danger({
++    super.key,
++    required this.label,
++    required this.onPressed,
++    this.fullWidth = true,
++    this.isLoading = false,
++    this.icon,
++  }) : _variant = _AppButtonVariant.danger;
++
++  bool get _isDisabled => onPressed == null || isLoading;
++
++  @override
++  Widget build(BuildContext context) {
++    final button = switch (_variant) {
++      _AppButtonVariant.primary => _buildFilled(backgroundColor: AppColors.brand, foregroundColor: Colors.white),
++      _AppButtonVariant.danger => _buildFilled(backgroundColor: AppColors.danger, foregroundColor: Colors.white),
++      _AppButtonVariant.secondary => _buildOutlined(),
++    };
++
++    return fullWidth ? SizedBox(width: double.infinity, child: button) : button;
++  }
++
++  Widget _buildFilled({required Color backgroundColor, required Color foregroundColor}) {
++    return ElevatedButton(
++      onPressed: _isDisabled ? null : onPressed,
++      style: ElevatedButton.styleFrom(
++        backgroundColor: backgroundColor,
++        disabledBackgroundColor: backgroundColor.withValues(alpha: 0.4),
++        foregroundColor: foregroundColor,
++        elevation: 0,
++        padding: const EdgeInsets.symmetric(vertical: 15),
++        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
++      ),
++      child: _buildChild(foregroundColor),
++    );
++  }
++
++  Widget _buildOutlined() {
++    return OutlinedButton(
++      onPressed: _isDisabled ? null : onPressed,
++      style: OutlinedButton.styleFrom(
++        foregroundColor: AppColors.textPrimary,
++        disabledForegroundColor: AppColors.textMuted,
++        side: BorderSide(color: onPressed == null ? AppColors.border : AppColors.border),
++        padding: const EdgeInsets.symmetric(vertical: 15),
++        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
++      ),
++      child: _buildChild(AppColors.textPrimary),
++    );
++  }
++
++  Widget _buildChild(Color foregroundColor) {
++    if (isLoading) {
++      return SizedBox(
++        width: 20,
++        height: 20,
++        child: CircularProgressIndicator(strokeWidth: 2.2, color: foregroundColor),
++      );
++    }
++
++    final textStyle = TextStyle(
++      fontSize: 15,
++      fontWeight: _variant == _AppButtonVariant.secondary ? FontWeight.w700 : FontWeight.w800,
++    );
++
++    if (icon == null) {
++      return Text(label, style: textStyle);
++    }
++
++    return Row(
++      mainAxisSize: MainAxisSize.min,
++      mainAxisAlignment: MainAxisAlignment.center,
++      children: [
++        Icon(icon, size: 18),
++        const SizedBox(width: AppSpacing.sm),
++        Text(label, style: textStyle),
++      ],
++    );
++  }
++}
+diff --git a/lib/core/widgets/app_card_shell.dart b/lib/core/widgets/app_card_shell.dart
+new file mode 100644
+index 0000000..270485e
+--- /dev/null
++++ b/lib/core/widgets/app_card_shell.dart
+@@ -0,0 +1,55 @@
++import 'package:flutter/material.dart';
++
++import '../theme/app_colors.dart';
++import '../theme/app_spacing.dart';
++
++/// Shared card shell — the standard outer skin for any card in the app,
++/// per the component standards doc §8: fill [AppColors.surface], radius
++/// [AppRadius.lg], `border: Border.all(color: AppColors.border)`, inner
++/// padding [AppSpacing.md] by default.
++///
++/// Wrap card content in this instead of writing
++/// `Container(decoration: BoxDecoration(...))` by hand. Content inside
++/// (titles, subtitles, figures) should still follow the typography
++/// scale in §1 — this widget only owns the outer skin.
++class AppCardShell extends StatelessWidget {
++  final Widget child;
++  final EdgeInsetsGeometry padding;
++  final VoidCallback? onTap;
++  final Color? backgroundColor;
++  final Color? borderColor;
++
++  const AppCardShell({
++    super.key,
++    required this.child,
++    this.padding = const EdgeInsets.all(AppSpacing.md),
++    this.onTap,
++    this.backgroundColor,
++    this.borderColor,
++  });
++
++  @override
++  Widget build(BuildContext context) {
++    final card = Container(
++      padding: padding,
++      decoration: BoxDecoration(
++        color: backgroundColor ?? AppColors.surface,
++        borderRadius: BorderRadius.circular(AppRadius.lg),
++        border: Border.all(color: borderColor ?? AppColors.border),
++      ),
++      child: child,
++    );
++
++    if (onTap == null) return card;
++
++    return Material(
++      color: Colors.transparent,
++      borderRadius: BorderRadius.circular(AppRadius.lg),
++      child: InkWell(
++        onTap: onTap,
++        borderRadius: BorderRadius.circular(AppRadius.lg),
++        child: card,
++      ),
++    );
++  }
++}
+diff --git a/lib/core/widgets/app_dropdown_title.dart b/lib/core/widgets/app_dropdown_title.dart
+new file mode 100644
+index 0000000..1d7fff2
+--- /dev/null
++++ b/lib/core/widgets/app_dropdown_title.dart
+@@ -0,0 +1,173 @@
++import 'package:flutter/material.dart';
++
++import '../theme/app_colors.dart';
++import '../theme/app_spacing.dart';
++
++/// Tappable title with a dropdown chevron, meant to be passed as
++/// [IosPageHeader]'s `title:` — see that widget's doc comment, which
++/// specifically calls out this case ("callers needing a tappable title
++/// with a dropdown chevron... can still center it the same way").
++///
++/// Renders [currentLabel] + an animated chevron; tapping opens an
++/// [Overlay] menu positioned under the title with one row per
++/// [options], via [labelBuilder]. Use this instead of reimplementing a
++/// whole header with `Stack` + `Center` + `Align` — that combination is
++/// exactly what [AppSheetHeader]'s doc comment warns against, and the
++/// same reasoning applies to full-page headers.
++///
++/// Originally extracted from Menu Management's Menu/Varian switch and
++/// Arus Kas's Pemasukan/Pengeluaran switch — both now use this instead
++/// of their own copy.
++class AppDropdownTitle<T> extends StatefulWidget {
++  final T selected;
++  final List<T> options;
++  final String Function(T option) labelBuilder;
++  final ValueChanged<T> onSelected;
++
++  const AppDropdownTitle({
++    super.key,
++    required this.selected,
++    required this.options,
++    required this.labelBuilder,
++    required this.onSelected,
++  });
++
++  @override
++  State<AppDropdownTitle<T>> createState() => _AppDropdownTitleState<T>();
++}
++
++class _AppDropdownTitleState<T> extends State<AppDropdownTitle<T>> {
++  final _key = GlobalKey();
++  OverlayEntry? _overlayEntry;
++  bool _isOpen = false;
++
++  void _toggle() => _isOpen ? _close() : _open();
++
++  void _open() {
++    final renderBox = _key.currentContext?.findRenderObject() as RenderBox?;
++    if (renderBox == null) return;
++    final position = renderBox.localToGlobal(Offset.zero);
++    final size = renderBox.size;
++    const menuWidth = 160.0;
++
++    _overlayEntry = OverlayEntry(
++      builder: (context) => Stack(
++        children: [
++          Positioned.fill(
++            child: GestureDetector(
++              onTap: _close,
++              behavior: HitTestBehavior.translucent,
++              child: Container(color: Colors.transparent),
++            ),
++          ),
++          Positioned(
++            top: position.dy + size.height + 6,
++            left: position.dx + size.width / 2 - menuWidth / 2,
++            width: menuWidth,
++            child: _DropdownMenu<T>(
++              selected: widget.selected,
++              options: widget.options,
++              labelBuilder: widget.labelBuilder,
++              onSelect: (option) {
++                widget.onSelected(option);
++                _close();
++              },
++            ),
++          ),
++        ],
++      ),
++    );
++
++    Overlay.of(context).insert(_overlayEntry!);
++    setState(() => _isOpen = true);
++  }
++
++  void _close() {
++    _overlayEntry?.remove();
++    _overlayEntry = null;
++    if (mounted) setState(() => _isOpen = false);
++  }
++
++  @override
++  void dispose() {
++    _overlayEntry?.remove();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    return GestureDetector(
++      key: _key,
++      onTap: _toggle,
++      child: Row(
++        mainAxisSize: MainAxisSize.min,
++        children: [
++          Flexible(
++            child: Text(
++              widget.labelBuilder(widget.selected),
++              overflow: TextOverflow.ellipsis,
++              style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
++            ),
++          ),
++          const SizedBox(width: 4),
++          AnimatedRotation(
++            turns: _isOpen ? 0.5 : 0,
++            duration: const Duration(milliseconds: 180),
++            child: const Icon(Icons.keyboard_arrow_down_rounded, size: 20, color: AppColors.textPrimary),
++          ),
++        ],
++      ),
++    );
++  }
++}
++
++class _DropdownMenu<T> extends StatelessWidget {
++  final T selected;
++  final List<T> options;
++  final String Function(T option) labelBuilder;
++  final ValueChanged<T> onSelect;
++
++  const _DropdownMenu({required this.selected, required this.options, required this.labelBuilder, required this.onSelect});
++
++  @override
++  Widget build(BuildContext context) {
++    return Material(
++      color: Colors.transparent,
++      child: Container(
++        decoration: BoxDecoration(
++          color: AppColors.surface,
++          borderRadius: BorderRadius.circular(AppRadius.lg),
++          border: Border.all(color: AppColors.border),
++          boxShadow: [
++            BoxShadow(color: Colors.black.withValues(alpha: 0.08), blurRadius: 20, offset: const Offset(0, 6)),
++          ],
++        ),
++        padding: const EdgeInsets.symmetric(vertical: 6),
++        child: Column(
++          mainAxisSize: MainAxisSize.min,
++          children: options.map((option) {
++            final isSelected = option == selected;
++            return InkWell(
++              onTap: () => onSelect(option),
++              child: Container(
++                width: double.infinity,
++                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: 10),
++                color: isSelected ? AppColors.brand.withValues(alpha: 0.06) : Colors.transparent,
++                child: Row(
++                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
++                  children: [
++                    Text(
++                      labelBuilder(option),
++                      style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: isSelected ? AppColors.brand : AppColors.textPrimary),
++                    ),
++                    if (isSelected) const Icon(Icons.check_rounded, size: 16, color: AppColors.brand),
++                  ],
++                ),
++              ),
++            );
++          }).toList(),
++        ),
++      ),
++    );
++  }
++}
+diff --git a/lib/core/widgets/app_empty_state.dart b/lib/core/widgets/app_empty_state.dart
+new file mode 100644
+index 0000000..181da6d
+--- /dev/null
++++ b/lib/core/widgets/app_empty_state.dart
+@@ -0,0 +1,35 @@
++import 'package:flutter/material.dart';
++
++import '../theme/app_colors.dart';
++import '../theme/app_spacing.dart';
++
++/// Shared "no data yet" empty state per the component standards doc
++/// §13. The icon may vary per context, but the structure and font
++/// scale must stay the same — use this instead of a bespoke layout.
++class AppEmptyState extends StatelessWidget {
++  final IconData icon;
++  final String title;
++  final String? subtitle;
++
++  const AppEmptyState({super.key, required this.icon, required this.title, this.subtitle});
++
++  @override
++  Widget build(BuildContext context) {
++    return Column(
++      mainAxisSize: MainAxisSize.min,
++      children: [
++        Icon(icon, size: 48, color: AppColors.border),
++        const SizedBox(height: AppSpacing.md),
++        Text(title, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: AppColors.textSecondary)),
++        if (subtitle != null) ...[
++          const SizedBox(height: AppSpacing.xs),
++          Text(
++            subtitle!,
++            textAlign: TextAlign.center,
++            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: AppColors.textMuted),
++          ),
++        ],
++      ],
++    );
++  }
++}
+diff --git a/lib/core/widgets/app_icon_button.dart b/lib/core/widgets/app_icon_button.dart
+new file mode 100644
+index 0000000..ca37bff
+--- /dev/null
++++ b/lib/core/widgets/app_icon_button.dart
+@@ -0,0 +1,66 @@
++import 'package:flutter/material.dart';
++
++import '../theme/app_colors.dart';
++
++enum _AppIconButtonVariant { standard, stepper }
++
++/// Shared round icon button — two fixed sizes per the component
++/// standards doc §6.
++///
++/// - [AppIconButton.standard]: 44×44, icon size 20 by default (18–22
++///   allowed) — filter, close, back, tambah (+), titik tiga.
++/// - [AppIconButton.stepper]: 36×36, icon size 16 — qty +/- in cart,
++///   variant picker steppers.
++class AppIconButton extends StatelessWidget {
++  final IconData icon;
++  final VoidCallback? onTap;
++  final _AppIconButtonVariant _variant;
++  final double? iconSize;
++  final Color? backgroundColor;
++  final Color? iconColor;
++
++  const AppIconButton.standard({
++    super.key,
++    required this.icon,
++    required this.onTap,
++    this.iconSize,
++    this.backgroundColor,
++    this.iconColor,
++  }) : _variant = _AppIconButtonVariant.standard;
++
++  const AppIconButton.stepper({
++    super.key,
++    required this.icon,
++    required this.onTap,
++    this.backgroundColor,
++    this.iconColor,
++  })  : _variant = _AppIconButtonVariant.stepper,
++        iconSize = null;
++
++  @override
++  Widget build(BuildContext context) {
++    final size = _variant == _AppIconButtonVariant.standard ? 44.0 : 36.0;
++    final resolvedIconSize = iconSize ?? (_variant == _AppIconButtonVariant.standard ? 20.0 : 16.0);
++
++    return Material(
++      color: backgroundColor ?? AppColors.surface,
++      shape: const CircleBorder(),
++      elevation: 0,
++      child: InkWell(
++        onTap: onTap,
++        customBorder: const CircleBorder(),
++        child: Container(
++          width: size,
++          height: size,
++          decoration: BoxDecoration(
++            shape: BoxShape.circle,
++            boxShadow: onTap == null
++                ? null
++                : [BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 10, offset: const Offset(0, 2))],
++          ),
++          child: Icon(icon, size: resolvedIconSize, color: iconColor ?? (onTap == null ? AppColors.textMuted : AppColors.textPrimary)),
++        ),
++      ),
++    );
++  }
++}
+diff --git a/lib/core/widgets/app_item_thumbnail.dart b/lib/core/widgets/app_item_thumbnail.dart
+new file mode 100644
+index 0000000..9983370
+--- /dev/null
++++ b/lib/core/widgets/app_item_thumbnail.dart
+@@ -0,0 +1,102 @@
++import 'package:flutter/material.dart';
++
++import '../theme/app_spacing.dart';
++
++/// Soft, deterministic background palette for initials avatars — picked
++/// to be distinguishable but not garish; the same first letter always
++/// maps to the same color (see [_colorForInitials]).
++const List<Color> _avatarPalette = [
++  Color(0xFFEFD9C7), // warm peach
++  Color(0xFFD8E7D3), // soft sage
++  Color(0xFFD6E4F0), // soft blue
++  Color(0xFFEAD9EE), // soft lavender
++  Color(0xFFF3E0D2), // soft terracotta
++  Color(0xFFD9EEE8), // soft teal
++  Color(0xFFF0E0D9), // soft clay
++  Color(0xFFE0E0EF), // soft periwinkle
++];
++
++/// Shared product thumbnail per the component standards doc §9. Renders
++/// the item's photo if it has one; otherwise falls back to a deterministic
++/// initials avatar — never a generic icon/gray box.
++///
++/// The initials are the first letter of up to the first 2 words of the
++/// name ("Ayam Geprek" -> "AG", "Kerupuk" -> "KE" using the first two
++/// letters of a single-word name). Background color is derived
++/// deterministically from the first letter (hashed into a fixed soft
++/// palette) — not random, not uniform gray, and stable across rebuilds.
++class AppItemThumbnail extends StatelessWidget {
++  final String name;
++  final String? photoUrl;
++  final double size;
++  final double radius;
++
++  const AppItemThumbnail({
++    super.key,
++    required this.name,
++    this.photoUrl,
++    this.size = 56,
++    this.radius = AppRadius.md,
++  });
++
++  String get _initials {
++    final words = name.trim().split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toList();
++    if (words.isEmpty) return '?';
++    if (words.length == 1) {
++      final word = words.first;
++      return word.length >= 2 ? word.substring(0, 2).toUpperCase() : word.toUpperCase();
++    }
++    return (words[0][0] + words[1][0]).toUpperCase();
++  }
++
++  Color get _backgroundColor {
++    final trimmed = name.trim();
++    if (trimmed.isEmpty) return _avatarPalette.first;
++    final firstLetter = trimmed[0].toUpperCase();
++    final index = firstLetter.codeUnitAt(0) % _avatarPalette.length;
++    return _avatarPalette[index];
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final borderRadius = BorderRadius.circular(radius);
++
++    if (photoUrl != null && photoUrl!.isNotEmpty) {
++      return ClipRRect(
++        borderRadius: borderRadius,
++        child: Image.network(
++          photoUrl!,
++          width: size,
++          height: size,
++          fit: BoxFit.cover,
++          errorBuilder: (context, error, stackTrace) => _buildInitials(borderRadius),
++        ),
++      );
++    }
++
++    return _buildInitials(borderRadius);
++  }
++
++  Widget _buildInitials(BorderRadius borderRadius) {
++    final bg = _backgroundColor;
++    // Dark, low-saturation text reads reliably against every color in
++    // the soft palette above (all are light), so a single fixed
++    // foreground keeps this simple and always-contrasting.
++    const foreground = Color(0xFF3A3A3A);
++
++    return Container(
++      width: size,
++      height: size,
++      decoration: BoxDecoration(color: bg, borderRadius: borderRadius),
++      alignment: Alignment.center,
++      child: Text(
++        _initials,
++        style: TextStyle(
++          fontSize: size * 0.4,
++          fontWeight: FontWeight.w800,
++          color: foreground,
++        ),
++      ),
++    );
++  }
++}
+diff --git a/lib/core/widgets/app_pin_keypad.dart b/lib/core/widgets/app_pin_keypad.dart
+new file mode 100644
+index 0000000..b7498dd
+--- /dev/null
++++ b/lib/core/widgets/app_pin_keypad.dart
+@@ -0,0 +1,118 @@
++import 'package:flutter/material.dart';
++
++import '../theme/app_colors.dart';
++
++/// Shared PIN keypad per the component standards doc §7. Use this for
++/// EVERY PIN screen (owner/manager login, staff PIN, quick-action
++/// verification) — do not redesign from scratch.
++///
++/// - Number (0–9) and backspace buttons: 72×72, [CircleBorder],
++///   transparent.
++/// - Digit text: 24/w700/[AppColors.textPrimary].
++/// - Layout: 3 columns × 4 rows — 1-2-3 / 4-5-6 / 7-8-9 / (empty)-0-backspace.
++/// - Row spacing: `EdgeInsets.symmetric(vertical: 6)`.
++class AppPinKeypad extends StatelessWidget {
++  final bool disabled;
++  final ValueChanged<String> onDigit;
++  final VoidCallback onBackspace;
++
++  const AppPinKeypad({super.key, required this.onDigit, required this.onBackspace, this.disabled = false});
++
++  static const _rows = [
++    ['1', '2', '3'],
++    ['4', '5', '6'],
++    ['7', '8', '9'],
++    ['', '0', 'back'],
++  ];
++
++  @override
++  Widget build(BuildContext context) {
++    return Column(
++      children: _rows.map((row) {
++        return Padding(
++          padding: const EdgeInsets.symmetric(vertical: 6),
++          child: Row(
++            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
++            children: row.map((key) {
++              if (key.isEmpty) {
++                return const SizedBox(width: 72, height: 72);
++              }
++              if (key == 'back') {
++                return _KeypadButton(
++                  disabled: disabled,
++                  onTap: onBackspace,
++                  child: const Icon(Icons.backspace_outlined, size: 22, color: AppColors.textSecondary),
++                );
++              }
++              return _KeypadButton(
++                disabled: disabled,
++                onTap: () => onDigit(key),
++                child: Text(key, style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
++              );
++            }).toList(),
++          ),
++        );
++      }).toList(),
++    );
++  }
++}
++
++/// Shared PIN-filled indicator dots per the component standards doc §7:
++/// 16×16, 2px border. Use alongside [AppPinKeypad] on every PIN screen.
++class AppPinDots extends StatelessWidget {
++  final int length;
++  final int filledCount;
++  final bool isError;
++
++  const AppPinDots({super.key, required this.length, required this.filledCount, this.isError = false});
++
++  @override
++  Widget build(BuildContext context) {
++    return Row(
++      mainAxisAlignment: MainAxisAlignment.center,
++      children: List.generate(length, (i) {
++        final filled = i < filledCount;
++        final color = isError
++            ? AppColors.danger
++            : filled
++                ? AppColors.brand
++                : AppColors.border;
++        return AnimatedContainer(
++          duration: const Duration(milliseconds: 150),
++          margin: const EdgeInsets.symmetric(horizontal: 8),
++          width: 16,
++          height: 16,
++          decoration: BoxDecoration(
++            color: filled || isError ? color : Colors.transparent,
++            border: Border.all(color: color, width: 2),
++            shape: BoxShape.circle,
++          ),
++        );
++      }),
++    );
++  }
++}
++
++class _KeypadButton extends StatelessWidget {
++  final bool disabled;
++  final VoidCallback onTap;
++  final Widget child;
++
++  const _KeypadButton({required this.disabled, required this.onTap, required this.child});
++
++  @override
++  Widget build(BuildContext context) {
++    return Opacity(
++      opacity: disabled ? 0.4 : 1,
++      child: Material(
++        color: Colors.transparent,
++        shape: const CircleBorder(),
++        child: InkWell(
++          onTap: disabled ? null : onTap,
++          customBorder: const CircleBorder(),
++          child: SizedBox(width: 72, height: 72, child: Center(child: child)),
++        ),
++      ),
++    );
++  }
++}
+diff --git a/lib/core/widgets/app_status_badge.dart b/lib/core/widgets/app_status_badge.dart
+new file mode 100644
+index 0000000..b0d8f25
+--- /dev/null
++++ b/lib/core/widgets/app_status_badge.dart
+@@ -0,0 +1,33 @@
++import 'package:flutter/material.dart';
++
++import '../theme/app_colors.dart';
++
++/// Shared status/tag badge per the component standards doc §10:
++/// [AppRadius.sm], padding 8 horizontal / 4 vertical, font 10/w800 with
++/// letter-spacing 0.2–0.3, colored from [color] at 0.08–0.1 opacity as
++/// the background and full [color] as the text/foreground.
++///
++/// Pass a semantic color from [AppColors] (e.g. [AppColors.success],
++/// [AppColors.danger], [AppColors.warning]) — this widget derives the
++/// tinted background from whatever [color] it's given.
++class AppStatusBadge extends StatelessWidget {
++  final String label;
++  final Color color;
++
++  const AppStatusBadge(this.label, this.color, {super.key});
++
++  @override
++  Widget build(BuildContext context) {
++    return Container(
++      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
++      decoration: BoxDecoration(
++        color: color.withValues(alpha: 0.09),
++        borderRadius: BorderRadius.circular(AppRadius.sm),
++      ),
++      child: Text(
++        label.toUpperCase(),
++        style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, letterSpacing: 0.25, color: color),
++      ),
++    );
++  }
++}
+diff --git a/lib/core/widgets/app_text_field.dart b/lib/core/widgets/app_text_field.dart
+new file mode 100644
+index 0000000..fa30bda
+--- /dev/null
++++ b/lib/core/widgets/app_text_field.dart
+@@ -0,0 +1,138 @@
++import 'package:flutter/material.dart';
++
++import '../theme/app_colors.dart';
++import '../theme/app_spacing.dart';
++
++/// Shared text field — two variants per the component standards doc §4.
++/// Do not write a new inline `InputDecoration` for search bars or form
++/// fields; extend this widget if a new case is needed.
++///
++/// - [AppTextField.search]: no visible border, wrapped in a pill
++///   ([AppRadius.pill]) container filled [AppColors.background]. Hint
++///   14/w500/[AppColors.textMuted].
++/// - [AppTextField.form]: bordered [AppRadius.md], filled
++///   [AppColors.surface], border [AppColors.border] idle →
++///   [AppColors.brand] focused. Label sits above the field (not a
++///   floating label) via [label]. Hint 14/w500/[AppColors.textMuted].
++///
++/// Both variants take [prefixIcon]/[suffixIcon]/[prefixText] directly —
++/// use those instead of wrapping in a second widget.
++class AppTextField extends StatelessWidget {
++  final bool _isSearch;
++  final TextEditingController? controller;
++  final String? label;
++  final String? hintText;
++  final IconData? prefixIcon;
++  final Widget? suffixIcon;
++  final String? prefixText;
++  final TextInputType? keyboardType;
++  final ValueChanged<String>? onChanged;
++  final int minLines;
++  final int maxLines;
++  final bool enabled;
++  final bool autofocus;
++  final FocusNode? focusNode;
++
++  const AppTextField.search({
++    super.key,
++    this.controller,
++    this.hintText = 'Cari...',
++    this.prefixIcon = Icons.search_rounded,
++    this.suffixIcon,
++    this.onChanged,
++    this.enabled = true,
++    this.autofocus = false,
++    this.focusNode,
++  })  : _isSearch = true,
++        label = null,
++        prefixText = null,
++        keyboardType = null,
++        minLines = 1,
++        maxLines = 1;
++
++  const AppTextField.form({
++    super.key,
++    this.controller,
++    this.label,
++    this.hintText,
++    this.prefixIcon,
++    this.suffixIcon,
++    this.prefixText,
++    this.keyboardType,
++    this.onChanged,
++    this.minLines = 1,
++    this.maxLines = 1,
++    this.enabled = true,
++    this.autofocus = false,
++    this.focusNode,
++  }) : _isSearch = false;
++
++  @override
++  Widget build(BuildContext context) {
++    if (_isSearch) return _buildSearch();
++
++    if (label == null) return _buildField();
++
++    return Column(
++      crossAxisAlignment: CrossAxisAlignment.start,
++      children: [
++        Text(label!, style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: AppColors.textSecondary)),
++        const SizedBox(height: 6),
++        _buildField(),
++      ],
++    );
++  }
++
++  Widget _buildSearch() {
++    return Container(
++      decoration: BoxDecoration(color: AppColors.background, borderRadius: BorderRadius.circular(AppRadius.pill)),
++      child: TextField(
++        controller: controller,
++        enabled: enabled,
++        autofocus: autofocus,
++        focusNode: focusNode,
++        onChanged: onChanged,
++        style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: AppColors.textPrimary),
++        decoration: InputDecoration(
++          hintText: hintText,
++          hintStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: AppColors.textMuted),
++          prefixIcon: prefixIcon == null ? null : Icon(prefixIcon, size: 20, color: AppColors.textMuted),
++          suffixIcon: suffixIcon,
++          filled: true,
++          fillColor: Colors.transparent,
++          border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.pill), borderSide: BorderSide.none),
++          contentPadding: const EdgeInsets.symmetric(vertical: 12),
++        ),
++      ),
++    );
++  }
++
++  Widget _buildField() {
++    return TextField(
++      controller: controller,
++      enabled: enabled,
++      autofocus: autofocus,
++      focusNode: focusNode,
++      keyboardType: keyboardType,
++      onChanged: onChanged,
++      minLines: minLines,
++      maxLines: maxLines,
++      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.textPrimary),
++      decoration: InputDecoration(
++        hintText: hintText,
++        hintStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: AppColors.textMuted),
++        prefixIcon: prefixIcon == null ? null : Icon(prefixIcon, size: 20, color: AppColors.textMuted),
++        prefixText: prefixText,
++        prefixStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.textPrimary),
++        suffixIcon: suffixIcon,
++        filled: true,
++        fillColor: AppColors.surface,
++        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
++        border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.border)),
++        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.border)),
++        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.brand, width: 1.5)),
++        disabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.border)),
++      ),
++    );
++  }
++}
+diff --git a/lib/core/widgets/date_filter_tabs.dart b/lib/core/widgets/date_filter_tabs.dart
+new file mode 100644
+index 0000000..b851c43
+--- /dev/null
++++ b/lib/core/widgets/date_filter_tabs.dart
+@@ -0,0 +1,64 @@
++import 'package:flutter/material.dart';
++
++import '../theme/app_colors.dart';
++import '../theme/app_spacing.dart';
++
++/// Individual-chip date/option filter row per the component standards
++/// doc §12 — for 4+ options that may need to scroll horizontally.
++/// Separate pill-shaped chips, height 36, [AppRadius.pill], filled
++/// [AppColors.textPrimary] when active.
++///
++/// Originally built for Riwayat Transaksi's date filter row — now the
++/// shared widget for any 4+ option horizontal filter app-wide (e.g.
++/// Arus Kas's Hari Ini/Kemarin/Bulan Ini/Bulan Kemarin/Pilih Tanggal).
++/// For 2–3 options that must fit side by side full-width, use
++/// [SlidingPillTabs] instead — don't invent a third tab pattern.
++class DateFilterTabs<T> extends StatelessWidget {
++  final List<T> options;
++  final T selected;
++  final String Function(T option) labelBuilder;
++  final ValueChanged<T> onSelected;
++  final EdgeInsetsGeometry padding;
++
++  const DateFilterTabs({
++    super.key,
++    required this.options,
++    required this.selected,
++    required this.labelBuilder,
++    required this.onSelected,
++    this.padding = const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
++  });
++
++  @override
++  Widget build(BuildContext context) {
++    return SizedBox(
++      height: 36,
++      child: ListView(
++        scrollDirection: Axis.horizontal,
++        padding: padding,
++        children: options.map((option) {
++          final isSelected = option == selected;
++          return Padding(
++            padding: const EdgeInsets.only(right: AppSpacing.sm),
++            child: InkWell(
++              onTap: () => onSelected(option),
++              borderRadius: BorderRadius.circular(AppRadius.pill),
++              child: Container(
++                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
++                decoration: BoxDecoration(
++                  color: isSelected ? AppColors.textPrimary : AppColors.surface,
++                  borderRadius: BorderRadius.circular(AppRadius.pill),
++                  border: Border.all(color: isSelected ? AppColors.textPrimary : AppColors.border),
++                ),
++                child: Text(
++                  labelBuilder(option),
++                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: isSelected ? Colors.white : AppColors.textSecondary),
++                ),
++              ),
++            ),
++          );
++        }).toList(),
++      ),
++    );
++  }
++}
+diff --git a/lib/features/hpp_opname/presentation/widgets/sliding_pill_tabs.dart b/lib/core/widgets/sliding_pill_tabs.dart
+similarity index 77%
+rename from lib/features/hpp_opname/presentation/widgets/sliding_pill_tabs.dart
+rename to lib/core/widgets/sliding_pill_tabs.dart
+index 676baa5..6f6a06e 100644
+--- a/lib/features/hpp_opname/presentation/widgets/sliding_pill_tabs.dart
++++ b/lib/core/widgets/sliding_pill_tabs.dart
+@@ -1,17 +1,18 @@
+ import 'package:flutter/material.dart';
+ 
+-import '../../../../core/theme/app_colors.dart';
+-import '../../../../core/theme/app_spacing.dart';
++import '../theme/app_colors.dart';
+ 
+-/// Sliding-capsule segmented control — one solid pill that glides
+-/// between options via [AnimatedPositioned], rather than each option
+-/// carrying its own background. Ported from the HTML mockup's
+-/// `.pill-indicator` mechanism (which measured DOM rects with JS);
+-/// Flutter's [LayoutBuilder] + equal-width [Expanded] segments makes the
+-/// same visual result reachable without manual measurement.
++/// Sliding-capsule segmented control per the component standards doc
++/// §12 — for 2–3 options that must fit side by side, full-width. One
++/// solid pill glides between options via [AnimatedPositioned] (rather
++/// than each option carrying its own background), with equal-width
++/// segments via [LayoutBuilder] + [Expanded].
+ ///
+-/// Used for both the 2-option Riwayat/Input Baru sub-tab and the
+-/// 3-option Bahan Baku/Setengah Jadi/Bahan Jadi category switcher.
++/// Originally built for HPP & Stok Opname's Riwayat/Input Baru sub-tab
++/// and its 3-option Bahan Baku/Setengah Jadi/Bahan Jadi switcher — now
++/// the shared widget for any 2–3 option segmented control app-wide. For
++/// 4+ scrollable options, use [DateFilterTabs] instead — don't invent a
++/// third tab pattern.
+ class SlidingPillTabs extends StatelessWidget {
+   final List<String> labels;
+   final int selectedIndex;
+diff --git a/lib/features/arus_kas/presentation/arus_kas_screen.dart b/lib/features/arus_kas/presentation/arus_kas_screen.dart
+index caef44c..b9bb85f 100644
+--- a/lib/features/arus_kas/presentation/arus_kas_screen.dart
++++ b/lib/features/arus_kas/presentation/arus_kas_screen.dart
+@@ -5,11 +5,23 @@ import '../../../core/navigation/app_nav.dart';
+ import '../../../core/theme/app_colors.dart';
+ import '../../../core/theme/app_spacing.dart';
+ import '../../../core/utils/currency.dart';
++import '../../../core/widgets/app_card_shell.dart';
++import '../../../core/widgets/app_dropdown_title.dart';
++import '../../../core/widgets/app_empty_state.dart';
++import '../../../core/widgets/date_filter_tabs.dart';
++import '../../../core/widgets/ios_page_header.dart';
+ import '../application/arus_kas_provider.dart';
+ import '../domain/arus_kas_models.dart';
+ import 'widgets/add_arus_kas_modal.dart';
+ import 'widgets/arus_kas_entry_tile.dart';
+-import 'widgets/arus_kas_header.dart';
++
++const _dateFilterOptions = [
++  ArusKasDateFilter.hariIni,
++  ArusKasDateFilter.kemarin,
++  ArusKasDateFilter.bulanIni,
++  ArusKasDateFilter.bulanKemarin,
++  ArusKasDateFilter.pilihTanggal,
++];
+ 
+ const _dateFilterLabels = {
+   ArusKasDateFilter.hariIni: 'Hari Ini',
+@@ -48,21 +60,32 @@ class ArusKasScreen extends ConsumerWidget {
+       body: SafeArea(
+         child: Column(
+           children: [
+-            ArusKasHeader(
+-              currentDirection: state.direction,
+-              onDirectionSelected: controller.setDirection,
+-              onBack: () => Navigator.of(context).pop(),
+-              onAdd: () => AppNav.showModal(context, builder: (_) => const AddArusKasModal()),
++            IosPageHeader(
++              title: AppDropdownTitle<ArusKasDirection>(
++                selected: state.direction,
++                options: const [ArusKasDirection.pemasukan, ArusKasDirection.pengeluaran],
++                labelBuilder: (d) => d == ArusKasDirection.pemasukan ? 'Pemasukan' : 'Pengeluaran',
++                onSelected: controller.setDirection,
++              ),
++              trailingIcon: Icons.add_rounded,
++              onTrailingTap: () => AppNav.showModal(context, builder: (_) => const AddArusKasModal()),
+             ),
+             Padding(
+               padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
+               child: _TotalCard(direction: state.direction, total: state.total),
+             ),
+             const SizedBox(height: AppSpacing.sm),
+-            _DateFilterRow(
+-              current: state.dateFilter,
+-              customDate: state.customDate,
+-              onSelect: (filter) async {
++            DateFilterTabs<ArusKasDateFilter>(
++              options: _dateFilterOptions,
++              selected: state.dateFilter,
++              labelBuilder: (filter) {
++                if (filter == ArusKasDateFilter.pilihTanggal && state.dateFilter == filter && state.customDate != null) {
++                  final d = state.customDate!;
++                  return '${d.day}/${d.month}/${d.year}';
++                }
++                return _dateFilterLabels[filter]!;
++              },
++              onSelected: (filter) async {
+                 if (filter == ArusKasDateFilter.pilihTanggal) {
+                   final picked = await showDatePicker(
+                     context: context,
+@@ -89,11 +112,10 @@ class ArusKasScreen extends ConsumerWidget {
+                               children: [
+                                 Padding(
+                                   padding: const EdgeInsets.symmetric(vertical: AppSpacing.xxl),
+-                                  child: Center(
+-                                    child: Text(
+-                                      isPemasukan ? 'Belum ada pemasukan pada periode ini.' : 'Belum ada pengeluaran pada periode ini.',
+-                                      style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w500, color: AppColors.textMuted),
+-                                    ),
++                                  child: AppEmptyState(
++                                    icon: Icons.receipt_long_rounded,
++                                    title: isPemasukan ? 'Belum ada pemasukan' : 'Belum ada pengeluaran',
++                                    subtitle: 'Belum ada catatan pada periode ini.',
+                                   ),
+                                 ),
+                               ],
+@@ -102,9 +124,7 @@ class ArusKasScreen extends ConsumerWidget {
+                               physics: const AlwaysScrollableScrollPhysics(),
+                               padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.xxl),
+                               children: [
+-                                Container(
+-                                  padding: const EdgeInsets.all(AppSpacing.md),
+-                                  decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.lg), border: Border.all(color: AppColors.border)),
++                                AppCardShell(
+                                   child: Column(
+                                     children: state.entries
+                                         .map((e) => ArusKasEntryTile(entry: e, onDelete: () => controller.deleteEntry(e.id)))
+@@ -131,64 +151,22 @@ class _TotalCard extends StatelessWidget {
+   Widget build(BuildContext context) {
+     final isPemasukan = direction == ArusKasDirection.pemasukan;
+     final color = isPemasukan ? AppColors.success : AppColors.danger;
+-    return Container(
+-      width: double.infinity,
+-      padding: const EdgeInsets.all(AppSpacing.md),
+-      decoration: BoxDecoration(color: color.withValues(alpha: 0.08), borderRadius: BorderRadius.circular(AppRadius.lg), border: Border.all(color: color.withValues(alpha: 0.2))),
+-      child: Column(
+-        crossAxisAlignment: CrossAxisAlignment.start,
+-        children: [
+-          Text(
+-            isPemasukan ? 'TOTAL PEMASUKAN' : 'TOTAL PENGELUARAN',
+-            style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700, letterSpacing: 0.5, color: AppColors.textMuted),
+-          ),
+-          const SizedBox(height: 4),
+-          Text(formatRupiah(total), style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: color)),
+-        ],
+-      ),
+-    );
+-  }
+-}
+-
+-class _DateFilterRow extends StatelessWidget {
+-  final ArusKasDateFilter current;
+-  final DateTime? customDate;
+-  final ValueChanged<ArusKasDateFilter> onSelect;
+-
+-  const _DateFilterRow({required this.current, required this.customDate, required this.onSelect});
+-
+-  @override
+-  Widget build(BuildContext context) {
+-    return SizedBox(
+-      height: 34,
+-      child: ListView(
+-        scrollDirection: Axis.horizontal,
+-        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
+-        children: ArusKasDateFilter.values.map((filter) {
+-          final selected = filter == current;
+-          final label = filter == ArusKasDateFilter.pilihTanggal && selected && customDate != null
+-              ? '${customDate!.day}/${customDate!.month}/${customDate!.year}'
+-              : _dateFilterLabels[filter]!;
+-          return Padding(
+-            padding: const EdgeInsets.only(right: AppSpacing.sm),
+-            child: InkWell(
+-              onTap: () => onSelect(filter),
+-              borderRadius: BorderRadius.circular(AppRadius.pill),
+-              child: Container(
+-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+-                decoration: BoxDecoration(
+-                  color: selected ? AppColors.brand : AppColors.surface,
+-                  borderRadius: BorderRadius.circular(AppRadius.pill),
+-                  border: Border.all(color: selected ? AppColors.brand : AppColors.border),
+-                ),
+-                child: Text(
+-                  label,
+-                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: selected ? Colors.white : AppColors.textSecondary),
+-                ),
+-              ),
++    return AppCardShell(
++      backgroundColor: color.withValues(alpha: 0.08),
++      borderColor: color.withValues(alpha: 0.2),
++      child: SizedBox(
++        width: double.infinity,
++        child: Column(
++          crossAxisAlignment: CrossAxisAlignment.start,
++          children: [
++            Text(
++              isPemasukan ? 'TOTAL PEMASUKAN' : 'TOTAL PENGELUARAN',
++              style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700, letterSpacing: 0.5, color: AppColors.textMuted),
+             ),
+-          );
+-        }).toList(),
++            const SizedBox(height: 4),
++            Text(formatRupiah(total), style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: color)),
++          ],
++        ),
+       ),
+     );
+   }
+diff --git a/lib/features/arus_kas/presentation/widgets/add_arus_kas_modal.dart b/lib/features/arus_kas/presentation/widgets/add_arus_kas_modal.dart
+index 0835d6b..e2c62ce 100644
+--- a/lib/features/arus_kas/presentation/widgets/add_arus_kas_modal.dart
++++ b/lib/features/arus_kas/presentation/widgets/add_arus_kas_modal.dart
+@@ -3,6 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
+ import '../../../../core/theme/app_colors.dart';
+ import '../../../../core/theme/app_spacing.dart';
++import '../../../../core/widgets/app_button.dart';
++import '../../../../core/widgets/app_text_field.dart';
+ import '../../../dompet/application/dompet_provider.dart';
+ import '../../../dompet/domain/dompet_models.dart';
+ import '../../application/arus_kas_provider.dart';
+@@ -160,54 +162,30 @@ class _AddArusKasModalState extends ConsumerState<AddArusKasModal> {
+                         crossAxisAlignment: CrossAxisAlignment.start,
+                         children: [
+                           Expanded(
+-                            child: _LabeledField(
++                            child: AppTextField.form(
+                               label: 'Jumlah',
+-                              child: TextField(
+-                                controller: _amountController,
+-                                keyboardType: TextInputType.number,
+-                                decoration: _fieldDecoration(hint: 'Rp0'),
+-                              ),
++                              controller: _amountController,
++                              keyboardType: TextInputType.number,
++                              hintText: 'Rp0',
+                             ),
+                           ),
+                           const SizedBox(width: AppSpacing.sm),
+                           Expanded(
+-                            child: _LabeledField(
+-                              label: 'Tanggal Transaksi',
+-                              child: InkWell(
+-                                onTap: _pickDate,
+-                                child: Container(
+-                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 13),
+-                                  decoration: BoxDecoration(
+-                                    color: AppColors.background,
+-                                    borderRadius: BorderRadius.circular(AppRadius.md),
+-                                    border: Border.all(color: AppColors.border),
+-                                  ),
+-                                  child: Text(
+-                                    '${_transactionDate.day}/${_transactionDate.month}/${_transactionDate.year}',
+-                                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary),
+-                                  ),
+-                                ),
+-                              ),
+-                            ),
++                            child: _DateField(label: 'Tanggal Transaksi', date: _transactionDate, onTap: _pickDate),
+                           ),
+                         ],
+                       ),
+                       if (isPengeluaran) ...[
+                         const SizedBox(height: AppSpacing.md),
+-                        _LabeledField(
+-                          label: 'Nama Toko/Supplier',
+-                          child: TextField(controller: _storeSupplierController, decoration: _fieldDecoration(hint: 'Opsional')),
+-                        ),
++                        AppTextField.form(label: 'Nama Toko/Supplier', controller: _storeSupplierController, hintText: 'Opsional'),
+                       ],
+                       const SizedBox(height: AppSpacing.md),
+-                      _LabeledField(
++                      AppTextField.form(
+                         label: 'Detail',
+-                        child: TextField(
+-                          controller: _detailController,
+-                          minLines: 2,
+-                          maxLines: 4,
+-                          decoration: _fieldDecoration(hint: 'Opsional'),
+-                        ),
++                        controller: _detailController,
++                        minLines: 2,
++                        maxLines: 4,
++                        hintText: 'Opsional',
+                       ),
+                       if (_validationError != null) ...[
+                         const SizedBox(height: AppSpacing.sm),
+@@ -220,16 +198,10 @@ class _AddArusKasModalState extends ConsumerState<AddArusKasModal> {
+               Container(
+                 padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, AppSpacing.md),
+                 decoration: const BoxDecoration(border: Border(top: BorderSide(color: AppColors.border))),
+-                child: SizedBox(
+-                  width: double.infinity,
+-                  height: 48,
+-                  child: ElevatedButton(
+-                    onPressed: _isSaving ? null : () => _handleSave(direction),
+-                    style: ElevatedButton.styleFrom(backgroundColor: AppColors.brand, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md))),
+-                    child: _isSaving
+-                        ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2.5, color: Colors.white))
+-                        : const Text('Simpan Data', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: Colors.white)),
+-                  ),
++                child: AppButton.primary(
++                  label: 'Simpan Data',
++                  onPressed: _isSaving ? null : () => _handleSave(direction),
++                  isLoading: _isSaving,
+                 ),
+               ),
+             ],
+@@ -240,23 +212,11 @@ class _AddArusKasModalState extends ConsumerState<AddArusKasModal> {
+   }
+ }
+ 
+-InputDecoration _fieldDecoration({required String hint}) {
+-  return InputDecoration(
+-    hintText: hint,
+-    hintStyle: const TextStyle(fontSize: 13, color: AppColors.textMuted),
+-    filled: true,
+-    fillColor: AppColors.background,
+-    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 13),
+-    border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.border)),
+-    enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.border)),
+-    focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.brand)),
+-  );
+-}
+-
+-class _LabeledField extends StatelessWidget {
++class _DateField extends StatelessWidget {
+   final String label;
+-  final Widget child;
+-  const _LabeledField({required this.label, required this.child});
++  final DateTime date;
++  final VoidCallback onTap;
++  const _DateField({required this.label, required this.date, required this.onTap});
+ 
+   @override
+   Widget build(BuildContext context) {
+@@ -265,7 +225,22 @@ class _LabeledField extends StatelessWidget {
+       children: [
+         Text(label, style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: AppColors.textSecondary)),
+         const SizedBox(height: 6),
+-        child,
++        InkWell(
++          onTap: onTap,
++          borderRadius: BorderRadius.circular(AppRadius.md),
++          child: Container(
++            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
++            decoration: BoxDecoration(
++              color: AppColors.surface,
++              borderRadius: BorderRadius.circular(AppRadius.md),
++              border: Border.all(color: AppColors.border),
++            ),
++            child: Text(
++              '${date.day}/${date.month}/${date.year}',
++              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.textPrimary),
++            ),
++          ),
++        ),
+       ],
+     );
+   }
+@@ -277,18 +252,27 @@ class _FieldSkeleton extends StatelessWidget {
+ 
+   @override
+   Widget build(BuildContext context) {
+-    return _LabeledField(
+-      label: label,
+-      child: Container(
+-        height: 44,
+-        decoration: BoxDecoration(color: AppColors.background, borderRadius: BorderRadius.circular(AppRadius.md), border: Border.all(color: AppColors.border)),
+-      ),
++    return Column(
++      crossAxisAlignment: CrossAxisAlignment.start,
++      children: [
++        Text(label, style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: AppColors.textSecondary)),
++        const SizedBox(height: 6),
++        Container(
++          height: 47,
++          decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.md), border: Border.all(color: AppColors.border)),
++        ),
++      ],
+     );
+   }
+ }
+ 
+ /// Editable combobox: type a new category, or tap the dropdown affordance
+ /// to pick from previously-used categories for the current direction.
++///
++/// NOTE: Autocomplete's own text field can't be swapped for AppTextField
++/// directly (fieldViewBuilder must return the exact TextField it
++/// manages), so this composes AppTextField's visual language by hand for
++/// this one case rather than reusing the widget instance.
+ class _CategoryField extends StatelessWidget {
+   final TextEditingController controller;
+   final List<String> existingCategories;
+@@ -296,45 +280,59 @@ class _CategoryField extends StatelessWidget {
+ 
+   @override
+   Widget build(BuildContext context) {
+-    return _LabeledField(
+-      label: 'Kategori',
+-      child: Autocomplete<String>(
+-        optionsBuilder: (textEditingValue) {
+-          if (textEditingValue.text.isEmpty) return existingCategories;
+-          return existingCategories.where((c) => c.toLowerCase().contains(textEditingValue.text.toLowerCase()));
+-        },
+-        onSelected: (selection) => controller.text = selection,
+-        fieldViewBuilder: (context, fieldController, focusNode, onSubmitted) {
+-          // Route every keystroke straight into our own controller (the
+-          // one _handleSave reads from), instead of stacking a new
+-          // listener on Autocomplete's internal controller each rebuild.
+-          return TextField(
+-            controller: fieldController,
+-            focusNode: focusNode,
+-            onChanged: (value) => controller.text = value,
+-            decoration: _fieldDecoration(hint: 'Pilih atau ketik baru'),
+-          );
+-        },
+-        optionsViewBuilder: (context, onSelected, options) {
+-          return Align(
+-            alignment: Alignment.topLeft,
+-            child: Material(
+-              elevation: 4,
+-              borderRadius: BorderRadius.circular(AppRadius.md),
+-              child: ConstrainedBox(
+-                constraints: const BoxConstraints(maxHeight: 180),
+-                child: ListView(
+-                  padding: EdgeInsets.zero,
+-                  shrinkWrap: true,
+-                  children: options
+-                      .map((o) => ListTile(dense: true, title: Text(o, style: const TextStyle(fontSize: 13)), onTap: () => onSelected(o)))
+-                      .toList(),
++    return Column(
++      crossAxisAlignment: CrossAxisAlignment.start,
++      children: [
++        const Text('Kategori', style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: AppColors.textSecondary)),
++        const SizedBox(height: 6),
++        Autocomplete<String>(
++          optionsBuilder: (textEditingValue) {
++            if (textEditingValue.text.isEmpty) return existingCategories;
++            return existingCategories.where((c) => c.toLowerCase().contains(textEditingValue.text.toLowerCase()));
++          },
++          onSelected: (selection) => controller.text = selection,
++          fieldViewBuilder: (context, fieldController, focusNode, onSubmitted) {
++            // Route every keystroke straight into our own controller (the
++            // one _handleSave reads from), instead of stacking a new
++            // listener on Autocomplete's internal controller each rebuild.
++            return TextField(
++              controller: fieldController,
++              focusNode: focusNode,
++              onChanged: (value) => controller.text = value,
++              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.textPrimary),
++              decoration: InputDecoration(
++                hintText: 'Pilih atau ketik baru',
++                hintStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: AppColors.textMuted),
++                filled: true,
++                fillColor: AppColors.surface,
++                contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
++                border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.border)),
++                enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.border)),
++                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.brand, width: 1.5)),
++              ),
++            );
++          },
++          optionsViewBuilder: (context, onSelected, options) {
++            return Align(
++              alignment: Alignment.topLeft,
++              child: Material(
++                elevation: 4,
++                borderRadius: BorderRadius.circular(AppRadius.md),
++                child: ConstrainedBox(
++                  constraints: const BoxConstraints(maxHeight: 180),
++                  child: ListView(
++                    padding: EdgeInsets.zero,
++                    shrinkWrap: true,
++                    children: options
++                        .map((o) => ListTile(dense: true, title: Text(o, style: const TextStyle(fontSize: 13)), onTap: () => onSelected(o)))
++                        .toList(),
++                  ),
+                 ),
+               ),
+-            ),
+-          );
+-        },
+-      ),
++            );
++          },
++        ),
++      ],
+     );
+   }
+ }
+@@ -343,7 +341,7 @@ class _CategoryField extends StatelessWidget {
+ /// (Store Cash + couriers). Defaults to 'Non-Tunai' — the field mirrors
+ /// what the eventual real Sumber Dana dropdown does per the HTML
+ /// preview: no separate Tunai/Non-Tunai toggle, it's folded in here.
+-class _SumberDanaField extends StatefulWidget {
++class _SumberDanaField extends StatelessWidget {
+   final List<CashLocation> locations;
+   final String? selectedLocationId;
+   final ValueChanged<String?> onChanged;
+@@ -354,25 +352,31 @@ class _SumberDanaField extends StatefulWidget {
+     required this.onChanged,
+   });
+ 
+-  @override
+-  State<_SumberDanaField> createState() => _SumberDanaFieldState();
+-}
+-
+-class _SumberDanaFieldState extends State<_SumberDanaField> {
+   @override
+   Widget build(BuildContext context) {
+-    return _LabeledField(
+-      label: 'Sumber Dana',
+-      child: DropdownButtonFormField<String?>(
+-        value: widget.selectedLocationId,
+-        decoration: _fieldDecoration(hint: 'Non-Tunai'),
+-        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary),
+-        items: [
+-          const DropdownMenuItem<String?>(value: null, child: Text('Non-Tunai')),
+-          ...widget.locations.map((loc) => DropdownMenuItem<String?>(value: loc.id, child: Text(loc.name))),
+-        ],
+-        onChanged: widget.onChanged,
+-      ),
++    return Column(
++      crossAxisAlignment: CrossAxisAlignment.start,
++      children: [
++        const Text('Sumber Dana', style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: AppColors.textSecondary)),
++        const SizedBox(height: 6),
++        DropdownButtonFormField<String?>(
++          value: selectedLocationId,
++          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.textPrimary),
++          decoration: InputDecoration(
++            filled: true,
++            fillColor: AppColors.surface,
++            contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
++            border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.border)),
++            enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.border)),
++            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.brand, width: 1.5)),
++          ),
++          items: [
++            const DropdownMenuItem<String?>(value: null, child: Text('Non-Tunai')),
++            ...locations.map((loc) => DropdownMenuItem<String?>(value: loc.id, child: Text(loc.name))),
++          ],
++          onChanged: onChanged,
++        ),
++      ],
+     );
+   }
+ }
+diff --git a/lib/features/arus_kas/presentation/widgets/arus_kas_header.dart b/lib/features/arus_kas/presentation/widgets/arus_kas_header.dart
+deleted file mode 100644
+index eb42565..0000000
+--- a/lib/features/arus_kas/presentation/widgets/arus_kas_header.dart
++++ /dev/null
+@@ -1,234 +0,0 @@
+-import 'package:flutter/material.dart';
+-
+-import '../../../../core/theme/app_colors.dart';
+-import '../../../../core/theme/app_spacing.dart';
+-import '../../domain/arus_kas_models.dart';
+-
+-/// Title-dropdown header for Arus Kas, same interaction pattern as
+-/// MenuManagementHeader's Menu/Varian switch: back + tappable title
+-/// with a dropdown chevron (Pemasukan/Pengeluaran) + add button.
+-class ArusKasHeader extends StatefulWidget {
+-  final ArusKasDirection currentDirection;
+-  final ValueChanged<ArusKasDirection> onDirectionSelected;
+-  final VoidCallback onBack;
+-  final VoidCallback onAdd;
+-
+-  const ArusKasHeader({
+-    super.key,
+-    required this.currentDirection,
+-    required this.onDirectionSelected,
+-    required this.onBack,
+-    required this.onAdd,
+-  });
+-
+-  @override
+-  State<ArusKasHeader> createState() => _ArusKasHeaderState();
+-}
+-
+-class _ArusKasHeaderState extends State<ArusKasHeader> {
+-  final _dropdownKey = GlobalKey();
+-  OverlayEntry? _overlayEntry;
+-  bool _isOpen = false;
+-
+-  void _toggleDropdown() {
+-    if (_isOpen) {
+-      _closeDropdown();
+-    } else {
+-      _openDropdown();
+-    }
+-  }
+-
+-  void _openDropdown() {
+-    final renderBox = _dropdownKey.currentContext?.findRenderObject() as RenderBox?;
+-    if (renderBox == null) return;
+-    final position = renderBox.localToGlobal(Offset.zero);
+-    final size = renderBox.size;
+-
+-    _overlayEntry = OverlayEntry(
+-      builder: (context) => Stack(
+-        children: [
+-          Positioned.fill(
+-            child: GestureDetector(
+-              onTap: _closeDropdown,
+-              behavior: HitTestBehavior.translucent,
+-              child: Container(color: Colors.transparent),
+-            ),
+-          ),
+-          Positioned(
+-            top: position.dy + size.height + 6,
+-            left: position.dx + size.width / 2 - 90,
+-            width: 180,
+-            child: _DropdownMenu(
+-              currentDirection: widget.currentDirection,
+-              onSelect: (direction) {
+-                widget.onDirectionSelected(direction);
+-                _closeDropdown();
+-              },
+-            ),
+-          ),
+-        ],
+-      ),
+-    );
+-
+-    Overlay.of(context).insert(_overlayEntry!);
+-    setState(() => _isOpen = true);
+-  }
+-
+-  void _closeDropdown() {
+-    _overlayEntry?.remove();
+-    _overlayEntry = null;
+-    if (mounted) setState(() => _isOpen = false);
+-  }
+-
+-  @override
+-  void dispose() {
+-    _overlayEntry?.remove();
+-    super.dispose();
+-  }
+-
+-  @override
+-  Widget build(BuildContext context) {
+-    return Padding(
+-      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
+-      child: SizedBox(
+-        height: 44,
+-        child: Stack(
+-          alignment: Alignment.center,
+-          children: [
+-            Center(
+-              child: GestureDetector(
+-                key: _dropdownKey,
+-                onTap: _toggleDropdown,
+-                child: Row(
+-                  mainAxisSize: MainAxisSize.min,
+-                  children: [
+-                    Text(
+-                      widget.currentDirection == ArusKasDirection.pemasukan ? 'Pemasukan' : 'Pengeluaran',
+-                      style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
+-                    ),
+-                    const SizedBox(width: 4),
+-                    AnimatedRotation(
+-                      turns: _isOpen ? 0.5 : 0,
+-                      duration: const Duration(milliseconds: 180),
+-                      child: const Icon(Icons.keyboard_arrow_down_rounded, size: 20, color: AppColors.textPrimary),
+-                    ),
+-                  ],
+-                ),
+-              ),
+-            ),
+-            Align(
+-              alignment: Alignment.centerLeft,
+-              child: _CircleIconButton(icon: Icons.chevron_left_rounded, onTap: widget.onBack),
+-            ),
+-            Align(
+-              alignment: Alignment.centerRight,
+-              child: _CircleIconButton(icon: Icons.add_rounded, onTap: widget.onAdd),
+-            ),
+-          ],
+-        ),
+-      ),
+-    );
+-  }
+-}
+-
+-class _CircleIconButton extends StatelessWidget {
+-  final IconData icon;
+-  final VoidCallback? onTap;
+-  const _CircleIconButton({required this.icon, this.onTap});
+-
+-  @override
+-  Widget build(BuildContext context) {
+-    return Material(
+-      color: AppColors.surface,
+-      shape: const CircleBorder(),
+-      elevation: 0,
+-      child: InkWell(
+-        onTap: onTap,
+-        customBorder: const CircleBorder(),
+-        child: Container(
+-          width: 44,
+-          height: 44,
+-          decoration: BoxDecoration(
+-            shape: BoxShape.circle,
+-            boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 10, offset: const Offset(0, 2))],
+-          ),
+-          child: Icon(icon, size: 24, color: AppColors.textPrimary),
+-        ),
+-      ),
+-    );
+-  }
+-}
+-
+-class _DropdownMenu extends StatelessWidget {
+-  final ArusKasDirection currentDirection;
+-  final ValueChanged<ArusKasDirection> onSelect;
+-
+-  const _DropdownMenu({required this.currentDirection, required this.onSelect});
+-
+-  @override
+-  Widget build(BuildContext context) {
+-    return Material(
+-      color: Colors.transparent,
+-      child: Container(
+-        decoration: BoxDecoration(
+-          color: AppColors.surface,
+-          borderRadius: BorderRadius.circular(AppRadius.lg),
+-          border: Border.all(color: AppColors.border),
+-          boxShadow: [
+-            BoxShadow(color: Colors.black.withValues(alpha: 0.08), blurRadius: 20, offset: const Offset(0, 6)),
+-          ],
+-        ),
+-        padding: const EdgeInsets.symmetric(vertical: 6),
+-        child: Column(
+-          mainAxisSize: MainAxisSize.min,
+-          children: [
+-            _DropdownOption(
+-              label: 'Pemasukan',
+-              selected: currentDirection == ArusKasDirection.pemasukan,
+-              onTap: () => onSelect(ArusKasDirection.pemasukan),
+-            ),
+-            _DropdownOption(
+-              label: 'Pengeluaran',
+-              selected: currentDirection == ArusKasDirection.pengeluaran,
+-              onTap: () => onSelect(ArusKasDirection.pengeluaran),
+-            ),
+-          ],
+-        ),
+-      ),
+-    );
+-  }
+-}
+-
+-class _DropdownOption extends StatelessWidget {
+-  final String label;
+-  final bool selected;
+-  final VoidCallback onTap;
+-
+-  const _DropdownOption({required this.label, required this.selected, required this.onTap});
+-
+-  @override
+-  Widget build(BuildContext context) {
+-    return InkWell(
+-      onTap: onTap,
+-      child: Container(
+-        width: double.infinity,
+-        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: 10),
+-        color: selected ? AppColors.brand.withValues(alpha: 0.06) : Colors.transparent,
+-        child: Row(
+-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+-          children: [
+-            Text(
+-              label,
+-              style: TextStyle(
+-                fontSize: 14,
+-                fontWeight: FontWeight.w700,
+-                color: selected ? AppColors.brand : AppColors.textPrimary,
+-              ),
+-            ),
+-            if (selected) const Icon(Icons.check_rounded, size: 16, color: AppColors.brand),
+-          ],
+-        ),
+-      ),
+-    );
+-  }
+-}
+diff --git a/lib/features/auth/presentation/pin_login_screen.dart b/lib/features/auth/presentation/pin_login_screen.dart
+index b2fc1b7..71acedf 100644
+--- a/lib/features/auth/presentation/pin_login_screen.dart
++++ b/lib/features/auth/presentation/pin_login_screen.dart
+@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
+ import '../../../core/theme/app_colors.dart';
++import '../../../core/widgets/app_pin_keypad.dart';
+ import '../../dashboard/presentation/dashboard_screen.dart';
+ import '../domain/pin_auth_state.dart';
+ import 'pin_auth_controller.dart';
+@@ -65,9 +66,9 @@ class PinLoginScreen extends ConsumerWidget {
+                 ),
+               ),
+               const SizedBox(height: 28),
+-              _PinDots(state: state),
++              AppPinDots(length: PinAuthState.pinLength, filledCount: state.enteredDigits.length, isError: state.isError),
+               const Spacer(flex: 2),
+-              _Keypad(
++              AppPinKeypad(
+                 disabled: state.isLocked,
+                 onDigit: (d) => _handleDigit(ref, context, d),
+                 onBackspace: () => ref.read(pinAuthControllerProvider.notifier).backspace(),
+@@ -92,110 +93,3 @@ class PinLoginScreen extends ConsumerWidget {
+   }
+ }
+ 
+-class _PinDots extends StatelessWidget {
+-  final PinAuthState state;
+-  const _PinDots({required this.state});
+-
+-  @override
+-  Widget build(BuildContext context) {
+-    return Row(
+-      mainAxisAlignment: MainAxisAlignment.center,
+-      children: List.generate(PinAuthState.pinLength, (i) {
+-        final filled = i < state.enteredDigits.length;
+-        final color = state.isError
+-            ? AppColors.danger
+-            : filled
+-                ? AppColors.brand
+-                : AppColors.border;
+-        return AnimatedContainer(
+-          duration: const Duration(milliseconds: 150),
+-          margin: const EdgeInsets.symmetric(horizontal: 8),
+-          width: 16,
+-          height: 16,
+-          decoration: BoxDecoration(
+-            color: filled || state.isError ? color : Colors.transparent,
+-            border: Border.all(color: color, width: 2),
+-            shape: BoxShape.circle,
+-          ),
+-        );
+-      }),
+-    );
+-  }
+-}
+-
+-class _Keypad extends StatelessWidget {
+-  final bool disabled;
+-  final ValueChanged<String> onDigit;
+-  final VoidCallback onBackspace;
+-
+-  const _Keypad({required this.disabled, required this.onDigit, required this.onBackspace});
+-
+-  @override
+-  Widget build(BuildContext context) {
+-    const rows = [
+-      ['1', '2', '3'],
+-      ['4', '5', '6'],
+-      ['7', '8', '9'],
+-      ['', '0', 'back'],
+-    ];
+-
+-    return Column(
+-      children: rows.map((row) {
+-        return Padding(
+-          padding: const EdgeInsets.symmetric(vertical: 6),
+-          child: Row(
+-            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+-            children: row.map((key) {
+-              if (key.isEmpty) {
+-                return const SizedBox(width: 72, height: 72);
+-              }
+-              if (key == 'back') {
+-                return _KeypadButton(
+-                  disabled: disabled,
+-                  onTap: onBackspace,
+-                  child: const Icon(Icons.backspace_outlined, size: 22, color: AppColors.textSecondary),
+-                );
+-              }
+-              return _KeypadButton(
+-                disabled: disabled,
+-                onTap: () => onDigit(key),
+-                child: Text(
+-                  key,
+-                  style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w700, color: AppColors.textPrimary),
+-                ),
+-              );
+-            }).toList(),
+-          ),
+-        );
+-      }).toList(),
+-    );
+-  }
+-}
+-
+-class _KeypadButton extends StatelessWidget {
+-  final bool disabled;
+-  final VoidCallback onTap;
+-  final Widget child;
+-
+-  const _KeypadButton({required this.disabled, required this.onTap, required this.child});
+-
+-  @override
+-  Widget build(BuildContext context) {
+-    return Opacity(
+-      opacity: disabled ? 0.4 : 1,
+-      child: Material(
+-        color: Colors.transparent,
+-        shape: const CircleBorder(),
+-        child: InkWell(
+-          onTap: disabled ? null : onTap,
+-          customBorder: const CircleBorder(),
+-          child: SizedBox(
+-            width: 72,
+-            height: 72,
+-            child: Center(child: child),
+-          ),
+-        ),
+-      ),
+-    );
+-  }
+-}
+diff --git a/lib/features/dompet/presentation/dompet_closing_screen.dart b/lib/features/dompet/presentation/dompet_closing_screen.dart
+index 59e235a..87e4ccf 100644
+--- a/lib/features/dompet/presentation/dompet_closing_screen.dart
++++ b/lib/features/dompet/presentation/dompet_closing_screen.dart
+@@ -4,6 +4,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ import '../../../core/theme/app_colors.dart';
+ import '../../../core/theme/app_spacing.dart';
+ import '../../../core/utils/currency.dart';
++import '../../../core/widgets/app_button.dart';
++import '../../../core/widgets/app_card_shell.dart';
++import '../../../core/widgets/app_text_field.dart';
+ import '../../../core/widgets/ios_page_header.dart';
+ import '../application/dompet_provider.dart';
+ import '../domain/dompet_models.dart';
+@@ -50,30 +53,35 @@ class _DompetClosingScreenState extends ConsumerState<DompetClosingScreen> {
+ 
+     return Scaffold(
+       backgroundColor: AppColors.background,
+-      appBar: IosPageHeader(title: const Text('Tutup Dompet')),
+       body: SafeArea(
+-        top: false,
+-        child: state.isLoading || state.preview == null
+-            ? const Center(child: CircularProgressIndicator(color: AppColors.brand))
+-            : _Body(
+-                preview: state.preview!,
+-                countedController: _countedController,
+-                noteController: _noteController,
+-                isSubmitting: state.isSubmitting,
+-                onSubmit: () async {
+-                  final counted = int.tryParse(_countedController.text.trim());
+-                  if (counted == null || counted < 0) {
+-                    ScaffoldMessenger.of(context).showSnackBar(
+-                      const SnackBar(content: Text('Masukkan jumlah uang fisik yang valid.'), backgroundColor: AppColors.danger),
+-                    );
+-                    return;
+-                  }
+-                  await controller.submit(
+-                    countedCash: counted,
+-                    note: _noteController.text.trim().isEmpty ? null : _noteController.text.trim(),
+-                  );
+-                },
+-              ),
++        child: Column(
++          children: [
++            const IosPageHeader(title: Text('Tutup Dompet')),
++            Expanded(
++              child: state.isLoading || state.preview == null
++                  ? const Center(child: CircularProgressIndicator(color: AppColors.brand))
++                  : _Body(
++                      preview: state.preview!,
++                      countedController: _countedController,
++                      noteController: _noteController,
++                      isSubmitting: state.isSubmitting,
++                      onSubmit: () async {
++                        final counted = int.tryParse(_countedController.text.trim());
++                        if (counted == null || counted < 0) {
++                          ScaffoldMessenger.of(context).showSnackBar(
++                            const SnackBar(content: Text('Masukkan jumlah uang fisik yang valid.'), backgroundColor: AppColors.danger),
++                          );
++                          return;
++                        }
++                        await controller.submit(
++                          countedCash: counted,
++                          note: _noteController.text.trim().isEmpty ? null : _noteController.text.trim(),
++                        );
++                      },
++                    ),
++            ),
++          ],
++        ),
+       ),
+     );
+   }
+@@ -122,16 +130,14 @@ class _Body extends StatelessWidget {
+               const SizedBox(height: AppSpacing.lg),
+               _SectionLabel(text: 'RINGKASAN KAS'),
+               const SizedBox(height: AppSpacing.sm),
+-              Container(
+-                padding: const EdgeInsets.all(AppSpacing.md),
+-                decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.lg), border: Border.all(color: AppColors.border)),
++              AppCardShell(
+                 child: Column(
+                   children: [
+                     _SummaryRow(label: 'Saldo Awal', value: preview.openingBalance),
+                     _SummaryRow(label: 'Penjualan Cash', value: preview.cashSalesTotal, positive: true),
+                     _SummaryRow(label: 'Setoran Kurir', value: preview.courierDepositsTotal, positive: true),
+                     _SummaryRow(label: 'Pengeluaran Cash', value: preview.cashExpensesTotal, positive: false),
+-                    const Divider(height: AppSpacing.lg, color: AppColors.border),
++                    const Divider(height: AppSpacing.lg),
+                     _SummaryRow(label: 'Kas Diharapkan (Expected Cash)', value: preview.expectedCash, bold: true),
+                   ],
+                 ),
+@@ -139,31 +145,19 @@ class _Body extends StatelessWidget {
+               const SizedBox(height: AppSpacing.xl),
+               _SectionLabel(text: 'HITUNG FISIK'),
+               const SizedBox(height: AppSpacing.sm),
+-              TextField(
++              AppTextField.form(
+                 controller: countedController,
+                 enabled: preview.canClose && !isSubmitting,
+                 keyboardType: TextInputType.number,
+-                decoration: InputDecoration(
+-                  hintText: 'Jumlah uang fisik dihitung',
+-                  filled: true,
+-                  fillColor: AppColors.surface,
+-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.border)),
+-                  enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.border)),
+-                ),
++                hintText: 'Jumlah uang fisik dihitung',
+               ),
+               const SizedBox(height: AppSpacing.md),
+-              TextField(
++              AppTextField.form(
+                 controller: noteController,
+                 enabled: preview.canClose && !isSubmitting,
+                 minLines: 2,
+                 maxLines: 4,
+-                decoration: InputDecoration(
+-                  hintText: 'Catatan (opsional)',
+-                  filled: true,
+-                  fillColor: AppColors.surface,
+-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.border)),
+-                  enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.border)),
+-                ),
++                hintText: 'Catatan (opsional)',
+               ),
+             ],
+           ),
+@@ -171,20 +165,10 @@ class _Body extends StatelessWidget {
+         Container(
+           padding: EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, AppSpacing.sm + MediaQuery.of(context).padding.bottom),
+           decoration: const BoxDecoration(color: AppColors.surface, border: Border(top: BorderSide(color: AppColors.border))),
+-          child: SizedBox(
+-            width: double.infinity,
+-            height: 50,
+-            child: ElevatedButton(
+-              onPressed: preview.canClose && !isSubmitting ? onSubmit : null,
+-              style: ElevatedButton.styleFrom(
+-                backgroundColor: AppColors.brand,
+-                disabledBackgroundColor: AppColors.border,
+-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
+-              ),
+-              child: isSubmitting
+-                  ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2.5, color: Colors.white))
+-                  : const Text('Tutup Dompet', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: Colors.white)),
+-            ),
++          child: AppButton.primary(
++            label: 'Tutup Dompet',
++            onPressed: preview.canClose && !isSubmitting ? onSubmit : null,
++            isLoading: isSubmitting,
+           ),
+         ),
+       ],
+@@ -198,13 +182,9 @@ class _BlockedCard extends StatelessWidget {
+ 
+   @override
+   Widget build(BuildContext context) {
+-    return Container(
+-      padding: const EdgeInsets.all(AppSpacing.md),
+-      decoration: BoxDecoration(
+-        color: AppColors.danger.withValues(alpha: 0.08),
+-        borderRadius: BorderRadius.circular(AppRadius.lg),
+-        border: Border.all(color: AppColors.danger.withValues(alpha: 0.25)),
+-      ),
++    return AppCardShell(
++      backgroundColor: AppColors.danger.withValues(alpha: 0.08),
++      borderColor: AppColors.danger.withValues(alpha: 0.25),
+       child: Column(
+         crossAxisAlignment: CrossAxisAlignment.start,
+         children: [
+@@ -322,15 +302,7 @@ class _ClosingResultSheet extends StatelessWidget {
+             ),
+           ],
+           const SizedBox(height: AppSpacing.lg),
+-          SizedBox(
+-            width: double.infinity,
+-            height: 48,
+-            child: ElevatedButton(
+-              onPressed: onDone,
+-              style: ElevatedButton.styleFrom(backgroundColor: AppColors.brand, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md))),
+-              child: const Text('Selesai', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: Colors.white)),
+-            ),
+-          ),
++          AppButton.primary(label: 'Selesai', onPressed: onDone),
+         ],
+       ),
+     );
+diff --git a/lib/features/dompet/presentation/dompet_screen.dart b/lib/features/dompet/presentation/dompet_screen.dart
+index 05d7859..19fcdcd 100644
+--- a/lib/features/dompet/presentation/dompet_screen.dart
++++ b/lib/features/dompet/presentation/dompet_screen.dart
+@@ -5,6 +5,8 @@ import '../../../core/navigation/app_nav.dart';
+ import '../../../core/theme/app_colors.dart';
+ import '../../../core/theme/app_spacing.dart';
+ import '../../../core/utils/currency.dart';
++import '../../../core/widgets/app_card_shell.dart';
++import '../../../core/widgets/app_empty_state.dart';
+ import '../../../core/widgets/ios_page_header.dart';
+ import '../application/dompet_provider.dart';
+ import '../domain/dompet_models.dart';
+@@ -34,75 +36,80 @@ class DompetScreen extends ConsumerWidget {
+ 
+     return Scaffold(
+       backgroundColor: AppColors.background,
+-      appBar: IosPageHeader(
+-        title: const Text('Dompet'),
+-        trailingIcon: Icons.lock_clock_rounded,
+-        onTrailingTap: () async {
+-          await AppNav.push(context, (_) => const DompetClosingScreen());
+-          controller.load();
+-        },
+-      ),
+       body: SafeArea(
+-        top: false,
+-        child: state.isLoading
+-            ? const Center(child: CircularProgressIndicator(color: AppColors.brand))
+-            : RefreshIndicator(
+-                color: AppColors.brand,
+-                onRefresh: controller.load,
+-                child: ListView(
+-                  physics: const AlwaysScrollableScrollPhysics(),
+-                  padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.xxl),
+-                  children: [
+-                    _SaldoCard(summary: state.summary),
+-                    const SizedBox(height: AppSpacing.lg),
+-                    _RingkasanRow(summary: state.summary),
+-                    if (state.lastClosing != null) ...[
+-                      const SizedBox(height: AppSpacing.sm),
+-                      _LastClosingNote(closing: state.lastClosing!),
+-                    ],
+-                    if (state.summary != null && state.summary!.courierBalances.isNotEmpty) ...[
+-                      const SizedBox(height: AppSpacing.xl),
+-                      const _SectionLabel(text: 'UANG DI KURIR'),
+-                      const SizedBox(height: AppSpacing.sm),
+-                      ...state.summary!.courierBalances.map((balance) => Padding(
+-                            padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+-                            child: CourierOutstandingCard(
+-                              balance: balance,
+-                              onDeposit: (amount) => controller.recordCourierDeposit(
+-                                courierLocationId: balance.location.id,
+-                                amount: amount,
++        child: Column(
++          children: [
++            IosPageHeader(
++              title: const Text('Dompet'),
++              trailingIcon: Icons.lock_clock_rounded,
++              onTrailingTap: () async {
++                await AppNav.push(context, (_) => const DompetClosingScreen());
++                controller.load();
++              },
++            ),
++            Expanded(
++              child: state.isLoading
++                  ? const Center(child: CircularProgressIndicator(color: AppColors.brand))
++                  : RefreshIndicator(
++                      color: AppColors.brand,
++                      onRefresh: controller.load,
++                      child: ListView(
++                        physics: const AlwaysScrollableScrollPhysics(),
++                        padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.xxl),
++                        children: [
++                          _SaldoCard(summary: state.summary),
++                          const SizedBox(height: AppSpacing.lg),
++                          _RingkasanRow(summary: state.summary),
++                          if (state.lastClosing != null) ...[
++                            const SizedBox(height: AppSpacing.sm),
++                            _LastClosingNote(closing: state.lastClosing!),
++                          ],
++                          if (state.summary != null && state.summary!.courierBalances.isNotEmpty) ...[
++                            const SizedBox(height: AppSpacing.xl),
++                            const _SectionLabel(text: 'UANG DI KURIR'),
++                            const SizedBox(height: AppSpacing.sm),
++                            ...state.summary!.courierBalances.map((balance) => Padding(
++                                  padding: const EdgeInsets.only(bottom: AppSpacing.sm),
++                                  child: CourierOutstandingCard(
++                                    balance: balance,
++                                    onDeposit: (amount) => controller.recordCourierDeposit(
++                                      courierLocationId: balance.location.id,
++                                      amount: amount,
++                                    ),
++                                    onConvertToKasbon: () => controller.convertToKasbon(
++                                      courierLocationId: balance.location.id,
++                                      courierName: balance.location.name,
++                                      amount: balance.balance,
++                                    ),
++                                  ),
++                                )),
++                          ],
++                          const SizedBox(height: AppSpacing.xl),
++                          const _SectionLabel(text: 'AKTIVITAS CASH'),
++                          const SizedBox(height: AppSpacing.sm),
++                          if (state.recentMovements.isEmpty)
++                            Padding(
++                              padding: const EdgeInsets.symmetric(vertical: AppSpacing.xl),
++                              child: const AppEmptyState(
++                                icon: Icons.receipt_long_rounded,
++                                title: 'Belum ada aktivitas',
++                                subtitle: 'Aktivitas cash akan muncul di sini.',
+                               ),
+-                              onConvertToKasbon: () => controller.convertToKasbon(
+-                                courierLocationId: balance.location.id,
+-                                courierName: balance.location.name,
+-                                amount: balance.balance,
++                            )
++                          else
++                            AppCardShell(
++                              child: Column(
++                                children: state.recentMovements
++                                    .map((m) => CashMovementTile(movement: m, locationNames: _locationNameLookup(state.summary)))
++                                    .toList(),
+                               ),
+                             ),
+-                          )),
+-                    ],
+-                    const SizedBox(height: AppSpacing.xl),
+-                    const _SectionLabel(text: 'AKTIVITAS CASH'),
+-                    const SizedBox(height: AppSpacing.sm),
+-                    if (state.recentMovements.isEmpty)
+-                      const Padding(
+-                        padding: EdgeInsets.symmetric(vertical: AppSpacing.lg),
+-                        child: Center(
+-                          child: Text('Belum ada aktivitas.', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w500, color: AppColors.textMuted)),
+-                        ),
+-                      )
+-                    else
+-                      Container(
+-                        padding: const EdgeInsets.all(AppSpacing.md),
+-                        decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.lg), border: Border.all(color: AppColors.border)),
+-                        child: Column(
+-                          children: state.recentMovements
+-                              .map((m) => CashMovementTile(movement: m, locationNames: _locationNameLookup(state.summary)))
+-                              .toList(),
+-                        ),
++                        ],
+                       ),
+-                  ],
+-                ),
+-              ),
++                    ),
++            ),
++          ],
++        ),
+       ),
+     );
+   }
+@@ -190,9 +197,8 @@ class _RingkasanChip extends StatelessWidget {
+ 
+   @override
+   Widget build(BuildContext context) {
+-    return Container(
++    return AppCardShell(
+       padding: const EdgeInsets.all(AppSpacing.sm),
+-      decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.md), border: Border.all(color: AppColors.border)),
+       child: Column(
+         crossAxisAlignment: CrossAxisAlignment.start,
+         children: [
+diff --git a/lib/features/dompet/presentation/widgets/courier_outstanding_card.dart b/lib/features/dompet/presentation/widgets/courier_outstanding_card.dart
+index 83eaa20..ade9d8e 100644
+--- a/lib/features/dompet/presentation/widgets/courier_outstanding_card.dart
++++ b/lib/features/dompet/presentation/widgets/courier_outstanding_card.dart
+@@ -3,6 +3,9 @@ import 'package:flutter/material.dart';
+ import '../../../../core/theme/app_colors.dart';
+ import '../../../../core/theme/app_spacing.dart';
+ import '../../../../core/utils/currency.dart';
++import '../../../../core/widgets/app_button.dart';
++import '../../../../core/widgets/app_card_shell.dart';
++import '../../../../core/widgets/app_text_field.dart';
+ import '../../domain/dompet_models.dart';
+ 
+ /// One courier's outstanding cash, with the two PRD-mandated resolution
+@@ -33,11 +36,12 @@ class CourierOutstandingCard extends StatelessWidget {
+           children: [
+             Text('Outstanding saat ini: ${formatRupiah(balance.balance)}', style: const TextStyle(fontSize: 12.5, color: AppColors.textMuted)),
+             const SizedBox(height: AppSpacing.md),
+-            TextField(
++            AppTextField.form(
+               controller: controller,
+               keyboardType: TextInputType.number,
+               autofocus: true,
+-              decoration: const InputDecoration(prefixText: 'Rp ', labelText: 'Jumlah disetor', border: OutlineInputBorder()),
++              prefixText: 'Rp ',
++              label: 'Jumlah disetor',
+             ),
+           ],
+         ),
+@@ -67,11 +71,13 @@ class CourierOutstandingCard extends StatelessWidget {
+         content: Text(
+           '${formatRupiah(balance.balance)} milik ${balance.location.name} akan dikonversi menjadi kasbon/hutang staff. '
+           'Tidak mengubah transaksi penjualan yang sudah ada.',
+-          style: const TextStyle(fontSize: 13),
+         ),
+         actions: [
+           TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Batal')),
+-          TextButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('Ya, Jadikan Kasbon')),
++          TextButton(
++            onPressed: () => Navigator.of(context).pop(true),
++            child: const Text('Ya, Jadikan Kasbon', style: TextStyle(color: AppColors.danger)),
++          ),
+         ],
+       ),
+     );
+@@ -81,13 +87,8 @@ class CourierOutstandingCard extends StatelessWidget {
+ 
+   @override
+   Widget build(BuildContext context) {
+-    return Container(
+-      padding: const EdgeInsets.all(AppSpacing.md),
+-      decoration: BoxDecoration(
+-        color: AppColors.surface,
+-        borderRadius: BorderRadius.circular(AppRadius.lg),
+-        border: Border.all(color: AppColors.warning.withValues(alpha: 0.3)),
+-      ),
++    return AppCardShell(
++      borderColor: AppColors.warning.withValues(alpha: 0.3),
+       child: Column(
+         crossAxisAlignment: CrossAxisAlignment.start,
+         children: [
+@@ -116,28 +117,18 @@ class CourierOutstandingCard extends StatelessWidget {
+           Row(
+             children: [
+               Expanded(
+-                child: OutlinedButton(
++                child: AppButton.secondary(
++                  label: 'Sudah Disetor',
+                   onPressed: () => _showDepositDialog(context),
+-                  style: OutlinedButton.styleFrom(
+-                    foregroundColor: AppColors.success,
+-                    side: const BorderSide(color: AppColors.success),
+-                    padding: const EdgeInsets.symmetric(vertical: 10),
+-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
+-                  ),
+-                  child: const Text('Sudah Disetor', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800)),
++                  icon: Icons.check_circle_outline_rounded,
+                 ),
+               ),
+               const SizedBox(width: AppSpacing.sm),
+               Expanded(
+-                child: OutlinedButton(
++                child: AppButton.secondary(
++                  label: 'Jadikan Kasbon',
+                   onPressed: () => _showKasbonConfirm(context),
+-                  style: OutlinedButton.styleFrom(
+-                    foregroundColor: AppColors.danger,
+-                    side: const BorderSide(color: AppColors.danger),
+-                    padding: const EdgeInsets.symmetric(vertical: 10),
+-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
+-                  ),
+-                  child: const Text('Jadikan Kasbon', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800)),
++                  icon: Icons.receipt_long_rounded,
+                 ),
+               ),
+             ],
+diff --git a/lib/features/history/presentation/history_screen.dart b/lib/features/history/presentation/history_screen.dart
+index 57a1ebe..847b61c 100644
+--- a/lib/features/history/presentation/history_screen.dart
++++ b/lib/features/history/presentation/history_screen.dart
+@@ -4,12 +4,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ import '../../../core/navigation/app_nav.dart';
+ import '../../../core/theme/app_colors.dart';
+ import '../../../core/theme/app_spacing.dart';
++import '../../../core/widgets/date_filter_tabs.dart';
+ import '../../../core/widgets/ios_page_header.dart';
+ import '../../pos/domain/order_models.dart';
+ import '../application/history_provider.dart';
+ import '../domain/history_models.dart';
+ import 'transaction_detail_screen.dart';
+-import 'widgets/date_filter_tabs.dart';
+ import 'widgets/payment_breakdown_card.dart';
+ import 'widgets/sort_sheet.dart';
+ import 'widgets/transaction_card.dart';
+@@ -101,9 +101,17 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
+                 ],
+               ),
+             ),
+-            DateFilterTabs(
++            DateFilterTabs<HistoryDateFilter>(
++              options: const [
++                HistoryDateFilter.hariIni,
++                HistoryDateFilter.kemarin,
++                HistoryDateFilter.bulanIni,
++                HistoryDateFilter.semua,
++                HistoryDateFilter.custom,
++              ],
+               selected: state.dateFilter,
+-              onChanged: (filter) {
++              labelBuilder: (filter) => filter.label,
++              onSelected: (filter) {
+                 if (filter == HistoryDateFilter.custom) {
+                   _pickCustomDateRange(context, controller);
+                 } else {
+diff --git a/lib/features/history/presentation/widgets/date_filter_tabs.dart b/lib/features/history/presentation/widgets/date_filter_tabs.dart
+deleted file mode 100644
+index c1c910f..0000000
+--- a/lib/features/history/presentation/widgets/date_filter_tabs.dart
++++ /dev/null
+@@ -1,53 +0,0 @@
+-import 'package:flutter/material.dart';
+-
+-import '../../../../core/theme/app_colors.dart';
+-import '../../../../core/theme/app_spacing.dart';
+-import '../../domain/history_models.dart';
+-
+-class DateFilterTabs extends StatelessWidget {
+-  final HistoryDateFilter selected;
+-  final ValueChanged<HistoryDateFilter> onChanged;
+-
+-  const DateFilterTabs({super.key, required this.selected, required this.onChanged});
+-
+-  static const _tabs = [
+-    HistoryDateFilter.hariIni,
+-    HistoryDateFilter.kemarin,
+-    HistoryDateFilter.bulanIni,
+-    HistoryDateFilter.semua,
+-    HistoryDateFilter.custom,
+-  ];
+-
+-  @override
+-  Widget build(BuildContext context) {
+-    return SizedBox(
+-      height: 36,
+-      child: ListView(
+-        scrollDirection: Axis.horizontal,
+-        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
+-        children: _tabs.map((tab) {
+-          final isSelected = selected == tab;
+-          return Padding(
+-            padding: const EdgeInsets.only(right: AppSpacing.sm),
+-            child: InkWell(
+-              onTap: () => onChanged(tab),
+-              borderRadius: BorderRadius.circular(AppRadius.pill),
+-              child: Container(
+-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+-                decoration: BoxDecoration(
+-                  color: isSelected ? AppColors.textPrimary : AppColors.surface,
+-                  borderRadius: BorderRadius.circular(AppRadius.pill),
+-                  border: Border.all(color: isSelected ? AppColors.textPrimary : AppColors.border),
+-                ),
+-                child: Text(
+-                  tab.label,
+-                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: isSelected ? Colors.white : AppColors.textSecondary),
+-                ),
+-              ),
+-            ),
+-          );
+-        }).toList(),
+-      ),
+-    );
+-  }
+-}
+diff --git a/lib/features/hpp_opname/presentation/hpp_opname_screen.dart b/lib/features/hpp_opname/presentation/hpp_opname_screen.dart
+index e0cf061..451dddb 100644
+--- a/lib/features/hpp_opname/presentation/hpp_opname_screen.dart
++++ b/lib/features/hpp_opname/presentation/hpp_opname_screen.dart
+@@ -3,12 +3,15 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
+ import '../../../core/navigation/app_nav.dart';
+ import '../../../core/theme/app_colors.dart';
++import '../../../core/widgets/app_dropdown_title.dart';
++import '../../../core/widgets/ios_page_header.dart';
+ import '../application/hpp_opname_provider.dart';
+ import 'widgets/add_ingredient_modal.dart';
+-import 'widgets/hpp_opname_header.dart';
+ import 'widgets/hpp_tab_content.dart';
+ import 'widgets/opname_tab_content.dart';
+ 
++enum HppOpnamePage { hpp, opname }
++
+ /// HPP & Stok Opname screen — combined per the approved HTML mockup,
+ /// switchable via the header's dropdown title rather than being two
+ /// separate pushed screens.
+@@ -31,11 +34,15 @@ class _HppOpnameScreenState extends ConsumerState<HppOpnameScreen> {
+       body: SafeArea(
+         child: Column(
+           children: [
+-            HppOpnameHeader(
+-              currentPage: _page,
+-              onPageSelected: (page) => setState(() => _page = page),
+-              onBack: () => Navigator.of(context).pop(),
+-              onAdd: _page == HppOpnamePage.hpp
++            IosPageHeader(
++              title: AppDropdownTitle<HppOpnamePage>(
++                selected: _page,
++                options: const [HppOpnamePage.hpp, HppOpnamePage.opname],
++                labelBuilder: (p) => p == HppOpnamePage.hpp ? 'HPP' : 'Stok Opname',
++                onSelected: (page) => setState(() => _page = page),
++              ),
++              trailingIcon: _page == HppOpnamePage.hpp ? Icons.add_rounded : null,
++              onTrailingTap: _page == HppOpnamePage.hpp
+                   ? () => AppNav.showModal(
+                         context,
+                         builder: (_) => AddIngredientModal(initialCategory: state.hppCategory),
+diff --git a/lib/features/hpp_opname/presentation/widgets/hpp_opname_header.dart b/lib/features/hpp_opname/presentation/widgets/hpp_opname_header.dart
+deleted file mode 100644
+index 1010083..0000000
+--- a/lib/features/hpp_opname/presentation/widgets/hpp_opname_header.dart
++++ /dev/null
+@@ -1,235 +0,0 @@
+-import 'package:flutter/material.dart';
+-
+-import '../../../../core/theme/app_colors.dart';
+-import '../../../../core/theme/app_spacing.dart';
+-
+-enum HppOpnamePage { hpp, opname }
+-
+-/// Header for the combined HPP & Stok Opname screen: circular back
+-/// button, a tappable dropdown title to switch between HPP and Stok
+-/// Opname (ported 1:1 from the HTML mockup's header dropdown, using the
+-/// same [OverlayEntry] approach as [MenuManagementHeader] — the mockup's
+-/// original nested-DOM dropdown had a real click-bubbling bug; an
+-/// Overlay is a fully independent layer, so that class of bug can't
+-/// happen here), and an optional "+" button on the right shown only on
+-/// the HPP page (Stok Opname has no "add ingredient" action of its own).
+-class HppOpnameHeader extends StatefulWidget {
+-  final HppOpnamePage currentPage;
+-  final ValueChanged<HppOpnamePage> onPageSelected;
+-  final VoidCallback onBack;
+-  final VoidCallback? onAdd;
+-
+-  const HppOpnameHeader({
+-    super.key,
+-    required this.currentPage,
+-    required this.onPageSelected,
+-    required this.onBack,
+-    this.onAdd,
+-  });
+-
+-  @override
+-  State<HppOpnameHeader> createState() => _HppOpnameHeaderState();
+-}
+-
+-class _HppOpnameHeaderState extends State<HppOpnameHeader> {
+-  final _dropdownKey = GlobalKey();
+-  OverlayEntry? _overlayEntry;
+-  bool _isOpen = false;
+-
+-  void _toggleDropdown() => _isOpen ? _closeDropdown() : _openDropdown();
+-
+-  void _openDropdown() {
+-    final renderBox = _dropdownKey.currentContext?.findRenderObject() as RenderBox?;
+-    if (renderBox == null) return;
+-    final position = renderBox.localToGlobal(Offset.zero);
+-    final size = renderBox.size;
+-
+-    _overlayEntry = OverlayEntry(
+-      builder: (context) => Stack(
+-        children: [
+-          Positioned.fill(
+-            child: GestureDetector(
+-              onTap: _closeDropdown,
+-              behavior: HitTestBehavior.translucent,
+-              child: Container(color: Colors.transparent),
+-            ),
+-          ),
+-          Positioned(
+-            top: position.dy + size.height + 6,
+-            left: position.dx + size.width / 2 - 85,
+-            width: 170,
+-            child: _DropdownMenu(
+-              currentPage: widget.currentPage,
+-              onSelect: (page) {
+-                widget.onPageSelected(page);
+-                _closeDropdown();
+-              },
+-            ),
+-          ),
+-        ],
+-      ),
+-    );
+-
+-    Overlay.of(context).insert(_overlayEntry!);
+-    setState(() => _isOpen = true);
+-  }
+-
+-  void _closeDropdown() {
+-    _overlayEntry?.remove();
+-    _overlayEntry = null;
+-    if (mounted) setState(() => _isOpen = false);
+-  }
+-
+-  @override
+-  void dispose() {
+-    _overlayEntry?.remove();
+-    super.dispose();
+-  }
+-
+-  @override
+-  Widget build(BuildContext context) {
+-    return Padding(
+-      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
+-      child: SizedBox(
+-        height: 44,
+-        child: Stack(
+-          alignment: Alignment.center,
+-          children: [
+-            Center(
+-              child: GestureDetector(
+-                key: _dropdownKey,
+-                onTap: _toggleDropdown,
+-                child: Row(
+-                  mainAxisSize: MainAxisSize.min,
+-                  children: [
+-                    Text(
+-                      widget.currentPage == HppOpnamePage.hpp ? 'HPP' : 'Stok Opname',
+-                      style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
+-                    ),
+-                    const SizedBox(width: 4),
+-                    AnimatedRotation(
+-                      turns: _isOpen ? 0.5 : 0,
+-                      duration: const Duration(milliseconds: 180),
+-                      child: const Icon(Icons.keyboard_arrow_down_rounded, size: 20, color: AppColors.textPrimary),
+-                    ),
+-                  ],
+-                ),
+-              ),
+-            ),
+-            Align(
+-              alignment: Alignment.centerLeft,
+-              child: _CircleIconButton(icon: Icons.chevron_left_rounded, onTap: widget.onBack),
+-            ),
+-            if (widget.currentPage == HppOpnamePage.hpp)
+-              Align(
+-                alignment: Alignment.centerRight,
+-                child: _CircleIconButton(icon: Icons.add_rounded, onTap: widget.onAdd),
+-              ),
+-          ],
+-        ),
+-      ),
+-    );
+-  }
+-}
+-
+-class _CircleIconButton extends StatelessWidget {
+-  final IconData icon;
+-  final VoidCallback? onTap;
+-  const _CircleIconButton({required this.icon, this.onTap});
+-
+-  @override
+-  Widget build(BuildContext context) {
+-    return Material(
+-      color: AppColors.surface,
+-      shape: const CircleBorder(),
+-      elevation: 0,
+-      child: InkWell(
+-        onTap: onTap,
+-        customBorder: const CircleBorder(),
+-        child: Container(
+-          width: 44,
+-          height: 44,
+-          decoration: BoxDecoration(
+-            shape: BoxShape.circle,
+-            boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 10, offset: const Offset(0, 2))],
+-          ),
+-          child: Icon(icon, size: 24, color: AppColors.textPrimary),
+-        ),
+-      ),
+-    );
+-  }
+-}
+-
+-class _DropdownMenu extends StatelessWidget {
+-  final HppOpnamePage currentPage;
+-  final ValueChanged<HppOpnamePage> onSelect;
+-
+-  const _DropdownMenu({required this.currentPage, required this.onSelect});
+-
+-  @override
+-  Widget build(BuildContext context) {
+-    return Material(
+-      color: Colors.transparent,
+-      child: Container(
+-        decoration: BoxDecoration(
+-          color: AppColors.surface,
+-          borderRadius: BorderRadius.circular(AppRadius.lg),
+-          border: Border.all(color: AppColors.border),
+-          boxShadow: [
+-            BoxShadow(color: Colors.black.withValues(alpha: 0.08), blurRadius: 20, offset: const Offset(0, 6)),
+-          ],
+-        ),
+-        padding: const EdgeInsets.symmetric(vertical: 6),
+-        child: Column(
+-          mainAxisSize: MainAxisSize.min,
+-          children: [
+-            _DropdownOption(
+-              label: 'HPP',
+-              selected: currentPage == HppOpnamePage.hpp,
+-              onTap: () => onSelect(HppOpnamePage.hpp),
+-            ),
+-            _DropdownOption(
+-              label: 'Stok Opname',
+-              selected: currentPage == HppOpnamePage.opname,
+-              onTap: () => onSelect(HppOpnamePage.opname),
+-            ),
+-          ],
+-        ),
+-      ),
+-    );
+-  }
+-}
+-
+-class _DropdownOption extends StatelessWidget {
+-  final String label;
+-  final bool selected;
+-  final VoidCallback onTap;
+-
+-  const _DropdownOption({required this.label, required this.selected, required this.onTap});
+-
+-  @override
+-  Widget build(BuildContext context) {
+-    return InkWell(
+-      onTap: onTap,
+-      child: Container(
+-        width: double.infinity,
+-        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: 10),
+-        color: selected ? AppColors.brand.withValues(alpha: 0.06) : Colors.transparent,
+-        child: Row(
+-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+-          children: [
+-            Text(
+-              label,
+-              style: TextStyle(
+-                fontSize: 14,
+-                fontWeight: FontWeight.w700,
+-                color: selected ? AppColors.brand : AppColors.textPrimary,
+-              ),
+-            ),
+-            if (selected) const Icon(Icons.check_rounded, size: 16, color: AppColors.brand),
+-          ],
+-        ),
+-      ),
+-    );
+-  }
+-}
+diff --git a/lib/features/hpp_opname/presentation/widgets/hpp_tab_content.dart b/lib/features/hpp_opname/presentation/widgets/hpp_tab_content.dart
+index e8e53b6..983667b 100644
+--- a/lib/features/hpp_opname/presentation/widgets/hpp_tab_content.dart
++++ b/lib/features/hpp_opname/presentation/widgets/hpp_tab_content.dart
+@@ -5,9 +5,9 @@ import '../../../../core/navigation/app_nav.dart';
+ import '../../../../core/theme/app_colors.dart';
+ import '../../../../core/theme/app_spacing.dart';
+ import '../../../../core/utils/currency.dart';
++import '../../../../core/widgets/sliding_pill_tabs.dart';
+ import '../../application/hpp_opname_provider.dart';
+ import '../../domain/hpp_opname_models.dart';
+-import 'sliding_pill_tabs.dart';
+ 
+ /// HPP tab: search + 3-way category pill + ingredient list + inline
+ /// price editing. Ported 1:1 from the HTML mockup's HPP page.
+diff --git a/lib/features/hpp_opname/presentation/widgets/opname_tab_content.dart b/lib/features/hpp_opname/presentation/widgets/opname_tab_content.dart
+index c1608db..5af5aba 100644
+--- a/lib/features/hpp_opname/presentation/widgets/opname_tab_content.dart
++++ b/lib/features/hpp_opname/presentation/widgets/opname_tab_content.dart
+@@ -5,10 +5,10 @@ import 'package:intl/intl.dart';
+ import '../../../../core/theme/app_colors.dart';
+ import '../../../../core/theme/app_spacing.dart';
+ import '../../../../core/utils/currency.dart';
++import '../../../../core/widgets/sliding_pill_tabs.dart';
+ import '../../application/hpp_opname_provider.dart';
+ import '../../domain/hpp_opname_models.dart';
+ import 'hpp_tab_content.dart';
+-import 'sliding_pill_tabs.dart';
+ 
+ /// Stok Opname tab: Riwayat (history) / Input Baru sub-tabs, ported 1:1
+ /// from the HTML mockup.
+diff --git a/lib/features/menu_management/presentation/menu_management_screen.dart b/lib/features/menu_management/presentation/menu_management_screen.dart
+index 26948ed..220ab55 100644
+--- a/lib/features/menu_management/presentation/menu_management_screen.dart
++++ b/lib/features/menu_management/presentation/menu_management_screen.dart
+@@ -4,11 +4,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ import '../../../core/navigation/app_nav.dart';
+ import '../../../core/theme/app_colors.dart';
+ import '../../../core/theme/app_spacing.dart';
++import '../../../core/widgets/app_dropdown_title.dart';
++import '../../../core/widgets/ios_page_header.dart';
+ import '../application/menu_management_provider.dart';
+ import '../domain/menu_management_models.dart';
+ import 'widgets/add_menu_item_modal.dart';
+ import 'widgets/menu_item_card.dart';
+-import 'widgets/menu_management_header.dart';
+ import 'widgets/variant_group_card.dart';
+ 
+ /// Menu / Varian management screen.
+@@ -60,11 +61,15 @@ class _MenuManagementScreenState extends ConsumerState<MenuManagementScreen> {
+       body: SafeArea(
+         child: Column(
+           children: [
+-            MenuManagementHeader(
+-              currentTab: state.tab,
+-              onTabSelected: controller.setTab,
+-              onBack: () => Navigator.of(context).pop(),
+-              onAdd: () => AppNav.showModal(context, builder: (_) => const AddMenuItemModal()),
++            IosPageHeader(
++              title: AppDropdownTitle<MenuManagementTab>(
++                selected: state.tab,
++                options: const [MenuManagementTab.menu, MenuManagementTab.varian],
++                labelBuilder: (tab) => tab == MenuManagementTab.menu ? 'Menu' : 'Varian',
++                onSelected: controller.setTab,
++              ),
++              trailingIcon: Icons.add_rounded,
++              onTrailingTap: () => AppNav.showModal(context, builder: (_) => const AddMenuItemModal()),
+             ),
+             _SearchRow(
+               controller: _searchController,
+diff --git a/lib/features/menu_management/presentation/widgets/menu_management_header.dart b/lib/features/menu_management/presentation/widgets/menu_management_header.dart
+deleted file mode 100644
+index 2714fd2..0000000
+--- a/lib/features/menu_management/presentation/widgets/menu_management_header.dart
++++ /dev/null
+@@ -1,231 +0,0 @@
+-import 'package:flutter/material.dart';
+-
+-import '../../../../core/theme/app_colors.dart';
+-import '../../../../core/theme/app_spacing.dart';
+-import '../../domain/menu_management_models.dart';
+-
+-class MenuManagementHeader extends StatefulWidget {
+-  final MenuManagementTab currentTab;
+-  final ValueChanged<MenuManagementTab> onTabSelected;
+-  final VoidCallback onBack;
+-  final VoidCallback onAdd;
+-
+-  const MenuManagementHeader({
+-    super.key,
+-    required this.currentTab,
+-    required this.onTabSelected,
+-    required this.onBack,
+-    required this.onAdd,
+-  });
+-
+-  @override
+-  State<MenuManagementHeader> createState() => _MenuManagementHeaderState();
+-}
+-
+-class _MenuManagementHeaderState extends State<MenuManagementHeader> {
+-  final _dropdownKey = GlobalKey();
+-  OverlayEntry? _overlayEntry;
+-  bool _isOpen = false;
+-
+-  void _toggleDropdown() {
+-    if (_isOpen) {
+-      _closeDropdown();
+-    } else {
+-      _openDropdown();
+-    }
+-  }
+-
+-  void _openDropdown() {
+-    final renderBox = _dropdownKey.currentContext?.findRenderObject() as RenderBox?;
+-    if (renderBox == null) return;
+-    final position = renderBox.localToGlobal(Offset.zero);
+-    final size = renderBox.size;
+-
+-    _overlayEntry = OverlayEntry(
+-      builder: (context) => Stack(
+-        children: [
+-          Positioned.fill(
+-            child: GestureDetector(
+-              onTap: _closeDropdown,
+-              behavior: HitTestBehavior.translucent,
+-              child: Container(color: Colors.transparent),
+-            ),
+-          ),
+-          Positioned(
+-            top: position.dy + size.height + 6,
+-            left: position.dx + size.width / 2 - 80,
+-            width: 160,
+-            child: _DropdownMenu(
+-              currentTab: widget.currentTab,
+-              onSelect: (tab) {
+-                widget.onTabSelected(tab);
+-                _closeDropdown();
+-              },
+-            ),
+-          ),
+-        ],
+-      ),
+-    );
+-
+-    Overlay.of(context).insert(_overlayEntry!);
+-    setState(() => _isOpen = true);
+-  }
+-
+-  void _closeDropdown() {
+-    _overlayEntry?.remove();
+-    _overlayEntry = null;
+-    if (mounted) setState(() => _isOpen = false);
+-  }
+-
+-  @override
+-  void dispose() {
+-    _overlayEntry?.remove();
+-    super.dispose();
+-  }
+-
+-  @override
+-  Widget build(BuildContext context) {
+-    return Padding(
+-      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
+-      child: SizedBox(
+-        height: 44,
+-        child: Stack(
+-          alignment: Alignment.center,
+-          children: [
+-            Center(
+-              child: GestureDetector(
+-                key: _dropdownKey,
+-                onTap: _toggleDropdown,
+-                child: Row(
+-                  mainAxisSize: MainAxisSize.min,
+-                  children: [
+-                    Text(
+-                      widget.currentTab == MenuManagementTab.menu ? 'Menu' : 'Varian',
+-                      style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
+-                    ),
+-                    const SizedBox(width: 4),
+-                    AnimatedRotation(
+-                      turns: _isOpen ? 0.5 : 0,
+-                      duration: const Duration(milliseconds: 180),
+-                      child: const Icon(Icons.keyboard_arrow_down_rounded, size: 20, color: AppColors.textPrimary),
+-                    ),
+-                  ],
+-                ),
+-              ),
+-            ),
+-            Align(
+-              alignment: Alignment.centerLeft,
+-              child: _CircleIconButton(icon: Icons.chevron_left_rounded, onTap: widget.onBack),
+-            ),
+-            Align(
+-              alignment: Alignment.centerRight,
+-              child: _CircleIconButton(icon: Icons.add_rounded, onTap: widget.onAdd),
+-            ),
+-          ],
+-        ),
+-      ),
+-    );
+-  }
+-}
+-
+-class _CircleIconButton extends StatelessWidget {
+-  final IconData icon;
+-  final VoidCallback? onTap;
+-  const _CircleIconButton({required this.icon, this.onTap});
+-
+-  @override
+-  Widget build(BuildContext context) {
+-    return Material(
+-      color: AppColors.surface,
+-      shape: const CircleBorder(),
+-      elevation: 0,
+-      child: InkWell(
+-        onTap: onTap,
+-        customBorder: const CircleBorder(),
+-        child: Container(
+-          width: 44,
+-          height: 44,
+-          decoration: BoxDecoration(
+-            shape: BoxShape.circle,
+-            boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 10, offset: const Offset(0, 2))],
+-          ),
+-          child: Icon(icon, size: 24, color: AppColors.textPrimary),
+-        ),
+-      ),
+-    );
+-  }
+-}
+-
+-class _DropdownMenu extends StatelessWidget {
+-  final MenuManagementTab currentTab;
+-  final ValueChanged<MenuManagementTab> onSelect;
+-
+-  const _DropdownMenu({required this.currentTab, required this.onSelect});
+-
+-  @override
+-  Widget build(BuildContext context) {
+-    return Material(
+-      color: Colors.transparent,
+-      child: Container(
+-        decoration: BoxDecoration(
+-          color: AppColors.surface,
+-          borderRadius: BorderRadius.circular(AppRadius.lg),
+-          border: Border.all(color: AppColors.border),
+-          boxShadow: [
+-            BoxShadow(color: Colors.black.withValues(alpha: 0.08), blurRadius: 20, offset: const Offset(0, 6)),
+-          ],
+-        ),
+-        padding: const EdgeInsets.symmetric(vertical: 6),
+-        child: Column(
+-          mainAxisSize: MainAxisSize.min,
+-          children: [
+-            _DropdownOption(
+-              label: 'Menu',
+-              selected: currentTab == MenuManagementTab.menu,
+-              onTap: () => onSelect(MenuManagementTab.menu),
+-            ),
+-            _DropdownOption(
+-              label: 'Varian',
+-              selected: currentTab == MenuManagementTab.varian,
+-              onTap: () => onSelect(MenuManagementTab.varian),
+-            ),
+-          ],
+-        ),
+-      ),
+-    );
+-  }
+-}
+-
+-class _DropdownOption extends StatelessWidget {
+-  final String label;
+-  final bool selected;
+-  final VoidCallback onTap;
+-
+-  const _DropdownOption({required this.label, required this.selected, required this.onTap});
+-
+-  @override
+-  Widget build(BuildContext context) {
+-    return InkWell(
+-      onTap: onTap,
+-      child: Container(
+-        width: double.infinity,
+-        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: 10),
+-        color: selected ? AppColors.brand.withValues(alpha: 0.06) : Colors.transparent,
+-        child: Row(
+-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+-          children: [
+-            Text(
+-              label,
+-              style: TextStyle(
+-                fontSize: 14,
+-                fontWeight: FontWeight.w700,
+-                color: selected ? AppColors.brand : AppColors.textPrimary,
+-              ),
+-            ),
+-            if (selected) const Icon(Icons.check_rounded, size: 16, color: AppColors.brand),
+-          ],
+-        ),
+-      ),
+-    );
+-  }
+-}
+-- 
+2.43.0
+

@@ -5,9 +5,9 @@ import '../../../../core/navigation/app_nav.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/theme/app_spacing.dart';
 import '../../../../core/utils/currency.dart';
+import '../../../../core/widgets/sliding_pill_tabs.dart';
 import '../../application/hpp_opname_provider.dart';
 import '../../domain/hpp_opname_models.dart';
-import 'sliding_pill_tabs.dart';
 
 /// HPP tab: search + 3-way category pill + ingredient list + inline
 /// price editing. Ported 1:1 from the HTML mockup's HPP page.

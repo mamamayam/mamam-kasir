@@ -3,6 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/theme/app_spacing.dart';
+import '../../../../core/widgets/app_button.dart';
+import '../../../../core/widgets/app_text_field.dart';
 import '../../../dompet/application/dompet_provider.dart';
 import '../../../dompet/domain/dompet_models.dart';
 import '../../application/arus_kas_provider.dart';
@@ -160,54 +162,30 @@ class _AddArusKasModalState extends ConsumerState<AddArusKasModal> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Expanded(
-                            child: _LabeledField(
+                            child: AppTextField.form(
                               label: 'Jumlah',
-                              child: TextField(
-                                controller: _amountController,
-                                keyboardType: TextInputType.number,
-                                decoration: _fieldDecoration(hint: 'Rp0'),
-                              ),
+                              controller: _amountController,
+                              keyboardType: TextInputType.number,
+                              hintText: 'Rp0',
                             ),
                           ),
                           const SizedBox(width: AppSpacing.sm),
                           Expanded(
-                            child: _LabeledField(
-                              label: 'Tanggal Transaksi',
-                              child: InkWell(
-                                onTap: _pickDate,
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 13),
-                                  decoration: BoxDecoration(
-                                    color: AppColors.background,
-                                    borderRadius: BorderRadius.circular(AppRadius.md),
-                                    border: Border.all(color: AppColors.border),
-                                  ),
-                                  child: Text(
-                                    '${_transactionDate.day}/${_transactionDate.month}/${_transactionDate.year}',
-                                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary),
-                                  ),
-                                ),
-                              ),
-                            ),
+                            child: _DateField(label: 'Tanggal Transaksi', date: _transactionDate, onTap: _pickDate),
                           ),
                         ],
                       ),
                       if (isPengeluaran) ...[
                         const SizedBox(height: AppSpacing.md),
-                        _LabeledField(
-                          label: 'Nama Toko/Supplier',
-                          child: TextField(controller: _storeSupplierController, decoration: _fieldDecoration(hint: 'Opsional')),
-                        ),
+                        AppTextField.form(label: 'Nama Toko/Supplier', controller: _storeSupplierController, hintText: 'Opsional'),
                       ],
                       const SizedBox(height: AppSpacing.md),
-                      _LabeledField(
+                      AppTextField.form(
                         label: 'Detail',
-                        child: TextField(
-                          controller: _detailController,
-                          minLines: 2,
-                          maxLines: 4,
-                          decoration: _fieldDecoration(hint: 'Opsional'),
-                        ),
+                        controller: _detailController,
+                        minLines: 2,
+                        maxLines: 4,
+                        hintText: 'Opsional',
                       ),
                       if (_validationError != null) ...[
                         const SizedBox(height: AppSpacing.sm),
@@ -220,16 +198,10 @@ class _AddArusKasModalState extends ConsumerState<AddArusKasModal> {
               Container(
                 padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, AppSpacing.md),
                 decoration: const BoxDecoration(border: Border(top: BorderSide(color: AppColors.border))),
-                child: SizedBox(
-                  width: double.infinity,
-                  height: 48,
-                  child: ElevatedButton(
-                    onPressed: _isSaving ? null : () => _handleSave(direction),
-                    style: ElevatedButton.styleFrom(backgroundColor: AppColors.brand, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md))),
-                    child: _isSaving
-                        ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2.5, color: Colors.white))
-                        : const Text('Simpan Data', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: Colors.white)),
-                  ),
+                child: AppButton.primary(
+                  label: 'Simpan Data',
+                  onPressed: _isSaving ? null : () => _handleSave(direction),
+                  isLoading: _isSaving,
                 ),
               ),
             ],
@@ -240,23 +212,11 @@ class _AddArusKasModalState extends ConsumerState<AddArusKasModal> {
   }
 }
 
-InputDecoration _fieldDecoration({required String hint}) {
-  return InputDecoration(
-    hintText: hint,
-    hintStyle: const TextStyle(fontSize: 13, color: AppColors.textMuted),
-    filled: true,
-    fillColor: AppColors.background,
-    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 13),
-    border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.border)),
-    enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.border)),
-    focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.brand)),
-  );
-}
-
-class _LabeledField extends StatelessWidget {
+class _DateField extends StatelessWidget {
   final String label;
-  final Widget child;
-  const _LabeledField({required this.label, required this.child});
+  final DateTime date;
+  final VoidCallback onTap;
+  const _DateField({required this.label, required this.date, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -265,7 +225,22 @@ class _LabeledField extends StatelessWidget {
       children: [
         Text(label, style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: AppColors.textSecondary)),
         const SizedBox(height: 6),
-        child,
+        InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(AppRadius.md),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+            decoration: BoxDecoration(
+              color: AppColors.surface,
+              borderRadius: BorderRadius.circular(AppRadius.md),
+              border: Border.all(color: AppColors.border),
+            ),
+            child: Text(
+              '${date.day}/${date.month}/${date.year}',
+              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.textPrimary),
+            ),
+          ),
+        ),
       ],
     );
   }
@@ -277,18 +252,27 @@ class _FieldSkeleton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return _LabeledField(
-      label: label,
-      child: Container(
-        height: 44,
-        decoration: BoxDecoration(color: AppColors.background, borderRadius: BorderRadius.circular(AppRadius.md), border: Border.all(color: AppColors.border)),
-      ),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label, style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: AppColors.textSecondary)),
+        const SizedBox(height: 6),
+        Container(
+          height: 47,
+          decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.md), border: Border.all(color: AppColors.border)),
+        ),
+      ],
     );
   }
 }
 
 /// Editable combobox: type a new category, or tap the dropdown affordance
 /// to pick from previously-used categories for the current direction.
+///
+/// NOTE: Autocomplete's own text field can't be swapped for AppTextField
+/// directly (fieldViewBuilder must return the exact TextField it
+/// manages), so this composes AppTextField's visual language by hand for
+/// this one case rather than reusing the widget instance.
 class _CategoryField extends StatelessWidget {
   final TextEditingController controller;
   final List<String> existingCategories;
@@ -296,45 +280,59 @@ class _CategoryField extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return _LabeledField(
-      label: 'Kategori',
-      child: Autocomplete<String>(
-        optionsBuilder: (textEditingValue) {
-          if (textEditingValue.text.isEmpty) return existingCategories;
-          return existingCategories.where((c) => c.toLowerCase().contains(textEditingValue.text.toLowerCase()));
-        },
-        onSelected: (selection) => controller.text = selection,
-        fieldViewBuilder: (context, fieldController, focusNode, onSubmitted) {
-          // Route every keystroke straight into our own controller (the
-          // one _handleSave reads from), instead of stacking a new
-          // listener on Autocomplete's internal controller each rebuild.
-          return TextField(
-            controller: fieldController,
-            focusNode: focusNode,
-            onChanged: (value) => controller.text = value,
-            decoration: _fieldDecoration(hint: 'Pilih atau ketik baru'),
-          );
-        },
-        optionsViewBuilder: (context, onSelected, options) {
-          return Align(
-            alignment: Alignment.topLeft,
-            child: Material(
-              elevation: 4,
-              borderRadius: BorderRadius.circular(AppRadius.md),
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxHeight: 180),
-                child: ListView(
-                  padding: EdgeInsets.zero,
-                  shrinkWrap: true,
-                  children: options
-                      .map((o) => ListTile(dense: true, title: Text(o, style: const TextStyle(fontSize: 13)), onTap: () => onSelected(o)))
-                      .toList(),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text('Kategori', style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: AppColors.textSecondary)),
+        const SizedBox(height: 6),
+        Autocomplete<String>(
+          optionsBuilder: (textEditingValue) {
+            if (textEditingValue.text.isEmpty) return existingCategories;
+            return existingCategories.where((c) => c.toLowerCase().contains(textEditingValue.text.toLowerCase()));
+          },
+          onSelected: (selection) => controller.text = selection,
+          fieldViewBuilder: (context, fieldController, focusNode, onSubmitted) {
+            // Route every keystroke straight into our own controller (the
+            // one _handleSave reads from), instead of stacking a new
+            // listener on Autocomplete's internal controller each rebuild.
+            return TextField(
+              controller: fieldController,
+              focusNode: focusNode,
+              onChanged: (value) => controller.text = value,
+              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.textPrimary),
+              decoration: InputDecoration(
+                hintText: 'Pilih atau ketik baru',
+                hintStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: AppColors.textMuted),
+                filled: true,
+                fillColor: AppColors.surface,
+                contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.border)),
+                enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.border)),
+                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.brand, width: 1.5)),
+              ),
+            );
+          },
+          optionsViewBuilder: (context, onSelected, options) {
+            return Align(
+              alignment: Alignment.topLeft,
+              child: Material(
+                elevation: 4,
+                borderRadius: BorderRadius.circular(AppRadius.md),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 180),
+                  child: ListView(
+                    padding: EdgeInsets.zero,
+                    shrinkWrap: true,
+                    children: options
+                        .map((o) => ListTile(dense: true, title: Text(o, style: const TextStyle(fontSize: 13)), onTap: () => onSelected(o)))
+                        .toList(),
+                  ),
                 ),
               ),
-            ),
-          );
-        },
-      ),
+            );
+          },
+        ),
+      ],
     );
   }
 }
@@ -343,7 +341,7 @@ class _CategoryField extends StatelessWidget {
 /// (Store Cash + couriers). Defaults to 'Non-Tunai' — the field mirrors
 /// what the eventual real Sumber Dana dropdown does per the HTML
 /// preview: no separate Tunai/Non-Tunai toggle, it's folded in here.
-class _SumberDanaField extends StatefulWidget {
+class _SumberDanaField extends StatelessWidget {
   final List<CashLocation> locations;
   final String? selectedLocationId;
   final ValueChanged<String?> onChanged;
@@ -355,24 +353,30 @@ class _SumberDanaField extends StatefulWidget {
   });
 
   @override
-  State<_SumberDanaField> createState() => _SumberDanaFieldState();
-}
-
-class _SumberDanaFieldState extends State<_SumberDanaField> {
-  @override
   Widget build(BuildContext context) {
-    return _LabeledField(
-      label: 'Sumber Dana',
-      child: DropdownButtonFormField<String?>(
-        value: widget.selectedLocationId,
-        decoration: _fieldDecoration(hint: 'Non-Tunai'),
-        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary),
-        items: [
-          const DropdownMenuItem<String?>(value: null, child: Text('Non-Tunai')),
-          ...widget.locations.map((loc) => DropdownMenuItem<String?>(value: loc.id, child: Text(loc.name))),
-        ],
-        onChanged: widget.onChanged,
-      ),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text('Sumber Dana', style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: AppColors.textSecondary)),
+        const SizedBox(height: 6),
+        DropdownButtonFormField<String?>(
+          value: selectedLocationId,
+          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.textPrimary),
+          decoration: InputDecoration(
+            filled: true,
+            fillColor: AppColors.surface,
+            contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.border)),
+            enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.border)),
+            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.md), borderSide: const BorderSide(color: AppColors.brand, width: 1.5)),
+          ),
+          items: [
+            const DropdownMenuItem<String?>(value: null, child: Text('Non-Tunai')),
+            ...locations.map((loc) => DropdownMenuItem<String?>(value: loc.id, child: Text(loc.name))),
+          ],
+          onChanged: onChanged,
+        ),
+      ],
     );
   }
 }

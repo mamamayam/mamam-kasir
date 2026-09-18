@@ -5,11 +5,23 @@ import '../../../core/navigation/app_nav.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_spacing.dart';
 import '../../../core/utils/currency.dart';
+import '../../../core/widgets/app_card_shell.dart';
+import '../../../core/widgets/app_dropdown_title.dart';
+import '../../../core/widgets/app_empty_state.dart';
+import '../../../core/widgets/date_filter_tabs.dart';
+import '../../../core/widgets/ios_page_header.dart';
 import '../application/arus_kas_provider.dart';
 import '../domain/arus_kas_models.dart';
 import 'widgets/add_arus_kas_modal.dart';
 import 'widgets/arus_kas_entry_tile.dart';
-import 'widgets/arus_kas_header.dart';
+
+const _dateFilterOptions = [
+  ArusKasDateFilter.hariIni,
+  ArusKasDateFilter.kemarin,
+  ArusKasDateFilter.bulanIni,
+  ArusKasDateFilter.bulanKemarin,
+  ArusKasDateFilter.pilihTanggal,
+];
 
 const _dateFilterLabels = {
   ArusKasDateFilter.hariIni: 'Hari Ini',
@@ -48,21 +60,32 @@ class ArusKasScreen extends ConsumerWidget {
       body: SafeArea(
         child: Column(
           children: [
-            ArusKasHeader(
-              currentDirection: state.direction,
-              onDirectionSelected: controller.setDirection,
-              onBack: () => Navigator.of(context).pop(),
-              onAdd: () => AppNav.showModal(context, builder: (_) => const AddArusKasModal()),
+            IosPageHeader(
+              title: AppDropdownTitle<ArusKasDirection>(
+                selected: state.direction,
+                options: const [ArusKasDirection.pemasukan, ArusKasDirection.pengeluaran],
+                labelBuilder: (d) => d == ArusKasDirection.pemasukan ? 'Pemasukan' : 'Pengeluaran',
+                onSelected: controller.setDirection,
+              ),
+              trailingIcon: Icons.add_rounded,
+              onTrailingTap: () => AppNav.showModal(context, builder: (_) => const AddArusKasModal()),
             ),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
               child: _TotalCard(direction: state.direction, total: state.total),
             ),
             const SizedBox(height: AppSpacing.sm),
-            _DateFilterRow(
-              current: state.dateFilter,
-              customDate: state.customDate,
-              onSelect: (filter) async {
+            DateFilterTabs<ArusKasDateFilter>(
+              options: _dateFilterOptions,
+              selected: state.dateFilter,
+              labelBuilder: (filter) {
+                if (filter == ArusKasDateFilter.pilihTanggal && state.dateFilter == filter && state.customDate != null) {
+                  final d = state.customDate!;
+                  return '${d.day}/${d.month}/${d.year}';
+                }
+                return _dateFilterLabels[filter]!;
+              },
+              onSelected: (filter) async {
                 if (filter == ArusKasDateFilter.pilihTanggal) {
                   final picked = await showDatePicker(
                     context: context,
@@ -89,11 +112,10 @@ class ArusKasScreen extends ConsumerWidget {
                               children: [
                                 Padding(
                                   padding: const EdgeInsets.symmetric(vertical: AppSpacing.xxl),
-                                  child: Center(
-                                    child: Text(
-                                      isPemasukan ? 'Belum ada pemasukan pada periode ini.' : 'Belum ada pengeluaran pada periode ini.',
-                                      style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w500, color: AppColors.textMuted),
-                                    ),
+                                  child: AppEmptyState(
+                                    icon: Icons.receipt_long_rounded,
+                                    title: isPemasukan ? 'Belum ada pemasukan' : 'Belum ada pengeluaran',
+                                    subtitle: 'Belum ada catatan pada periode ini.',
                                   ),
                                 ),
                               ],
@@ -102,9 +124,7 @@ class ArusKasScreen extends ConsumerWidget {
                               physics: const AlwaysScrollableScrollPhysics(),
                               padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.xxl),
                               children: [
-                                Container(
-                                  padding: const EdgeInsets.all(AppSpacing.md),
-                                  decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.lg), border: Border.all(color: AppColors.border)),
+                                AppCardShell(
                                   child: Column(
                                     children: state.entries
                                         .map((e) => ArusKasEntryTile(entry: e, onDelete: () => controller.deleteEntry(e.id)))
@@ -131,64 +151,22 @@ class _TotalCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final isPemasukan = direction == ArusKasDirection.pemasukan;
     final color = isPemasukan ? AppColors.success : AppColors.danger;
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(AppSpacing.md),
-      decoration: BoxDecoration(color: color.withValues(alpha: 0.08), borderRadius: BorderRadius.circular(AppRadius.lg), border: Border.all(color: color.withValues(alpha: 0.2))),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            isPemasukan ? 'TOTAL PEMASUKAN' : 'TOTAL PENGELUARAN',
-            style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700, letterSpacing: 0.5, color: AppColors.textMuted),
-          ),
-          const SizedBox(height: 4),
-          Text(formatRupiah(total), style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: color)),
-        ],
-      ),
-    );
-  }
-}
-
-class _DateFilterRow extends StatelessWidget {
-  final ArusKasDateFilter current;
-  final DateTime? customDate;
-  final ValueChanged<ArusKasDateFilter> onSelect;
-
-  const _DateFilterRow({required this.current, required this.customDate, required this.onSelect});
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      height: 34,
-      child: ListView(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
-        children: ArusKasDateFilter.values.map((filter) {
-          final selected = filter == current;
-          final label = filter == ArusKasDateFilter.pilihTanggal && selected && customDate != null
-              ? '${customDate!.day}/${customDate!.month}/${customDate!.year}'
-              : _dateFilterLabels[filter]!;
-          return Padding(
-            padding: const EdgeInsets.only(right: AppSpacing.sm),
-            child: InkWell(
-              onTap: () => onSelect(filter),
-              borderRadius: BorderRadius.circular(AppRadius.pill),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-                decoration: BoxDecoration(
-                  color: selected ? AppColors.brand : AppColors.surface,
-                  borderRadius: BorderRadius.circular(AppRadius.pill),
-                  border: Border.all(color: selected ? AppColors.brand : AppColors.border),
-                ),
-                child: Text(
-                  label,
-                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: selected ? Colors.white : AppColors.textSecondary),
-                ),
-              ),
+    return AppCardShell(
+      backgroundColor: color.withValues(alpha: 0.08),
+      borderColor: color.withValues(alpha: 0.2),
+      child: SizedBox(
+        width: double.infinity,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              isPemasukan ? 'TOTAL PEMASUKAN' : 'TOTAL PENGELUARAN',
+              style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700, letterSpacing: 0.5, color: AppColors.textMuted),
             ),
-          );
-        }).toList(),
+            const SizedBox(height: 4),
+            Text(formatRupiah(total), style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: color)),
+          ],
+        ),
       ),
     );
   }

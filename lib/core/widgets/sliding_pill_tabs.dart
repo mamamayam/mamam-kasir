@@ -1,17 +1,19 @@
 import 'package:flutter/material.dart';
 
-import '../../../../core/theme/app_colors.dart';
-import '../../../../core/theme/app_spacing.dart';
+import '../theme/app_colors.dart';
+import '../theme/app_spacing.dart';
 
-/// Sliding-capsule segmented control — one solid pill that glides
-/// between options via [AnimatedPositioned], rather than each option
-/// carrying its own background. Ported from the HTML mockup's
-/// `.pill-indicator` mechanism (which measured DOM rects with JS);
-/// Flutter's [LayoutBuilder] + equal-width [Expanded] segments makes the
-/// same visual result reachable without manual measurement.
+/// Sliding-capsule segmented control per the component standards doc
+/// §12 — for 2–3 options that must fit side by side, full-width. One
+/// solid pill glides between options via [AnimatedPositioned] (rather
+/// than each option carrying its own background), with equal-width
+/// segments via [LayoutBuilder] + [Expanded].
 ///
-/// Used for both the 2-option Riwayat/Input Baru sub-tab and the
-/// 3-option Bahan Baku/Setengah Jadi/Bahan Jadi category switcher.
+/// Originally built for HPP & Stok Opname's Riwayat/Input Baru sub-tab
+/// and its 3-option Bahan Baku/Setengah Jadi/Bahan Jadi switcher — now
+/// the shared widget for any 2–3 option segmented control app-wide. For
+/// 4+ scrollable options, use [DateFilterTabs] instead — don't invent a
+/// third tab pattern.
 class SlidingPillTabs extends StatelessWidget {
   final List<String> labels;
   final int selectedIndex;

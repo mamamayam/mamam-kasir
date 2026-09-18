@@ -1,0 +1,164 @@
+From 4eabd14dcd0d348c2ee14b3e4f7ac958c30e0df7 Mon Sep 17 00:00:00 2001
+From: Claude <claude@anthropic.com>
+Date: Wed, 16 Sep 2026 21:24:38 +0000
+Subject: [PATCH] Fix dashboard pull-to-refresh: GestureDetector loses the
+ gesture arena to the Scrollable on real devices
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Reported: refresh works from reading the code but does nothing on a
+real phone (emulator drag simulation had made it look fine there).
+
+Root cause: the old implementation wrapped SingleChildScrollView in a
+GestureDetector with onVerticalDragStart/Update/End. A GestureDetector
+around a scrollable competes with the Scrollable's own internal
+VerticalDragGestureRecognizer for the same touch in the gesture arena
+— and the inner Scrollable very often wins that race on real
+hardware (different touch-sampling behavior than an emulator's
+mouse-drag simulation), so the outer GestureDetector's callbacks never
+fire at all. The pull tracking logic itself was correct; it just
+silently never ran.
+
+Fix: replaced the GestureDetector with
+NotificationListener<ScrollNotification>, listening for
+OverscrollNotification (dragDetails != null, overscroll < 0 — content
+already at offset 0 and still being dragged down, same signal
+Flutter's own RefreshIndicator uses internally) to track pull
+distance, and ScrollEndNotification to decide whether the pull crossed
+the trigger threshold. Notifications bubble up from the Scrollable
+itself rather than competing for gesture ownership, so this can't lose
+a gesture-arena race.
+
+Also added physics: const AlwaysScrollableScrollPhysics() to the
+SingleChildScrollView — without it, a screen whose content is shorter
+than the viewport (e.g. first load with minimal data) can't overscroll
+at all, so the pull gesture would never register in that state either.
+
+InlineRefreshIndicator and the overall visible-pull/isRefreshing state
+shape are unchanged — this only replaces how the drag is detected.
+---
+ .../presentation/dashboard_screen.dart        | 87 ++++++++++---------
+ 1 file changed, 45 insertions(+), 42 deletions(-)
+
+diff --git a/lib/features/dashboard/presentation/dashboard_screen.dart b/lib/features/dashboard/presentation/dashboard_screen.dart
+index e18b920..93c151d 100644
+--- a/lib/features/dashboard/presentation/dashboard_screen.dart
++++ b/lib/features/dashboard/presentation/dashboard_screen.dart
+@@ -36,8 +36,6 @@ class DashboardScreen extends ConsumerStatefulWidget {
+ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
+   double _pullDistance = 0;
+   bool _isRefreshing = false;
+-  double _dragStartY = 0;
+-  bool _isDragging = false;
+ 
+   static const double _pullTriggerThreshold = 60;
+   static const double _maxPullDistance = 80;
+@@ -50,46 +48,52 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
+     super.dispose();
+   }
+ 
+-  void _handleDragStart(DragStartDetails details) {
+-    // Only start tracking a pull if the content is already scrolled to
+-    // the top — otherwise this would fight with normal list scrolling.
+-    _dragStartY = details.globalPosition.dy;
+-    _isDragging = true;
++  // Pull-to-refresh via ScrollNotification rather than a GestureDetector
++  // wrapping the SingleChildScrollView: a GestureDetector's drag
++  // recognizer competes with the Scrollable's own internal recognizer
++  // for the same touch in the gesture arena, and on real devices
++  // (unlike the emulator's mouse-drag simulation) the Scrollable wins
++  // that race far more often — onVerticalDragStart/Update then never
++  // fire at all, so the pull silently does nothing. A
++  // NotificationListener instead listens to notifications the
++  // Scrollable itself dispatches as it scrolls, so it always sees the
++  // gesture regardless of who "owns" it.
++  bool _handleScrollNotification(ScrollNotification notification) {
++    // Overscrolling past the top (content already at offset 0 and the
++    // user keeps dragging down) is exactly the "pulling to refresh"
++    // gesture — dragOverscrollAmount is negative while pulling down.
++    if (notification is OverscrollNotification && notification.dragDetails != null) {
++      if (_scrollController.hasClients && _scrollController.offset <= 0 && notification.overscroll < 0 && !_isRefreshing) {
++        setState(() {
++          _pullDistance = (_pullDistance - notification.overscroll * 0.4).clamp(0, _maxPullDistance);
++        });
++      }
++    } else if (notification is ScrollEndNotification) {
++      if (_pullDistance >= _pullTriggerThreshold && !_isRefreshing) {
++        _triggerRefresh();
++      } else if (!_isRefreshing && _pullDistance > 0) {
++        setState(() => _pullDistance = 0);
++      }
++    }
++    return false;
+   }
+ 
+-  void _handleDragUpdate(DragUpdateDetails details, ScrollController controller) {
+-    if (!_isDragging) return;
+-    if (controller.hasClients && controller.offset > 0) return;
+-
+-    final delta = details.globalPosition.dy - _dragStartY;
+-    if (delta <= 0) return;
+-
++  Future<void> _triggerRefresh() async {
+     setState(() {
+-      _pullDistance = (delta * 0.4).clamp(0, _maxPullDistance);
++      _isRefreshing = true;
++      _pullDistance = 34;
++    });
++    // Local-DB refresh only for now. Once Supabase sync lands (docs/07
++    // §19), add the sync pull call INSIDE DashboardController.load()
++    // (push pending -> server validation -> pull, then re-read local
++    // DB) — this widget doesn't need to change at all when that
++    // happens, since it just awaits whatever load() does.
++    await ref.read(dashboardProvider.notifier).load();
++    if (!mounted) return;
++    setState(() {
++      _isRefreshing = false;
++      _pullDistance = 0;
+     });
+-  }
+-
+-  Future<void> _handleDragEnd(DragEndDetails details) async {
+-    _isDragging = false;
+-    if (_pullDistance >= _pullTriggerThreshold) {
+-      setState(() {
+-        _isRefreshing = true;
+-        _pullDistance = 34;
+-      });
+-      // Local-DB refresh only for now. Once Supabase sync lands (docs/07
+-      // §19), add the sync pull call INSIDE DashboardController.load()
+-      // (push pending -> server validation -> pull, then re-read local
+-      // DB) — this widget doesn't need to change at all when that
+-      // happens, since it just awaits whatever load() does.
+-      await ref.read(dashboardProvider.notifier).load();
+-      if (!mounted) return;
+-      setState(() {
+-        _isRefreshing = false;
+-        _pullDistance = 0;
+-      });
+-    } else {
+-      setState(() => _pullDistance = 0);
+-    }
+   }
+ 
+   @override
+@@ -114,12 +118,11 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
+                 Expanded(
+                   child: state.isLoading && metrics == null
+                       ? const Center(child: CircularProgressIndicator(color: AppColors.brand))
+-                      : GestureDetector(
+-                          onVerticalDragStart: _handleDragStart,
+-                          onVerticalDragUpdate: (d) => _handleDragUpdate(d, _scrollController),
+-                          onVerticalDragEnd: _handleDragEnd,
++                      : NotificationListener<ScrollNotification>(
++                          onNotification: _handleScrollNotification,
+                           child: SingleChildScrollView(
+                             controller: _scrollController,
++                            physics: const AlwaysScrollableScrollPhysics(),
+                             padding: const EdgeInsets.fromLTRB(
+                               AppSpacing.lg,
+                               AppSpacing.md,
+-- 
+2.43.0
+

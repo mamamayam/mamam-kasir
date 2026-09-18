@@ -4,12 +4,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/navigation/app_nav.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_spacing.dart';
+import '../../../core/widgets/date_filter_tabs.dart';
 import '../../../core/widgets/ios_page_header.dart';
 import '../../pos/domain/order_models.dart';
 import '../application/history_provider.dart';
 import '../domain/history_models.dart';
 import 'transaction_detail_screen.dart';
-import 'widgets/date_filter_tabs.dart';
 import 'widgets/payment_breakdown_card.dart';
 import 'widgets/sort_sheet.dart';
 import 'widgets/transaction_card.dart';
@@ -101,9 +101,17 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
                 ],
               ),
             ),
-            DateFilterTabs(
+            DateFilterTabs<HistoryDateFilter>(
+              options: const [
+                HistoryDateFilter.hariIni,
+                HistoryDateFilter.kemarin,
+                HistoryDateFilter.bulanIni,
+                HistoryDateFilter.semua,
+                HistoryDateFilter.custom,
+              ],
               selected: state.dateFilter,
-              onChanged: (filter) {
+              labelBuilder: (filter) => filter.label,
+              onSelected: (filter) {
                 if (filter == HistoryDateFilter.custom) {
                   _pickCustomDateRange(context, controller);
                 } else {

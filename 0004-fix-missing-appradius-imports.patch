@@ -1,0 +1,52 @@
+From c2fd8b08329773f901fb3925f4d2fa2c4de1586f Mon Sep 17 00:00:00 2001
+From: Claude <claude@anthropic.com>
+Date: Thu, 17 Sep 2026 06:03:33 +0000
+Subject: [PATCH] Fix missing app_spacing.dart imports (AppRadius undefined
+ build error)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+flutter run failed to compile: sliding_pill_tabs.dart used AppRadius.pill
+without importing app_spacing.dart (AppRadius lives there, not in
+app_colors.dart). Found and fixed the same missing import in
+app_status_badge.dart (uses AppRadius.sm) before it could cause the
+same failure.
+
+Ran a systematic scan afterward across all of lib/ for the same class
+of bug (AppRadius/AppSpacing/AppColors used without importing
+app_spacing.dart/app_colors.dart) and for dangling references to the
+three duplicate header files deleted in the previous commit — both
+came back clean.
+---
+ lib/core/widgets/app_status_badge.dart  | 1 +
+ lib/core/widgets/sliding_pill_tabs.dart | 1 +
+ 2 files changed, 2 insertions(+)
+
+diff --git a/lib/core/widgets/app_status_badge.dart b/lib/core/widgets/app_status_badge.dart
+index b0d8f25..7028d0b 100644
+--- a/lib/core/widgets/app_status_badge.dart
++++ b/lib/core/widgets/app_status_badge.dart
+@@ -1,6 +1,7 @@
+ import 'package:flutter/material.dart';
+ 
+ import '../theme/app_colors.dart';
++import '../theme/app_spacing.dart';
+ 
+ /// Shared status/tag badge per the component standards doc §10:
+ /// [AppRadius.sm], padding 8 horizontal / 4 vertical, font 10/w800 with
+diff --git a/lib/core/widgets/sliding_pill_tabs.dart b/lib/core/widgets/sliding_pill_tabs.dart
+index 6f6a06e..327a9d5 100644
+--- a/lib/core/widgets/sliding_pill_tabs.dart
++++ b/lib/core/widgets/sliding_pill_tabs.dart
+@@ -1,6 +1,7 @@
+ import 'package:flutter/material.dart';
+ 
+ import '../theme/app_colors.dart';
++import '../theme/app_spacing.dart';
+ 
+ /// Sliding-capsule segmented control per the component standards doc
+ /// §12 — for 2–3 options that must fit side by side, full-width. One
+-- 
+2.43.0
+

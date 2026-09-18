@@ -3,6 +3,9 @@ import 'package:flutter/material.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/theme/app_spacing.dart';
 import '../../../../core/utils/currency.dart';
+import '../../../../core/widgets/app_button.dart';
+import '../../../../core/widgets/app_card_shell.dart';
+import '../../../../core/widgets/app_text_field.dart';
 import '../../domain/dompet_models.dart';
 
 /// One courier's outstanding cash, with the two PRD-mandated resolution
@@ -33,11 +36,12 @@ class CourierOutstandingCard extends StatelessWidget {
           children: [
             Text('Outstanding saat ini: ${formatRupiah(balance.balance)}', style: const TextStyle(fontSize: 12.5, color: AppColors.textMuted)),
             const SizedBox(height: AppSpacing.md),
-            TextField(
+            AppTextField.form(
               controller: controller,
               keyboardType: TextInputType.number,
               autofocus: true,
-              decoration: const InputDecoration(prefixText: 'Rp ', labelText: 'Jumlah disetor', border: OutlineInputBorder()),
+              prefixText: 'Rp ',
+              label: 'Jumlah disetor',
             ),
           ],
         ),
@@ -67,11 +71,13 @@ class CourierOutstandingCard extends StatelessWidget {
         content: Text(
           '${formatRupiah(balance.balance)} milik ${balance.location.name} akan dikonversi menjadi kasbon/hutang staff. '
           'Tidak mengubah transaksi penjualan yang sudah ada.',
-          style: const TextStyle(fontSize: 13),
         ),
         actions: [
           TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Batal')),
-          TextButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('Ya, Jadikan Kasbon')),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Ya, Jadikan Kasbon', style: TextStyle(color: AppColors.danger)),
+          ),
         ],
       ),
     );
@@ -81,13 +87,8 @@ class CourierOutstandingCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(AppSpacing.md),
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(AppRadius.lg),
-        border: Border.all(color: AppColors.warning.withValues(alpha: 0.3)),
-      ),
+    return AppCardShell(
+      borderColor: AppColors.warning.withValues(alpha: 0.3),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -116,28 +117,18 @@ class CourierOutstandingCard extends StatelessWidget {
           Row(
             children: [
               Expanded(
-                child: OutlinedButton(
+                child: AppButton.secondary(
+                  label: 'Sudah Disetor',
                   onPressed: () => _showDepositDialog(context),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: AppColors.success,
-                    side: const BorderSide(color: AppColors.success),
-                    padding: const EdgeInsets.symmetric(vertical: 10),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
-                  ),
-                  child: const Text('Sudah Disetor', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800)),
+                  icon: Icons.check_circle_outline_rounded,
                 ),
               ),
               const SizedBox(width: AppSpacing.sm),
               Expanded(
-                child: OutlinedButton(
+                child: AppButton.secondary(
+                  label: 'Jadikan Kasbon',
                   onPressed: () => _showKasbonConfirm(context),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: AppColors.danger,
-                    side: const BorderSide(color: AppColors.danger),
-                    padding: const EdgeInsets.symmetric(vertical: 10),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
-                  ),
-                  child: const Text('Jadikan Kasbon', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800)),
+                  icon: Icons.receipt_long_rounded,
                 ),
               ),
             ],
