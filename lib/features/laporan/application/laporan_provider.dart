@@ -36,6 +36,11 @@ class LaporanState {
       errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
     );
   }
+
+  /// True when the query succeeded but the month genuinely has no rows —
+  /// distinct from "failed to load", which the screen renders as a retry
+  /// state instead of an empty state.
+  bool get hasNoData => errorMessage == null && data.rows.isEmpty && data.totalValue == 0;
 }
 
 final laporanProvider = StateNotifierProvider.autoDispose<LaporanController, LaporanState>((ref) {
@@ -45,36 +50,64 @@ final laporanProvider = StateNotifierProvider.autoDispose<LaporanController, Lap
 class LaporanController extends StateNotifier<LaporanState> {
   final LaporanRepository _repository;
 
+  /// Guards against an out-of-order result overwriting a newer one when
+  /// the user flicks between report types or months faster than a query
+  /// completes — only the most recent request is allowed to commit.
+  int _requestId = 0;
+
   LaporanController(this._repository) : super(LaporanState(selectedMonth: DateTime(DateTime.now().year, DateTime.now().month, 1))) {
     load();
   }
 
   Future<void> load() async {
+    final requestId = ++_requestId;
+
     if (!state.reportType.isImplemented) {
-      // Laba/Produk/Customer have no designed report body yet — nothing
-      // to query, so this just clears loading without inventing data.
-      state = state.copyWith(isLoading: false, data: ReportData.empty(), clearError: true);
+      // Laba Rugi / Produk / Customer have no designed report body yet —
+      // nothing to query, so this just clears loading without inventing
+      // data.
+      _commit(requestId, (s) => s.copyWith(isLoading: false, data: ReportData.empty(), clearError: true));
       return;
     }
 
-    state = state.copyWith(isLoading: true, clearError: true);
+    _commit(requestId, (s) => s.copyWith(isLoading: true, clearError: true));
+
     try {
-      final data = state.reportType == ReportType.pendapatan
-          ? await _repository.getPendapatanReport(state.selectedMonth)
-          : await _repository.getPengeluaranReport(state.selectedMonth);
-      state = state.copyWith(data: data, isLoading: false);
+      final type = state.reportType;
+      final month = state.selectedMonth;
+      final data = type == ReportType.pendapatan
+          ? await _repository.getPendapatanReport(month)
+          : await _repository.getPengeluaranReport(month);
+      _commit(requestId, (s) => s.copyWith(data: data, isLoading: false, clearError: true));
     } catch (e) {
-      state = state.copyWith(isLoading: false, errorMessage: 'Gagal memuat laporan: $e');
+      _commit(requestId, (s) => s.copyWith(isLoading: false, data: ReportData.empty(), errorMessage: 'Gagal memuat laporan: $e'));
     }
   }
 
+  /// Every state write goes through here. Two things it protects against,
+  /// both of which used to surface as a crash on this screen:
+  ///
+  /// 1. `mounted` — the provider is autoDispose, so backing out while a
+  ///    query is still in flight disposes the notifier; writing `state`
+  ///    afterwards throws "Tried to use LaporanController after `dispose`
+  ///    was called".
+  /// 2. `_requestId` — a stale in-flight result must not clobber a newer
+  ///    one (see the field's doc comment).
+  void _commit(int requestId, LaporanState Function(LaporanState) update) {
+    if (!mounted || requestId != _requestId) return;
+    state = update(state);
+  }
+
   void setReportType(ReportType type) {
-    state = state.copyWith(reportType: type);
+    if (type == state.reportType) return;
+    state = state.copyWith(reportType: type, clearError: true);
     load();
   }
 
   void setMonth(DateTime month) {
-    state = state.copyWith(selectedMonth: DateTime(month.year, month.month, 1));
+    final normalized = DateTime(month.year, month.month, 1);
+    if (normalized == state.selectedMonth) return;
+    state = state.copyWith(selectedMonth: normalized, clearError: true);
     load();
   }
 }

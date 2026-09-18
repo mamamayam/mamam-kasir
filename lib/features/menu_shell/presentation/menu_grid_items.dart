@@ -4,6 +4,7 @@ import '../../../core/navigation/app_nav.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/widgets/placeholder_screen.dart';
 import '../../arus_kas/presentation/arus_kas_screen.dart';
+import '../../cabang/presentation/manajemen_cabang_screen.dart';
 import '../../dompet/presentation/dompet_screen.dart';
 import '../../hpp_opname/presentation/hpp_opname_screen.dart';
 import '../../laporan/presentation/laporan_screen.dart';
@@ -26,7 +27,7 @@ class MenuGridItem {
 }
 
 /// The 3x3 grid, kept 1:1 with the supplied React mockup's item set and
-/// order (Dompet, Menu, Laba Rugi, Kas, Pelanggan, Laporan, Staff, HPP,
+/// order (Dompet, Menu, Cabang, Kas, Pelanggan, Laporan, Staff, HPP,
 /// Pengaturan) — colors are the toned-down muted palette (see AppColors
 /// doc comment), not the mockup's fully-saturated set. Icons are Material
 /// equivalents of the mockup's lucide-react icons.
@@ -77,7 +78,16 @@ List<MenuGridItem> buildMenuGridItems({
       color: AppColors.tileMenu,
       onTap: () => pushDestination((_) => const MenuManagementScreen()),
     ),
-    placeholderTile(label: 'Laba Rugi', icon: Icons.receipt_long_rounded, color: AppColors.tileLabaRugi),
+    // Laba Rugi used to sit here pointing at a PlaceholderScreen. It is
+    // a report, so it now lives behind Laporan's report-type picker
+    // (ReportType.labaRugi) instead of owning a grid tile, and this slot
+    // went to Cabang.
+    MenuGridItem(
+      label: 'Cabang',
+      icon: Icons.storefront_rounded,
+      color: AppColors.tileCabang,
+      onTap: () => pushDestination((_) => const ManajemenCabangScreen()),
+    ),
     MenuGridItem(
       label: 'Kas',
       icon: Icons.compare_arrows_rounded,

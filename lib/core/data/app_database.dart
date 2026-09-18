@@ -55,7 +55,21 @@ class AppDatabase {
   // previous closing" rather than tied to a shift_id — see the
   // DompetClosing model doc comment for the reconciliation note for
   // when Shift lands. Still pre-release, straight recreate.
-  static const _dbVersion = 8;
+  // v9: added the `branches` table (Manajemen Cabang, reached from the
+  // swipe-up grid's Cabang tile — the slot Laba Rugi used to occupy
+  // before it moved into Laporan as a report type). `branches` is an
+  // already-specified logical entity in docs/handoff/04_DATABASE_
+  // CONTRACT.md, not a new invention. Seeded with the one store the app
+  // already implicitly assumes everywhere ("Mamam Ayam" is hardcoded in
+  // PengaturanScreen today), so the screen shows real, editable data
+  // rather than a mock row. Still pre-release, straight recreate.
+  //
+  // NOT added here on purpose: any branch_id FK on transactions /
+  // cash_movements / menu prices. Branch-scoped data is specified in the
+  // PRD but wiring it retroactively changes how every existing report
+  // and balance is computed — that belongs in its own phase, not in a
+  // change that adds a management screen.
+  static const _dbVersion = 9;
 
   // TODO(security-foundation): replace with a key generated once and
   // stored via flutter_secure_storage, per AGENTS.md.
@@ -405,6 +419,24 @@ class AppDatabase {
       )
     ''');
 
+    // --- Cabang / Toko ---
+    // One row per physical outlet. `is_active` is an operational
+    // on/off for the outlet itself — it is NOT a soft-delete and NOT
+    // "sold out"; an inactive branch keeps all its history, same
+    // Nonaktif semantics the PRD uses for menu masters.
+    await db.execute('''
+      CREATE TABLE branches (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        address TEXT,
+        phone TEXT,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    ''');
+
     await _seedDemoData(db);
   }
 
@@ -561,6 +593,22 @@ class AppDatabase {
       'name': 'Dompet Toko',
       'staff_id': null,
       'is_active': 1,
+      'created_at': now,
+      'updated_at': now,
+    });
+
+    // The one outlet that actually exists. Not placeholder content —
+    // "Mamam Ayam" is already hardcoded into PengaturanScreen, this just
+    // gives it a real row to live in so Manajemen Cabang reads data
+    // instead of rendering a constant. Seeded active; deactivating is a
+    // deliberate user action on the screen, not a default.
+    await db.insert('branches', {
+      'id': 'branch-cibarusah',
+      'name': 'Mamam Ayam',
+      'address': 'Cibarusah, Bekasi',
+      'phone': '+6283805192127',
+      'is_active': 1,
+      'sort_order': 0,
       'created_at': now,
       'updated_at': now,
     });

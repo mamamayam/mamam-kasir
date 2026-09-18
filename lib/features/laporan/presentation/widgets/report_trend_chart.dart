@@ -101,7 +101,13 @@ class _ReportChartPainter extends CustomPainter {
 
     Offset pointAt(int i) {
       final x = stepX * i;
-      final y = chartBottom - (points[i].value / axisMax).clamp(0, 1) * (chartBottom - chartTop);
+      // NOTE: keep every operand here a `double`. Dart only special-cases
+      // `clamp()` to return the receiver's type when receiver AND both
+      // bounds are all int or all double — `someDouble.clamp(0, 1)` is
+      // statically `num`, which makes `y` a `num` and fails to compile at
+      // `Offset(x, y)`. That is exactly what broke this screen before.
+      final ratio = axisMax <= 0 ? 0.0 : (points[i].value / axisMax).clamp(0.0, 1.0);
+      final y = chartBottom - ratio * (chartBottom - chartTop);
       return Offset(x, y);
     }
 

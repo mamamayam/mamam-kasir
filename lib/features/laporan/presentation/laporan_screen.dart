@@ -6,6 +6,9 @@ import '../../../core/navigation/app_nav.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_spacing.dart';
 import '../../../core/utils/currency.dart';
+import '../../../core/widgets/app_button.dart';
+import '../../../core/widgets/app_card_shell.dart';
+import '../../../core/widgets/app_empty_state.dart';
 import '../../../core/widgets/ios_page_header.dart';
 import '../application/laporan_provider.dart';
 import '../domain/laporan_models.dart';
@@ -13,12 +16,17 @@ import 'widgets/month_picker_sheet.dart';
 import 'widgets/report_trend_chart.dart';
 import 'widgets/report_type_picker_sheet.dart';
 
-/// Laporan (Reports) screen, ported 1:1 from the approved HTML mockup:
-/// report-type + month filter pills, a trend chart, 4 stat cards, and a
-/// transaction list. Pendapatan/Pengeluaran are fully wired to real
-/// data; Laba/Produk/Customer show a "Segera Hadir" placeholder body
-/// (selectable in the picker, matching the mockup, but with no designed
-/// report content yet).
+/// Laporan (Reports) screen: report-type + month filter pills, a trend
+/// chart, 4 stat cards, and a transaction list. Pendapatan/Pengeluaran
+/// are fully wired to real data; Laba Rugi/Produk/Customer show a
+/// "Segera Hadir" placeholder body (selectable in the picker, with no
+/// designed report content yet).
+///
+/// Every branch of the body is a scrollable wrapped in a
+/// [RefreshIndicator] with [AlwaysScrollableScrollPhysics], per
+/// docs/refresh-pattern.md — including the empty and error states, so
+/// swipe-down retry works exactly where it matters most (AGENTS.md:
+/// "Errors preserve data and support swipe-down retry").
 class LaporanScreen extends ConsumerWidget {
   const LaporanScreen({super.key});
 
@@ -28,6 +36,14 @@ class LaporanScreen extends ConsumerWidget {
     final controller = ref.read(laporanProvider.notifier);
     final isIncome = state.reportType == ReportType.pendapatan;
     final accentColor = isIncome ? AppColors.info : AppColors.danger;
+
+    ref.listen(laporanProvider, (previous, next) {
+      if (next.errorMessage != null && next.errorMessage != previous?.errorMessage) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(next.errorMessage!), backgroundColor: AppColors.danger),
+        );
+      }
+    });
 
     return Scaffold(
       backgroundColor: AppColors.background,
@@ -66,15 +82,14 @@ class LaporanScreen extends ConsumerWidget {
             const SizedBox(height: AppSpacing.lg),
             Expanded(
               child: state.isLoading
-                  ? Center(child: CircularProgressIndicator(color: accentColor))
-                  : state.errorMessage != null
-                      ? _ReportErrorBody(
-                          message: state.errorMessage!,
-                          onRetry: controller.load,
-                        )
-                      : !state.reportType.isImplemented
-                          ? const _ComingSoonBody()
-                          : _ReportBody(state: state, accentColor: accentColor),
+                  // Component standards §14: full-screen loading is always
+                  // AppColors.brand, even on a screen with its own accent.
+                  ? const Center(child: CircularProgressIndicator(color: AppColors.brand))
+                  : RefreshIndicator(
+                      color: AppColors.brand,
+                      onRefresh: controller.load,
+                      child: _Body(state: state, accentColor: accentColor, onRetry: controller.load),
+                    ),
             ),
           ],
         ),
@@ -86,10 +101,76 @@ class LaporanScreen extends ConsumerWidget {
     final controller = ref.read(laporanProvider.notifier);
     AppNav.showModal(
       context,
-      isScrollControlled: false,
       builder: (_) => ReportTypePickerSheet(
         current: ref.read(laporanProvider).reportType,
         onSelect: controller.setReportType,
+      ),
+    );
+  }
+}
+
+/// Picks which body to show. Kept as one widget so the three states
+/// (error / not-yet-built / real report) all sit under the same
+/// RefreshIndicator rather than each screen branch re-deciding.
+class _Body extends StatelessWidget {
+  final LaporanState state;
+  final Color accentColor;
+  final Future<void> Function() onRetry;
+
+  const _Body({required this.state, required this.accentColor, required this.onRetry});
+
+  @override
+  Widget build(BuildContext context) {
+    if (state.errorMessage != null) {
+      return _CenteredScrollable(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const AppEmptyState(
+              icon: Icons.cloud_off_rounded,
+              title: 'Laporan gagal dimuat',
+              subtitle: 'Tarik ke bawah untuk memuat ulang.',
+            ),
+            const SizedBox(height: AppSpacing.lg),
+            SizedBox(
+              width: 180,
+              child: AppButton.secondary(label: 'Coba Lagi', onPressed: onRetry),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (!state.reportType.isImplemented) {
+      return _CenteredScrollable(
+        child: AppEmptyState(
+          icon: Icons.construction_rounded,
+          title: 'Segera Hadir',
+          subtitle: 'Laporan ${state.reportType.label} belum tersedia.',
+        ),
+      );
+    }
+
+    return _ReportBody(state: state, accentColor: accentColor);
+  }
+}
+
+/// A scrollable that still fills the viewport, so the content centers
+/// properly AND RefreshIndicator can detect a pull even though the
+/// content is shorter than the screen (docs/refresh-pattern.md step 4).
+class _CenteredScrollable extends StatelessWidget {
+  final Widget child;
+  const _CenteredScrollable({required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) => ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
+        children: [
+          SizedBox(height: constraints.maxHeight, child: Center(child: child)),
+        ],
       ),
     );
   }
@@ -130,7 +211,7 @@ class _FilterPill extends StatelessWidget {
                 style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
               ),
             ),
-            const SizedBox(width: 4),
+            const SizedBox(width: AppSpacing.xs),
             const Icon(Icons.keyboard_arrow_down_rounded, size: 18, color: AppColors.textMuted),
           ],
         ),
@@ -150,11 +231,11 @@ class _ReportBody extends StatelessWidget {
     final isIncome = state.reportType == ReportType.pendapatan;
 
     return ListView(
+      physics: const AlwaysScrollableScrollPhysics(),
       padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.xxl),
       children: [
-        Container(
-          padding: const EdgeInsets.all(AppSpacing.lg),
-          decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.xl)),
+        AppCardShell(
+          padding: const EdgeInsets.all(AppSpacing.md),
           child: ReportTrendChart(points: data.trend, color: accentColor),
         ),
         const SizedBox(height: AppSpacing.lg),
@@ -201,23 +282,22 @@ class _ReportBody extends StatelessWidget {
         if (data.rows.isEmpty)
           Padding(
             padding: const EdgeInsets.symmetric(vertical: AppSpacing.xxl),
-            child: Center(
-              child: Text(
-                isIncome ? 'Belum ada transaksi bulan ini.' : 'Belum ada pengeluaran bulan ini.',
-                style: const TextStyle(fontSize: 13, color: AppColors.textMuted),
-              ),
+            child: AppEmptyState(
+              icon: Icons.receipt_long_rounded,
+              title: isIncome ? 'Belum ada transaksi' : 'Belum ada pengeluaran',
+              subtitle: 'Tidak ada data pada bulan ini.',
             ),
           )
         else
-          Container(
-            decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.lg)),
+          AppCardShell(
+            padding: EdgeInsets.zero,
             child: Column(
               children: data.rows.asMap().entries.map((entry) {
                 final row = entry.value;
                 final isLast = entry.key == data.rows.length - 1;
                 return Container(
                   decoration: BoxDecoration(border: isLast ? null : const Border(bottom: BorderSide(color: AppColors.border))),
-                  padding: const EdgeInsets.all(AppSpacing.lg),
+                  padding: const EdgeInsets.all(AppSpacing.md),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
@@ -225,12 +305,25 @@ class _ReportBody extends StatelessWidget {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text(row.title, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
-                            const SizedBox(height: 2),
-                            Text(row.subtitle, style: const TextStyle(fontSize: 13, color: AppColors.textMuted)),
+                            Text(
+                              row.title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: AppColors.textPrimary),
+                            ),
+                            if (row.subtitle.isNotEmpty) ...[
+                              const SizedBox(height: AppSpacing.xs),
+                              Text(
+                                row.subtitle,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.textMuted),
+                              ),
+                            ],
                           ],
                         ),
                       ),
+                      const SizedBox(width: AppSpacing.sm),
                       Text(
                         formatRupiah(row.amount),
                         style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: accentColor),
@@ -254,74 +347,31 @@ class _StatCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(AppSpacing.lg),
-      decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.lg)),
+    return AppCardShell(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
               Icon(icon, size: 15, color: AppColors.textSecondary),
-              const SizedBox(width: 6),
+              const SizedBox(width: AppSpacing.xs),
               Expanded(
-                child: Text(label, style: const TextStyle(fontSize: 12.5, color: AppColors.textSecondary), overflow: TextOverflow.ellipsis),
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.textSecondary),
+                ),
               ),
             ],
           ),
-          const SizedBox(height: 6),
-          Text(value, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
-        ],
-      ),
-    );
-  }
-}
-
-class _ReportErrorBody extends StatelessWidget {
-  final String message;
-  final VoidCallback onRetry;
-  const _ReportErrorBody({required this.message, required this.onRetry});
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xl),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.error_outline_rounded, size: 40, color: AppColors.textMuted),
-            const SizedBox(height: AppSpacing.md),
-            const Text('Gagal Memuat Laporan', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
-            const SizedBox(height: 4),
-            Text(
-              message,
-              textAlign: TextAlign.center,
-              style: const TextStyle(fontSize: 13, color: AppColors.textMuted),
-            ),
-            const SizedBox(height: AppSpacing.lg),
-            TextButton(onPressed: onRetry, child: const Text('Coba Lagi')),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _ComingSoonBody extends StatelessWidget {
-  const _ComingSoonBody();
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Icon(Icons.construction_rounded, size: 40, color: AppColors.textMuted),
-          const SizedBox(height: AppSpacing.md),
-          const Text('Segera Hadir', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
-          const SizedBox(height: 4),
-          const Text('Laporan ini belum tersedia.', style: TextStyle(fontSize: 13, color: AppColors.textMuted)),
+          const SizedBox(height: AppSpacing.xs),
+          Text(
+            value,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
+          ),
         ],
       ),
     );

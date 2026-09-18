@@ -25,12 +25,23 @@ class IosPageHeader extends StatelessWidget implements PreferredSizeWidget {
   final IconData? trailingIcon;
   final VoidCallback? onTrailingTap;
 
+  /// Custom right-side widget, for the rare header whose action button
+  /// needs more than a plain icon (e.g. Manajemen Cabang's "+" with a
+  /// premium badge overlaid on it). Takes precedence over
+  /// [trailingIcon]/[onTrailingTap] when set.
+  ///
+  /// This is an extension point, not an escape hatch: build it out of
+  /// the standard 44x44 circular button (`AppIconButton.standard`) so
+  /// the header keeps one shape everywhere, per component standards §6.
+  final Widget? trailing;
+
   const IosPageHeader({
     super.key,
     required this.title,
     this.onBack,
     this.trailingIcon,
     this.onTrailingTap,
+    this.trailing,
   });
 
   @override
@@ -58,7 +69,9 @@ class IosPageHeader extends StatelessWidget implements PreferredSizeWidget {
                 onTap: onBack ?? () => Navigator.of(context).pop(),
               ),
             ),
-            if (trailingIcon != null)
+            if (trailing != null)
+              Align(alignment: Alignment.centerRight, child: trailing!)
+            else if (trailingIcon != null)
               Align(
                 alignment: Alignment.centerRight,
                 child: _CircleIconButton(icon: trailingIcon!, onTap: onTrailingTap),

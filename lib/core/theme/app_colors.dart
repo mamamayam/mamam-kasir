@@ -40,7 +40,7 @@ class AppColors {
   // keeps its own hue for recognition.
   static const Color tileDompet = Color(0xFF7C5FC7); // purple
   static const Color tileMenu = Color(0xFF3B7DD9); // blue (matches info)
-  static const Color tileLabaRugi = Color(0xFF2FA36B); // green (matches success)
+  static const Color tileCabang = Color(0xFF2FA36B); // green (matches success)
   static const Color tileKas = Color(0xFFE0554A); // red (matches danger)
   static const Color tilePelanggan = Color(0xFFD6478E); // pink
   static const Color tileLaporan = Color(0xFF5B5FE0); // indigo
