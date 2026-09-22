@@ -33,10 +33,10 @@ index b0bf7e8..f4d8e45 100644
      MenuGridItem(
 diff --git a/lib/features/menu_shell/presentation/placeholders/laporan_mockup_placeholder_screen.dart b/lib/features/menu_shell/presentation/placeholders/laporan_mockup_placeholder_screen.dart
 new file mode 100644
-index 0000000..3c27e55
+index 0000000..b8a23df
 --- /dev/null
 +++ b/lib/features/menu_shell/presentation/placeholders/laporan_mockup_placeholder_screen.dart
-@@ -0,0 +1,507 @@
+@@ -0,0 +1,514 @@
 +import 'package:flutter/material.dart';
 +
 +import '../../../../core/theme/app_colors.dart';
@@ -292,12 +292,19 @@ index 0000000..3c27e55
 +
 +  @override
 +  Widget build(BuildContext context) {
-+    return AspectRatio(
-+      aspectRatio: 320 / 260,
-+      child: CustomPaint(
-+        painter: _TrendChartPainter(points: points, color: color),
-+        child: const SizedBox.expand(),
-+      ),
++    return LayoutBuilder(
++      builder: (context, constraints) {
++        final width = constraints.hasBoundedWidth ? constraints.maxWidth : 320.0;
++        final height = width * (260 / 320);
++        return SizedBox(
++          width: width,
++          height: height,
++          child: CustomPaint(
++            size: Size(width, height),
++            painter: _TrendChartPainter(points: points, color: color),
++          ),
++        );
++      },
 +    );
 +  }
 +}

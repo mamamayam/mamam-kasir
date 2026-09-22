@@ -243,9 +243,11 @@ class _StatCard extends StatelessWidget {
   }
 }
 
-/// Static line+area chart, redrawn with CustomPainter to match the
-/// mockup's SVG (same plot-area math, gridlines, and Rp axis labels) —
-/// no chart package, no live data, purely decorative demo output.
+/// Static placeholder in place of the chart — a plain flat box with an
+/// icon and label, fixed height, no CustomPainter/canvas work at all.
+/// Kept intentionally dumb (per instruction: "grafiknya dummy aja") so
+/// it can never produce a layout/render exception the way a custom
+/// painter driven by ambiguous constraints could.
 class _MockTrendChart extends StatelessWidget {
   final List<double> points;
   final Color color;
@@ -253,85 +255,27 @@ class _MockTrendChart extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return AspectRatio(
-      aspectRatio: 320 / 260,
-      child: CustomPaint(
-        painter: _TrendChartPainter(points: points, color: color),
-        child: const SizedBox.expand(),
+    return Container(
+      height: 160,
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(AppRadius.md),
+      ),
+      alignment: Alignment.center,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.show_chart_rounded, size: 32, color: color),
+          const SizedBox(height: AppSpacing.sm),
+          Text(
+            'Grafik tren',
+            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: color),
+          ),
+        ],
       ),
     );
   }
-}
-
-class _TrendChartPainter extends CustomPainter {
-  final List<double> points;
-  final Color color;
-  _TrendChartPainter({required this.points, required this.color});
-
-  static const double _maxVal = 60;
-  static const double _x0 = 34, _x1 = 300, _y0 = 215, _y1 = 20;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final scaleX = size.width / 320;
-    final scaleY = size.height / 260;
-
-    final gridPaint = Paint()
-      ..color = AppColors.border
-      ..strokeWidth = 1;
-    for (final y in [20.0, 75.0, 130.0, 185.0, 215.0]) {
-      canvas.drawLine(Offset(_x0 * scaleX, y * scaleY), Offset(_x1 * scaleX, y * scaleY), gridPaint);
-    }
-
-    const labelStyle = TextStyle(fontSize: 10.5, color: AppColors.textMuted);
-    void drawLabel(String text, double x, double y, {TextAlign align = TextAlign.left}) {
-      final tp = TextPainter(text: TextSpan(text: text, style: labelStyle), textDirection: TextDirection.ltr)..layout();
-      final dx = align == TextAlign.center ? x * scaleX - tp.width / 2 : x * scaleX;
-      tp.paint(canvas, Offset(dx, y * scaleY - tp.height));
-    }
-
-    drawLabel('Rp 60.0K', 0, 24);
-    drawLabel('Rp 40.0K', 0, 79);
-    drawLabel('Rp 20.0K', 0, 134);
-    drawLabel('Rp 0', 4, 219);
-    for (final entry in {34.0: '1', 90.0: '3', 146.0: '5', 202.0: '7', 258.0: '9', 300.0: '11'}.entries) {
-      drawLabel(entry.value, entry.key, 235, align: TextAlign.center);
-    }
-
-    if (points.isEmpty) return;
-    final step = (_x1 - _x0) / (points.length - 1);
-    final coords = <Offset>[
-      for (var i = 0; i < points.length; i++)
-        Offset(
-          (_x0 + step * i) * scaleX,
-          (_y0 - (points[i].clamp(0, _maxVal) / _maxVal) * (_y0 - _y1)) * scaleY,
-        ),
-    ];
-
-    final linePath = Path()..moveTo(coords.first.dx, coords.first.dy);
-    for (final c in coords.skip(1)) {
-      linePath.lineTo(c.dx, c.dy);
-    }
-
-    final areaPath = Path.from(linePath)
-      ..lineTo(coords.last.dx, _y0 * scaleY)
-      ..lineTo(coords.first.dx, _y0 * scaleY)
-      ..close();
-
-    canvas.drawPath(areaPath, Paint()..color = color.withValues(alpha: 0.08));
-    canvas.drawPath(
-      linePath,
-      Paint()
-        ..color = color
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 2.6
-        ..strokeCap = StrokeCap.round
-        ..strokeJoin = StrokeJoin.round,
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant _TrendChartPainter oldDelegate) => oldDelegate.points != points || oldDelegate.color != color;
 }
 
 class _MockReportTypePickerSheet extends StatelessWidget {

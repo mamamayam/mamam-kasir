@@ -1,0 +1,30 @@
+diff --git a/lib/features/menu_shell/presentation/placeholders/laporan_mockup_placeholder_screen.dart b/lib/features/menu_shell/presentation/placeholders/laporan_mockup_placeholder_screen.dart
+index 3c27e55..b8a23df 100644
+--- a/lib/features/menu_shell/presentation/placeholders/laporan_mockup_placeholder_screen.dart
++++ b/lib/features/menu_shell/presentation/placeholders/laporan_mockup_placeholder_screen.dart
+@@ -253,12 +253,19 @@ class _MockTrendChart extends StatelessWidget {
+ 
+   @override
+   Widget build(BuildContext context) {
+-    return AspectRatio(
+-      aspectRatio: 320 / 260,
+-      child: CustomPaint(
+-        painter: _TrendChartPainter(points: points, color: color),
+-        child: const SizedBox.expand(),
+-      ),
++    return LayoutBuilder(
++      builder: (context, constraints) {
++        final width = constraints.hasBoundedWidth ? constraints.maxWidth : 320.0;
++        final height = width * (260 / 320);
++        return SizedBox(
++          width: width,
++          height: height,
++          child: CustomPaint(
++            size: Size(width, height),
++            painter: _TrendChartPainter(points: points, color: color),
++          ),
++        );
++      },
+     );
+   }
+ }
