@@ -1,0 +1,1580 @@
+From 5bbe038ba4ccfaa7f2110d0e65b8f8a554c2380a Mon Sep 17 00:00:00 2001
+From: Mamam Kasir Dev <dev@mamamayam.local>
+Date: Fri, 18 Sep 2026 15:10:16 +0000
+Subject: [PATCH] fix(laporan): repair num/double compile error, dispose race,
+ expense source; move Laba Rugi into Laporan and add Manajemen Cabang
+
+---
+ lib/core/data/app_database.dart               |  50 ++-
+ lib/core/theme/app_colors.dart                |   2 +-
+ lib/core/widgets/ios_page_header.dart         |  15 +-
+ .../cabang/application/cabang_provider.dart   |  72 +++++
+ .../cabang/application/cabang_repository.dart |  32 ++
+ lib/features/cabang/domain/cabang_models.dart |  76 +++++
+ .../presentation/manajemen_cabang_screen.dart | 297 ++++++++++++++++++
+ .../laporan/application/laporan_provider.dart |  55 +++-
+ .../application/laporan_repository.dart       | 208 ++++++++----
+ .../laporan/domain/laporan_models.dart        |  22 +-
+ .../laporan/presentation/laporan_screen.dart  | 192 +++++++----
+ .../widgets/report_trend_chart.dart           |   8 +-
+ .../widgets/report_type_picker_sheet.dart     | 122 +++----
+ .../presentation/menu_grid_items.dart         |  14 +-
+ 14 files changed, 978 insertions(+), 187 deletions(-)
+ create mode 100644 lib/features/cabang/application/cabang_provider.dart
+ create mode 100644 lib/features/cabang/application/cabang_repository.dart
+ create mode 100644 lib/features/cabang/domain/cabang_models.dart
+ create mode 100644 lib/features/cabang/presentation/manajemen_cabang_screen.dart
+
+diff --git a/lib/core/data/app_database.dart b/lib/core/data/app_database.dart
+index ff02556..20c0f9a 100644
+--- a/lib/core/data/app_database.dart
++++ b/lib/core/data/app_database.dart
+@@ -55,7 +55,21 @@ class AppDatabase {
+   // previous closing" rather than tied to a shift_id — see the
+   // DompetClosing model doc comment for the reconciliation note for
+   // when Shift lands. Still pre-release, straight recreate.
+-  static const _dbVersion = 8;
++  // v9: added the `branches` table (Manajemen Cabang, reached from the
++  // swipe-up grid's Cabang tile — the slot Laba Rugi used to occupy
++  // before it moved into Laporan as a report type). `branches` is an
++  // already-specified logical entity in docs/handoff/04_DATABASE_
++  // CONTRACT.md, not a new invention. Seeded with the one store the app
++  // already implicitly assumes everywhere ("Mamam Ayam" is hardcoded in
++  // PengaturanScreen today), so the screen shows real, editable data
++  // rather than a mock row. Still pre-release, straight recreate.
++  //
++  // NOT added here on purpose: any branch_id FK on transactions /
++  // cash_movements / menu prices. Branch-scoped data is specified in the
++  // PRD but wiring it retroactively changes how every existing report
++  // and balance is computed — that belongs in its own phase, not in a
++  // change that adds a management screen.
++  static const _dbVersion = 9;
+ 
+   // TODO(security-foundation): replace with a key generated once and
+   // stored via flutter_secure_storage, per AGENTS.md.
+@@ -405,6 +419,24 @@ class AppDatabase {
+       )
+     ''');
+ 
++    // --- Cabang / Toko ---
++    // One row per physical outlet. `is_active` is an operational
++    // on/off for the outlet itself — it is NOT a soft-delete and NOT
++    // "sold out"; an inactive branch keeps all its history, same
++    // Nonaktif semantics the PRD uses for menu masters.
++    await db.execute('''
++      CREATE TABLE branches (
++        id TEXT PRIMARY KEY,
++        name TEXT NOT NULL,
++        address TEXT,
++        phone TEXT,
++        is_active INTEGER NOT NULL DEFAULT 1,
++        sort_order INTEGER NOT NULL DEFAULT 0,
++        created_at TEXT NOT NULL,
++        updated_at TEXT NOT NULL
++      )
++    ''');
++
+     await _seedDemoData(db);
+   }
+ 
+@@ -565,6 +597,22 @@ class AppDatabase {
+       'updated_at': now,
+     });
+ 
++    // The one outlet that actually exists. Not placeholder content —
++    // "Mamam Ayam" is already hardcoded into PengaturanScreen, this just
++    // gives it a real row to live in so Manajemen Cabang reads data
++    // instead of rendering a constant. Seeded active; deactivating is a
++    // deliberate user action on the screen, not a default.
++    await db.insert('branches', {
++      'id': 'branch-cibarusah',
++      'name': 'Mamam Ayam',
++      'address': 'Cibarusah, Bekasi',
++      'phone': '+6283805192127',
++      'is_active': 1,
++      'sort_order': 0,
++      'created_at': now,
++      'updated_at': now,
++    });
++
+     await _seedIngredients(db, now);
+     await _seedSampleTransactions(db);
+   }
+diff --git a/lib/core/theme/app_colors.dart b/lib/core/theme/app_colors.dart
+index d44a4d1..ffbee8e 100644
+--- a/lib/core/theme/app_colors.dart
++++ b/lib/core/theme/app_colors.dart
+@@ -40,7 +40,7 @@ class AppColors {
+   // keeps its own hue for recognition.
+   static const Color tileDompet = Color(0xFF7C5FC7); // purple
+   static const Color tileMenu = Color(0xFF3B7DD9); // blue (matches info)
+-  static const Color tileLabaRugi = Color(0xFF2FA36B); // green (matches success)
++  static const Color tileCabang = Color(0xFF2FA36B); // green (matches success)
+   static const Color tileKas = Color(0xFFE0554A); // red (matches danger)
+   static const Color tilePelanggan = Color(0xFFD6478E); // pink
+   static const Color tileLaporan = Color(0xFF5B5FE0); // indigo
+diff --git a/lib/core/widgets/ios_page_header.dart b/lib/core/widgets/ios_page_header.dart
+index 186511a..80f37ce 100644
+--- a/lib/core/widgets/ios_page_header.dart
++++ b/lib/core/widgets/ios_page_header.dart
+@@ -25,12 +25,23 @@ class IosPageHeader extends StatelessWidget implements PreferredSizeWidget {
+   final IconData? trailingIcon;
+   final VoidCallback? onTrailingTap;
+ 
++  /// Custom right-side widget, for the rare header whose action button
++  /// needs more than a plain icon (e.g. Manajemen Cabang's "+" with a
++  /// premium badge overlaid on it). Takes precedence over
++  /// [trailingIcon]/[onTrailingTap] when set.
++  ///
++  /// This is an extension point, not an escape hatch: build it out of
++  /// the standard 44x44 circular button (`AppIconButton.standard`) so
++  /// the header keeps one shape everywhere, per component standards §6.
++  final Widget? trailing;
++
+   const IosPageHeader({
+     super.key,
+     required this.title,
+     this.onBack,
+     this.trailingIcon,
+     this.onTrailingTap,
++    this.trailing,
+   });
+ 
+   @override
+@@ -58,7 +69,9 @@ class IosPageHeader extends StatelessWidget implements PreferredSizeWidget {
+                 onTap: onBack ?? () => Navigator.of(context).pop(),
+               ),
+             ),
+-            if (trailingIcon != null)
++            if (trailing != null)
++              Align(alignment: Alignment.centerRight, child: trailing!)
++            else if (trailingIcon != null)
+               Align(
+                 alignment: Alignment.centerRight,
+                 child: _CircleIconButton(icon: trailingIcon!, onTap: onTrailingTap),
+diff --git a/lib/features/cabang/application/cabang_provider.dart b/lib/features/cabang/application/cabang_provider.dart
+new file mode 100644
+index 0000000..ac61771
+--- /dev/null
++++ b/lib/features/cabang/application/cabang_provider.dart
+@@ -0,0 +1,72 @@
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../domain/cabang_models.dart';
++import 'cabang_repository.dart';
++
++final cabangRepositoryProvider = Provider<CabangRepository>((ref) => CabangRepository());
++
++class CabangState {
++  final List<Cabang> branches;
++  final bool isLoading;
++  final String? errorMessage;
++
++  const CabangState({
++    this.branches = const [],
++    this.isLoading = true,
++    this.errorMessage,
++  });
++
++  CabangState copyWith({
++    List<Cabang>? branches,
++    bool? isLoading,
++    String? errorMessage,
++    bool clearError = false,
++  }) {
++    return CabangState(
++      branches: branches ?? this.branches,
++      isLoading: isLoading ?? this.isLoading,
++      errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
++    );
++  }
++
++  CabangSummary get summary => CabangSummary(
++        maxBranches: kDefaultMaxBranches,
++        totalBranches: branches.length,
++        activeBranches: branches.where((b) => b.isActive).length,
++      );
++}
++
++final cabangProvider = StateNotifierProvider.autoDispose<CabangController, CabangState>((ref) {
++  return CabangController(ref.watch(cabangRepositoryProvider));
++});
++
++class CabangController extends StateNotifier<CabangState> {
++  final CabangRepository _repository;
++
++  CabangController(this._repository) : super(const CabangState()) {
++    load();
++  }
++
++  Future<void> load() async {
++    if (!mounted) return;
++    state = state.copyWith(isLoading: true, clearError: true);
++    try {
++      final branches = await _repository.getBranches();
++      if (!mounted) return;
++      state = state.copyWith(branches: branches, isLoading: false, clearError: true);
++    } catch (e) {
++      if (!mounted) return;
++      state = state.copyWith(isLoading: false, errorMessage: 'Gagal memuat data cabang: $e');
++    }
++  }
++
++  Future<void> toggleActive(Cabang branch) async {
++    try {
++      await _repository.setActive(branch.id, !branch.isActive);
++      await load();
++    } catch (e) {
++      if (!mounted) return;
++      state = state.copyWith(errorMessage: 'Gagal mengubah status cabang: $e');
++    }
++  }
++}
+diff --git a/lib/features/cabang/application/cabang_repository.dart b/lib/features/cabang/application/cabang_repository.dart
+new file mode 100644
+index 0000000..44b886e
+--- /dev/null
++++ b/lib/features/cabang/application/cabang_repository.dart
+@@ -0,0 +1,32 @@
++import 'package:sqflite_sqlcipher/sqflite.dart';
++
++import '../../../core/data/app_database.dart';
++import '../domain/cabang_models.dart';
++
++/// Reads/writes the `branches` table for Manajemen Cabang.
++///
++/// Read-only plus an activate/deactivate toggle for now. Create/edit/
++/// delete are deliberately not here yet: adding a branch is entangled
++/// with branch-scoped menu prices, user branch access and the "Maks
++/// Toko" ceiling, none of which exist — see kDefaultMaxBranches.
++class CabangRepository {
++  Future<Database> get _db => AppDatabase.instance.database;
++
++  Future<List<Cabang>> getBranches() async {
++    final db = await _db;
++    final rows = await db.query('branches', orderBy: 'sort_order ASC, name ASC');
++    return rows.map(Cabang.fromRow).toList();
++  }
++
++  /// Flips a branch's operational on/off state. Never deletes — an
++  /// inactive branch keeps all of its history (see [Cabang.isActive]).
++  Future<void> setActive(String id, bool isActive) async {
++    final db = await _db;
++    await db.update(
++      'branches',
++      {'is_active': isActive ? 1 : 0, 'updated_at': DateTime.now().toIso8601String()},
++      where: 'id = ?',
++      whereArgs: [id],
++    );
++  }
++}
+diff --git a/lib/features/cabang/domain/cabang_models.dart b/lib/features/cabang/domain/cabang_models.dart
+new file mode 100644
+index 0000000..c17fd0a
+--- /dev/null
++++ b/lib/features/cabang/domain/cabang_models.dart
+@@ -0,0 +1,76 @@
++/// One outlet (cabang/toko).
++///
++/// [isActive] is an operational on/off for the outlet, NOT a soft
++/// delete: an inactive branch keeps every transaction, expense and
++/// report row it ever produced. Same Nonaktif semantics the PRD applies
++/// to menu masters — "master data used by history cannot hard-delete;
++/// use Nonaktif".
++class Cabang {
++  final String id;
++  final String name;
++  final String? address;
++  final String? phone;
++  final bool isActive;
++  final int sortOrder;
++
++  const Cabang({
++    required this.id,
++    required this.name,
++    this.address,
++    this.phone,
++    required this.isActive,
++    this.sortOrder = 0,
++  });
++
++  factory Cabang.fromRow(Map<String, Object?> row) {
++    return Cabang(
++      id: row['id'] as String,
++      name: row['name'] as String,
++      address: row['address'] as String?,
++      phone: row['phone'] as String?,
++      isActive: (row['is_active'] as int? ?? 1) == 1,
++      sortOrder: row['sort_order'] as int? ?? 0,
++    );
++  }
++
++  /// Phone shown as-is when it's already in `+62` form, otherwise
++  /// untouched. Deliberately NOT reformatted to the customer-phone rule
++  /// ("display starting 08, grouped every four digits") — that rule is
++  /// specified for the Customer module, and a branch's contact number
++  /// isn't a customer phone.
++  String get displayPhone => (phone ?? '').trim();
++
++  bool get hasPhone => displayPhone.isNotEmpty;
++
++  String get displayAddress => (address ?? '').trim();
++
++  bool get hasAddress => displayAddress.isNotEmpty;
++}
++
++/// Aggregate shown in the three cards at the top of Manajemen Cabang.
++class CabangSummary {
++  final int maxBranches;
++  final int totalBranches;
++  final int activeBranches;
++
++  const CabangSummary({
++    required this.maxBranches,
++    required this.totalBranches,
++    required this.activeBranches,
++  });
++
++  bool get isAtLimit => totalBranches >= maxBranches;
++
++  static const empty = CabangSummary(maxBranches: kDefaultMaxBranches, totalBranches: 0, activeBranches: 0);
++}
++
++/// Ceiling shown as "Maks Toko".
++///
++/// UNSPECIFIED by design: the PRD has no subscription/plan tiering, so
++/// this is a single constant rather than an invented billing rule. The
++/// screen reads it from here and disables "+" once the ceiling is hit,
++/// which reproduces the reference screenshot's behaviour (Maks Toko 1,
++/// Toko 1, premium badge on the add button) without pretending a plan
++/// system exists. When plans are actually specified, replace this
++/// constant with a real lookup — nothing else needs to move.
++const int kDefaultMaxBranches = 1;
+diff --git a/lib/features/cabang/presentation/manajemen_cabang_screen.dart b/lib/features/cabang/presentation/manajemen_cabang_screen.dart
+new file mode 100644
+index 0000000..0cc18d1
+--- /dev/null
++++ b/lib/features/cabang/presentation/manajemen_cabang_screen.dart
+@@ -0,0 +1,297 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../../../core/theme/app_colors.dart';
++import '../../../core/theme/app_spacing.dart';
++import '../../../core/widgets/app_card_shell.dart';
++import '../../../core/widgets/app_empty_state.dart';
++import '../../../core/widgets/app_icon_button.dart';
++import '../../../core/widgets/app_status_badge.dart';
++import '../../../core/widgets/ios_page_header.dart';
++import '../application/cabang_provider.dart';
++import '../domain/cabang_models.dart';
++
++/// Manajemen Cabang (Manajemen Toko) — reached from the swipe-up grid's
++/// Cabang tile, the slot Laba Rugi used to occupy before it moved into
++/// Laporan as a report type.
++///
++/// Ported from the supplied reference screenshot: header with a back
++/// button and a "+" carrying a premium badge, a three-up stat row (Maks
++/// Toko / Toko / Aktif), then one card per outlet with its address,
++/// phone and an AKTIF/NONAKTIF status badge.
++///
++/// What is real and what is not, on purpose:
++/// - The list, the counts and the status toggle all read/write the
++///   `branches` table. Nothing on this screen is a hardcoded constant.
++/// - "Maks Toko" is [kDefaultMaxBranches], a single constant. The PRD
++///   has no subscription/plan tiering, so the ceiling is not invented as
++///   a billing rule — the "+" simply explains it is unavailable rather
++///   than opening a create form that cannot honour a limit nobody has
++///   specified yet.
++class ManajemenCabangScreen extends ConsumerWidget {
++  const ManajemenCabangScreen({super.key});
++
++  @override
++  Widget build(BuildContext context, WidgetRef ref) {
++    final state = ref.watch(cabangProvider);
++    final controller = ref.read(cabangProvider.notifier);
++    final summary = state.summary;
++
++    ref.listen(cabangProvider, (previous, next) {
++      if (next.errorMessage != null && next.errorMessage != previous?.errorMessage) {
++        ScaffoldMessenger.of(context).showSnackBar(
++          SnackBar(content: Text(next.errorMessage!), backgroundColor: AppColors.danger),
++        );
++      }
++    });
++
++    return Scaffold(
++      backgroundColor: AppColors.background,
++      body: SafeArea(
++        child: Column(
++          children: [
++            IosPageHeader(
++              title: const Text('Manajemen Toko'),
++              trailing: _AddBranchButton(
++                isLocked: summary.isAtLimit,
++                onTap: () => _onAddTapped(context, summary),
++              ),
++            ),
++            Padding(
++              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
++              child: Row(
++                children: [
++                  Expanded(child: _SummaryCard(value: '${summary.maxBranches}', label: 'Maks Toko')),
++                  const SizedBox(width: AppSpacing.md),
++                  Expanded(child: _SummaryCard(value: '${summary.totalBranches}', label: 'Toko')),
++                  const SizedBox(width: AppSpacing.md),
++                  Expanded(child: _SummaryCard(value: '${summary.activeBranches}', label: 'Aktif')),
++                ],
++              ),
++            ),
++            const SizedBox(height: AppSpacing.lg),
++            Expanded(
++              child: state.isLoading
++                  ? const Center(child: CircularProgressIndicator(color: AppColors.brand))
++                  : RefreshIndicator(
++                      color: AppColors.brand,
++                      onRefresh: controller.load,
++                      child: state.branches.isEmpty
++                          ? LayoutBuilder(
++                              builder: (context, constraints) => ListView(
++                                physics: const AlwaysScrollableScrollPhysics(),
++                                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
++                                children: [
++                                  SizedBox(
++                                    height: constraints.maxHeight,
++                                    child: const Center(
++                                      child: AppEmptyState(
++                                        icon: Icons.storefront_rounded,
++                                        title: 'Tidak ada data',
++                                        subtitle: 'Belum ada cabang yang terdaftar.',
++                                      ),
++                                    ),
++                                  ),
++                                ],
++                              ),
++                            )
++                          : ListView.separated(
++                              physics: const AlwaysScrollableScrollPhysics(),
++                              padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.xxl),
++                              itemCount: state.branches.length,
++                              separatorBuilder: (_, __) => const SizedBox(height: AppSpacing.md),
++                              itemBuilder: (context, index) {
++                                final branch = state.branches[index];
++                                return _BranchCard(
++                                  branch: branch,
++                                  onTap: () => _confirmToggle(context, controller, branch),
++                                );
++                              },
++                            ),
++                    ),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++
++  void _onAddTapped(BuildContext context, CabangSummary summary) {
++    ScaffoldMessenger.of(context).showSnackBar(
++      SnackBar(
++        content: Text(
++          summary.isAtLimit
++              ? 'Batas maksimal ${summary.maxBranches} toko sudah tercapai.'
++              : 'Tambah cabang belum tersedia.',
++        ),
++        backgroundColor: AppColors.warning,
++      ),
++    );
++  }
++
++  Future<void> _confirmToggle(BuildContext context, CabangController controller, Cabang branch) async {
++    final willActivate = !branch.isActive;
++    final confirmed = await showDialog<bool>(
++      context: context,
++      builder: (dialogContext) => AlertDialog(
++        title: Text(willActivate ? 'Aktifkan Toko?' : 'Nonaktifkan Toko?'),
++        content: Text(
++          willActivate
++              ? '${branch.name} akan kembali aktif dan bisa dipakai bertransaksi.'
++              : '${branch.name} tidak bisa dipakai bertransaksi. Semua riwayatnya tetap tersimpan.',
++        ),
++        actions: [
++          TextButton(onPressed: () => Navigator.of(dialogContext).pop(false), child: const Text('Batal')),
++          TextButton(
++            onPressed: () => Navigator.of(dialogContext).pop(true),
++            child: Text(
++              willActivate ? 'Aktifkan' : 'Nonaktifkan',
++              style: TextStyle(color: willActivate ? AppColors.success : AppColors.danger),
++            ),
++          ),
++        ],
++      ),
++    );
++
++    if (confirmed == true) await controller.toggleActive(branch);
++  }
++}
++
++/// The "+" button. When the branch ceiling is reached it keeps the same
++/// 44x44 circular shape (component standards §6) and overlays a small
++/// badge in the corner, matching the reference screenshot.
++class _AddBranchButton extends StatelessWidget {
++  final bool isLocked;
++  final VoidCallback onTap;
++
++  const _AddBranchButton({required this.isLocked, required this.onTap});
++
++  @override
++  Widget build(BuildContext context) {
++    final button = AppIconButton.standard(icon: Icons.add_rounded, onTap: onTap);
++    if (!isLocked) return button;
++
++    return Stack(
++      clipBehavior: Clip.none,
++      children: [
++        button,
++        Positioned(
++          top: -2,
++          right: -2,
++          child: Container(
++            width: 18,
++            height: 18,
++            decoration: const BoxDecoration(color: AppColors.warning, shape: BoxShape.circle),
++            child: const Icon(Icons.star_rounded, size: 11, color: Colors.white),
++          ),
++        ),
++      ],
++    );
++  }
++}
++
++class _SummaryCard extends StatelessWidget {
++  final String value;
++  final String label;
++
++  const _SummaryCard({required this.value, required this.label});
++
++  @override
++  Widget build(BuildContext context) {
++    return AppCardShell(
++      child: Column(
++        children: [
++          Text(
++            value,
++            maxLines: 1,
++            overflow: TextOverflow.ellipsis,
++            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
++          ),
++          const SizedBox(height: AppSpacing.xs),
++          Text(
++            label,
++            maxLines: 1,
++            overflow: TextOverflow.ellipsis,
++            style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: AppColors.textSecondary),
++          ),
++        ],
++      ),
++    );
++  }
++}
++
++class _BranchCard extends StatelessWidget {
++  final Cabang branch;
++  final VoidCallback onTap;
++
++  const _BranchCard({required this.branch, required this.onTap});
++
++  @override
++  Widget build(BuildContext context) {
++    return AppCardShell(
++      onTap: onTap,
++      child: Row(
++        crossAxisAlignment: CrossAxisAlignment.start,
++        children: [
++          // Not AppItemThumbnail: standards §9 scopes the initials avatar
++          // to product thumbnails specifically. A branch gets a plain
++          // storefront glyph, built from the same radius/color tokens.
++          Container(
++            width: 52,
++            height: 52,
++            decoration: BoxDecoration(
++              color: AppColors.background,
++              borderRadius: BorderRadius.circular(AppRadius.md),
++            ),
++            child: const Icon(Icons.storefront_rounded, size: 24, color: AppColors.textMuted),
++          ),
++          const SizedBox(width: AppSpacing.md),
++          Expanded(
++            child: Column(
++              crossAxisAlignment: CrossAxisAlignment.start,
++              children: [
++                Text(
++                  branch.name,
++                  maxLines: 1,
++                  overflow: TextOverflow.ellipsis,
++                  style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
++                ),
++                if (branch.hasAddress) ...[
++                  const SizedBox(height: AppSpacing.xs),
++                  Text(
++                    branch.displayAddress,
++                    maxLines: 2,
++                    overflow: TextOverflow.ellipsis,
++                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.textSecondary),
++                  ),
++                ],
++                if (branch.hasPhone) ...[
++                  const SizedBox(height: AppSpacing.xs),
++                  Row(
++                    children: [
++                      const Icon(Icons.phone_rounded, size: 13, color: AppColors.textMuted),
++                      const SizedBox(width: AppSpacing.xs),
++                      Expanded(
++                        child: Text(
++                          branch.displayPhone,
++                          maxLines: 1,
++                          overflow: TextOverflow.ellipsis,
++                          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.textMuted),
++                        ),
++                      ),
++                    ],
++                  ),
++                ],
++              ],
++            ),
++          ),
++          const SizedBox(width: AppSpacing.sm),
++          AppStatusBadge(
++            branch.isActive ? 'Aktif' : 'Nonaktif',
++            branch.isActive ? AppColors.success : AppColors.danger,
++          ),
++        ],
++      ),
++    );
++  }
++}
+diff --git a/lib/features/laporan/application/laporan_provider.dart b/lib/features/laporan/application/laporan_provider.dart
+index 1ba6f4f..2a01b18 100644
+--- a/lib/features/laporan/application/laporan_provider.dart
++++ b/lib/features/laporan/application/laporan_provider.dart
+@@ -36,6 +36,11 @@ class LaporanState {
+       errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
+     );
+   }
++
++  /// True when the query succeeded but the month genuinely has no rows —
++  /// distinct from "failed to load", which the screen renders as a retry
++  /// state instead of an empty state.
++  bool get hasNoData => errorMessage == null && data.rows.isEmpty && data.totalValue == 0;
+ }
+ 
+ final laporanProvider = StateNotifierProvider.autoDispose<LaporanController, LaporanState>((ref) {
+@@ -45,36 +50,64 @@ final laporanProvider = StateNotifierProvider.autoDispose<LaporanController, Lap
+ class LaporanController extends StateNotifier<LaporanState> {
+   final LaporanRepository _repository;
+ 
++  /// Guards against an out-of-order result overwriting a newer one when
++  /// the user flicks between report types or months faster than a query
++  /// completes — only the most recent request is allowed to commit.
++  int _requestId = 0;
++
+   LaporanController(this._repository) : super(LaporanState(selectedMonth: DateTime(DateTime.now().year, DateTime.now().month, 1))) {
+     load();
+   }
+ 
+   Future<void> load() async {
++    final requestId = ++_requestId;
++
+     if (!state.reportType.isImplemented) {
+-      // Laba/Produk/Customer have no designed report body yet — nothing
+-      // to query, so this just clears loading without inventing data.
+-      state = state.copyWith(isLoading: false, data: ReportData.empty(), clearError: true);
++      // Laba Rugi / Produk / Customer have no designed report body yet —
++      // nothing to query, so this just clears loading without inventing
++      // data.
++      _commit(requestId, (s) => s.copyWith(isLoading: false, data: ReportData.empty(), clearError: true));
+       return;
+     }
+ 
+-    state = state.copyWith(isLoading: true, clearError: true);
++    _commit(requestId, (s) => s.copyWith(isLoading: true, clearError: true));
++
+     try {
+-      final data = state.reportType == ReportType.pendapatan
+-          ? await _repository.getPendapatanReport(state.selectedMonth)
+-          : await _repository.getPengeluaranReport(state.selectedMonth);
+-      state = state.copyWith(data: data, isLoading: false);
++      final type = state.reportType;
++      final month = state.selectedMonth;
++      final data = type == ReportType.pendapatan
++          ? await _repository.getPendapatanReport(month)
++          : await _repository.getPengeluaranReport(month);
++      _commit(requestId, (s) => s.copyWith(data: data, isLoading: false, clearError: true));
+     } catch (e) {
+-      state = state.copyWith(isLoading: false, errorMessage: 'Gagal memuat laporan: $e');
++      _commit(requestId, (s) => s.copyWith(isLoading: false, data: ReportData.empty(), errorMessage: 'Gagal memuat laporan: $e'));
+     }
+   }
+ 
++  /// Every state write goes through here. Two things it protects against,
++  /// both of which used to surface as a crash on this screen:
++  ///
++  /// 1. `mounted` — the provider is autoDispose, so backing out while a
++  ///    query is still in flight disposes the notifier; writing `state`
++  ///    afterwards throws "Tried to use LaporanController after `dispose`
++  ///    was called".
++  /// 2. `_requestId` — a stale in-flight result must not clobber a newer
++  ///    one (see the field's doc comment).
++  void _commit(int requestId, LaporanState Function(LaporanState) update) {
++    if (!mounted || requestId != _requestId) return;
++    state = update(state);
++  }
++
+   void setReportType(ReportType type) {
+-    state = state.copyWith(reportType: type);
++    if (type == state.reportType) return;
++    state = state.copyWith(reportType: type, clearError: true);
+     load();
+   }
+ 
+   void setMonth(DateTime month) {
+-    state = state.copyWith(selectedMonth: DateTime(month.year, month.month, 1));
++    final normalized = DateTime(month.year, month.month, 1);
++    if (normalized == state.selectedMonth) return;
++    state = state.copyWith(selectedMonth: normalized, clearError: true);
+     load();
+   }
+ }
+diff --git a/lib/features/laporan/application/laporan_repository.dart b/lib/features/laporan/application/laporan_repository.dart
+index 51c59c0..4451826 100644
+--- a/lib/features/laporan/application/laporan_repository.dart
++++ b/lib/features/laporan/application/laporan_repository.dart
+@@ -4,9 +4,28 @@ import '../../../core/data/app_database.dart';
+ import '../domain/laporan_models.dart';
+ 
+ /// Reads Pendapatan/Pengeluaran report data for a given month from the
+-/// same `transactions` / `cash_movements` tables as Dashboard — same
+-/// "compute on read, no separate reports store" approach as
+-/// DashboardRepository/DompetRepository.
++/// same tables the rest of the app writes to — same "compute on read, no
++/// separate reports store" approach as DashboardRepository /
++/// DompetRepository.
++///
++/// Sources, and why:
++/// - Pendapatan -> `transactions` WHERE status = 'paid'. Canceled rows
++///   stay in the table as records but are excluded from omzet (PRD §
++///   Transactions), which `status = 'paid'` already handles.
++/// - Pengeluaran -> `cash_expenses` WHERE direction = 'pengeluaran'.
++///   This is the Arus Kas ledger and the real source of truth for
++///   expenses. It deliberately does NOT read `cash_movements` with
++///   type = 'expense': that table only mirrors the CASH-funded subset
++///   (ArusKasRepository writes a cash_movement only when
++///   funding_source = 'cash_location'), so a transfer/QRIS-funded
++///   expense would silently never appear in this report.
++///
++/// KNOWN INCONSISTENCY (deliberately left alone here to keep this change
++/// scoped to Laporan): DashboardRepository._sumExpenseForDate still sums
++/// `cash_movements` type = 'expense' and therefore still undercounts
++/// non-cash expenses in "Total Pengeluaran Hari Ini" / "Laba Kotor Hari
++/// Ini". Fixing that touches Dashboard's own numbers and should be its
++/// own change.
+ class LaporanRepository {
+   Future<Database> get _db => AppDatabase.instance.database;
+ 
+@@ -14,45 +33,72 @@ class LaporanRepository {
+     final db = await _db;
+     final daysInMonth = DateTime(month.year, month.month + 1, 0).day;
+ 
+-    final trend = <ReportTrendPoint>[];
+-    for (var day = 1; day <= daysInMonth; day++) {
+-      final total = await _sumPaidTotalForDay(db, month.year, month.month, day);
+-      trend.add(ReportTrendPoint(day: day, value: total));
+-    }
++    final trend = await _dailyTrend(
++      db,
++      table: 'transactions',
++      dateColumn: 'paid_at',
++      amountColumn: 'total',
++      filter: "status = 'paid'",
++      year: month.year,
++      month: month.month,
++      daysInMonth: daysInMonth,
++    );
+ 
+     final totalValue = trend.fold<int>(0, (sum, p) => sum + p.value);
+-    final txCount = await _countPaidOrdersForMonth(db, month.year, month.month);
++    final txCount = await _countForMonth(
++      db,
++      table: 'transactions',
++      dateColumn: 'paid_at',
++      filter: "status = 'paid'",
++      year: month.year,
++      month: month.month,
++    );
+     final rows = await _getPendapatanRows(db, month.year, month.month);
+ 
+-    return ReportData(
+-      totalValue: totalValue,
+-      transactionCount: txCount,
+-      averagePerTransaction: txCount == 0 ? 0 : (totalValue / txCount).round(),
+-      averagePerDay: (totalValue / daysInMonth).round(),
+-      trend: trend,
+-      rows: rows,
+-    );
++    return _build(totalValue: totalValue, txCount: txCount, daysInMonth: daysInMonth, trend: trend, rows: rows);
+   }
+ 
+   Future<ReportData> getPengeluaranReport(DateTime month) async {
+     final db = await _db;
+     final daysInMonth = DateTime(month.year, month.month + 1, 0).day;
+ 
+-    final trend = <ReportTrendPoint>[];
+-    for (var day = 1; day <= daysInMonth; day++) {
+-      final total = await _sumExpenseForDay(db, month.year, month.month, day);
+-      trend.add(ReportTrendPoint(day: day, value: total));
+-    }
++    final trend = await _dailyTrend(
++      db,
++      table: 'cash_expenses',
++      dateColumn: 'transaction_date',
++      amountColumn: 'amount',
++      filter: "direction = 'pengeluaran'",
++      year: month.year,
++      month: month.month,
++      daysInMonth: daysInMonth,
++    );
+ 
+     final totalValue = trend.fold<int>(0, (sum, p) => sum + p.value);
+-    final txCount = await _countExpensesForMonth(db, month.year, month.month);
++    final txCount = await _countForMonth(
++      db,
++      table: 'cash_expenses',
++      dateColumn: 'transaction_date',
++      filter: "direction = 'pengeluaran'",
++      year: month.year,
++      month: month.month,
++    );
+     final rows = await _getPengeluaranRows(db, month.year, month.month);
+ 
++    return _build(totalValue: totalValue, txCount: txCount, daysInMonth: daysInMonth, trend: trend, rows: rows);
++  }
++
++  ReportData _build({
++    required int totalValue,
++    required int txCount,
++    required int daysInMonth,
++    required List<ReportTrendPoint> trend,
++    required List<ReportRow> rows,
++  }) {
+     return ReportData(
+       totalValue: totalValue,
+       transactionCount: txCount,
+       averagePerTransaction: txCount == 0 ? 0 : (totalValue / txCount).round(),
+-      averagePerDay: (totalValue / daysInMonth).round(),
++      averagePerDay: daysInMonth == 0 ? 0 : (totalValue / daysInMonth).round(),
+       trend: trend,
+       rows: rows,
+     );
+@@ -60,72 +106,118 @@ class LaporanRepository {
+ 
+   String _monthPrefix(int year, int month) => '$year-${month.toString().padLeft(2, '0')}';
+ 
+-  Future<int> _sumPaidTotalForDay(Database db, int year, int month, int day) async {
+-    final dateStr = '$year-${month.toString().padLeft(2, '0')}-${day.toString().padLeft(2, '0')}';
+-    final result = await db.rawQuery(
+-      "SELECT COALESCE(SUM(total), 0) as total FROM transactions WHERE status = 'paid' AND date(paid_at) = ?",
+-      [dateStr],
+-    );
+-    return result.first['total'] as int;
+-  }
+-
+-  Future<int> _sumExpenseForDay(Database db, int year, int month, int day) async {
+-    final dateStr = '$year-${month.toString().padLeft(2, '0')}-${day.toString().padLeft(2, '0')}';
+-    final result = await db.rawQuery(
+-      "SELECT COALESCE(SUM(amount), 0) as total FROM cash_movements WHERE type = 'expense' AND date(created_at) = ?",
+-      [dateStr],
+-    );
+-    return result.first['total'] as int;
++  /// sqflite can hand back `int` or `double` for aggregate columns
++  /// depending on the expression, so never cast an aggregate straight to
++  /// `int` — a hard `as int` on a `double` throws at runtime and kills
++  /// the whole report.
++  int _asInt(Object? value) {
++    if (value == null) return 0;
++    if (value is int) return value;
++    if (value is num) return value.toInt();
++    return int.tryParse(value.toString()) ?? 0;
+   }
+ 
+-  Future<int> _countPaidOrdersForMonth(Database db, int year, int month) async {
++  /// One GROUP BY query for the whole month instead of one query per
++  /// day. The per-day loop this replaces fired up to 31 sequential
++  /// round-trips against an encrypted DB, which was slow enough that
++  /// backing out of the screen mid-load routinely left the controller
++  /// writing state after dispose.
++  Future<List<ReportTrendPoint>> _dailyTrend(
++    Database db, {
++    required String table,
++    required String dateColumn,
++    required String amountColumn,
++    required String filter,
++    required int year,
++    required int month,
++    required int daysInMonth,
++  }) async {
+     final result = await db.rawQuery(
+-      "SELECT COUNT(*) as cnt FROM transactions WHERE status = 'paid' AND strftime('%Y-%m', paid_at) = ?",
++      "SELECT CAST(strftime('%d', $dateColumn) AS INTEGER) AS day, "
++      "COALESCE(SUM($amountColumn), 0) AS total "
++      "FROM $table "
++      "WHERE $filter AND strftime('%Y-%m', $dateColumn) = ? "
++      "GROUP BY day",
+       [_monthPrefix(year, month)],
+     );
+-    return result.first['cnt'] as int;
++
++    final byDay = <int, int>{
++      for (final row in result) _asInt(row['day']): _asInt(row['total']),
++    };
++
++    return [
++      for (var day = 1; day <= daysInMonth; day++) ReportTrendPoint(day: day, value: byDay[day] ?? 0),
++    ];
+   }
+ 
+-  Future<int> _countExpensesForMonth(Database db, int year, int month) async {
++  Future<int> _countForMonth(
++    Database db, {
++    required String table,
++    required String dateColumn,
++    required String filter,
++    required int year,
++    required int month,
++  }) async {
+     final result = await db.rawQuery(
+-      "SELECT COUNT(*) as cnt FROM cash_movements WHERE type = 'expense' AND strftime('%Y-%m', created_at) = ?",
++      "SELECT COUNT(*) as cnt FROM $table WHERE $filter AND strftime('%Y-%m', $dateColumn) = ?",
+       [_monthPrefix(year, month)],
+     );
+-    return result.first['cnt'] as int;
++    return _asInt(result.first['cnt']);
+   }
+ 
+   Future<List<ReportRow>> _getPendapatanRows(Database db, int year, int month) async {
+     final rows = await db.rawQuery(
+-      "SELECT * FROM transactions WHERE status = 'paid' AND strftime('%Y-%m', paid_at) = ? ORDER BY paid_at DESC LIMIT 50",
++      "SELECT display_number, customer_name, total, paid_at FROM transactions "
++      "WHERE status = 'paid' AND strftime('%Y-%m', paid_at) = ? "
++      "ORDER BY paid_at DESC LIMIT 50",
+       [_monthPrefix(year, month)],
+     );
++
+     return rows.map((row) {
+-      final paidAt = DateTime.parse(row['paid_at'] as String);
+-      final customerName = row['customer_name'] as String? ?? 'Pelanggan';
++      final paidAt = _parseDate(row['paid_at']);
++      // PRD: a transaction with no customer is "Pelanggan Umum".
++      final customerName = (row['customer_name'] as String?)?.trim();
++      final displayNumber = (row['display_number'] as String?) ?? '-';
+       return ReportRow(
+-        title: customerName,
+-        subtitle: 'Mamam Ayam - ${_formatDate(paidAt)}',
+-        amount: row['total'] as int,
++        title: (customerName == null || customerName.isEmpty) ? 'Pelanggan Umum' : customerName,
++        subtitle: paidAt == null ? displayNumber : '$displayNumber - ${_formatDate(paidAt)}',
++        amount: _asInt(row['total']),
+       );
+     }).toList();
+   }
+ 
+   Future<List<ReportRow>> _getPengeluaranRows(Database db, int year, int month) async {
+     final rows = await db.rawQuery(
+-      "SELECT * FROM cash_movements WHERE type = 'expense' AND strftime('%Y-%m', created_at) = ? ORDER BY created_at DESC LIMIT 50",
++      "SELECT category, store_or_supplier_name, amount, transaction_date FROM cash_expenses "
++      "WHERE direction = 'pengeluaran' AND strftime('%Y-%m', transaction_date) = ? "
++      "ORDER BY transaction_date DESC, created_at DESC LIMIT 50",
+       [_monthPrefix(year, month)],
+     );
++
+     return rows.map((row) {
+-      final createdAt = DateTime.parse(row['created_at'] as String);
+-      final reason = row['reason'] as String? ?? 'Belanja';
++      final date = _parseDate(row['transaction_date']);
++      final category = (row['category'] as String?)?.trim();
++      final store = (row['store_or_supplier_name'] as String?)?.trim();
++      final title = (store != null && store.isNotEmpty) ? store : ((category == null || category.isEmpty) ? 'Pengeluaran' : category);
++      final parts = <String>[
++        if (store != null && store.isNotEmpty && category != null && category.isNotEmpty) category,
++        if (date != null) _formatDate(date),
++      ];
+       return ReportRow(
+-        title: reason,
+-        subtitle: 'Mamam Ayam - ${_formatDate(createdAt)}',
+-        amount: row['amount'] as int,
++        title: title,
++        subtitle: parts.join(' - '),
++        amount: _asInt(row['amount']),
+       );
+     }).toList();
+   }
+ 
++  /// Tolerant parse: a malformed/NULL timestamp degrades the one row's
++  /// subtitle instead of throwing and blanking the entire report.
++  DateTime? _parseDate(Object? value) {
++    if (value is! String || value.isEmpty) return null;
++    return DateTime.tryParse(value);
++  }
++
+   String _formatDate(DateTime date) {
+     const months = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
+     final hh = date.hour.toString().padLeft(2, '0');
+diff --git a/lib/features/laporan/domain/laporan_models.dart b/lib/features/laporan/domain/laporan_models.dart
+index 4b566ab..3ab78c5 100644
+--- a/lib/features/laporan/domain/laporan_models.dart
++++ b/lib/features/laporan/domain/laporan_models.dart
+@@ -1,14 +1,26 @@
+ /// Domain models for the Laporan (Reports) feature, ported from the
+ /// approved HTML mockup. Pendapatan and Pengeluaran are the two fully
+ /// wired report types (real queries against `transactions` /
+-/// `cash_movements`); Laba, Produk, and Customer remain selectable in
+-/// the type picker (matching the mockup) but have no designed report
+-/// body yet — selecting them shows a "Segera Hadir" placeholder rather
+-/// than an invented report.
++/// `cash_expenses`); Laba Rugi, Produk, and Customer are selectable in
++/// the type picker but have no designed report body yet — selecting them
++/// shows a "Segera Hadir" placeholder rather than an invented report.
++///
++/// Laba Rugi moved here from the swipe-up grid (it used to be its own
++/// tile pointing at a generic PlaceholderScreen). It is a report, so it
++/// belongs behind the report-type picker with the others; its tile slot
++/// in the grid is now Cabang. Only the placeholder was ported — the
++/// actual P&L body is deliberately not built yet.
++///
++/// NOTE when filling Laba Rugi in later: the PRD already pins the
++/// formula, do not invent one. Daily gross profit is
++/// `Omzet - Pengeluaran` with NO HPP; monthly net profit is
++/// `stok opname awal bulan + total expense bulan ini - sisa stok opname
++/// bulan ini`. Flipping [isImplemented] is all this enum needs — the
++/// screen already routes implemented types to the real body.
+ enum ReportType {
+   pendapatan('Pendapatan'),
+   pengeluaran('Pengeluaran'),
+-  laba('Laba'),
++  labaRugi('Laba Rugi'),
+   produk('Produk'),
+   customer('Customer');
+ 
+diff --git a/lib/features/laporan/presentation/laporan_screen.dart b/lib/features/laporan/presentation/laporan_screen.dart
+index 10edc99..04f30b8 100644
+--- a/lib/features/laporan/presentation/laporan_screen.dart
++++ b/lib/features/laporan/presentation/laporan_screen.dart
+@@ -6,6 +6,9 @@ import '../../../core/navigation/app_nav.dart';
+ import '../../../core/theme/app_colors.dart';
+ import '../../../core/theme/app_spacing.dart';
+ import '../../../core/utils/currency.dart';
++import '../../../core/widgets/app_button.dart';
++import '../../../core/widgets/app_card_shell.dart';
++import '../../../core/widgets/app_empty_state.dart';
+ import '../../../core/widgets/ios_page_header.dart';
+ import '../application/laporan_provider.dart';
+ import '../domain/laporan_models.dart';
+@@ -13,12 +16,17 @@ import 'widgets/month_picker_sheet.dart';
+ import 'widgets/report_trend_chart.dart';
+ import 'widgets/report_type_picker_sheet.dart';
+ 
+-/// Laporan (Reports) screen, ported 1:1 from the approved HTML mockup:
+-/// report-type + month filter pills, a trend chart, 4 stat cards, and a
+-/// transaction list. Pendapatan/Pengeluaran are fully wired to real
+-/// data; Laba/Produk/Customer show a "Segera Hadir" placeholder body
+-/// (selectable in the picker, matching the mockup, but with no designed
+-/// report content yet).
++/// Laporan (Reports) screen: report-type + month filter pills, a trend
++/// chart, 4 stat cards, and a transaction list. Pendapatan/Pengeluaran
++/// are fully wired to real data; Laba Rugi/Produk/Customer show a
++/// "Segera Hadir" placeholder body (selectable in the picker, with no
++/// designed report content yet).
++///
++/// Every branch of the body is a scrollable wrapped in a
++/// [RefreshIndicator] with [AlwaysScrollableScrollPhysics], per
++/// docs/refresh-pattern.md — including the empty and error states, so
++/// swipe-down retry works exactly where it matters most (AGENTS.md:
++/// "Errors preserve data and support swipe-down retry").
+ class LaporanScreen extends ConsumerWidget {
+   const LaporanScreen({super.key});
+ 
+@@ -29,6 +37,14 @@ class LaporanScreen extends ConsumerWidget {
+     final isIncome = state.reportType == ReportType.pendapatan;
+     final accentColor = isIncome ? AppColors.info : AppColors.danger;
+ 
++    ref.listen(laporanProvider, (previous, next) {
++      if (next.errorMessage != null && next.errorMessage != previous?.errorMessage) {
++        ScaffoldMessenger.of(context).showSnackBar(
++          SnackBar(content: Text(next.errorMessage!), backgroundColor: AppColors.danger),
++        );
++      }
++    });
++
+     return Scaffold(
+       backgroundColor: AppColors.background,
+       body: SafeArea(
+@@ -66,10 +82,14 @@ class LaporanScreen extends ConsumerWidget {
+             const SizedBox(height: AppSpacing.lg),
+             Expanded(
+               child: state.isLoading
+-                  ? Center(child: CircularProgressIndicator(color: accentColor))
+-                  : !state.reportType.isImplemented
+-                      ? const _ComingSoonBody()
+-                      : _ReportBody(state: state, accentColor: accentColor),
++                  // Component standards §14: full-screen loading is always
++                  // AppColors.brand, even on a screen with its own accent.
++                  ? const Center(child: CircularProgressIndicator(color: AppColors.brand))
++                  : RefreshIndicator(
++                      color: AppColors.brand,
++                      onRefresh: controller.load,
++                      child: _Body(state: state, accentColor: accentColor, onRetry: controller.load),
++                    ),
+             ),
+           ],
+         ),
+@@ -81,7 +101,6 @@ class LaporanScreen extends ConsumerWidget {
+     final controller = ref.read(laporanProvider.notifier);
+     AppNav.showModal(
+       context,
+-      isScrollControlled: false,
+       builder: (_) => ReportTypePickerSheet(
+         current: ref.read(laporanProvider).reportType,
+         onSelect: controller.setReportType,
+@@ -90,6 +109,73 @@ class LaporanScreen extends ConsumerWidget {
+   }
+ }
+ 
++/// Picks which body to show. Kept as one widget so the three states
++/// (error / not-yet-built / real report) all sit under the same
++/// RefreshIndicator rather than each screen branch re-deciding.
++class _Body extends StatelessWidget {
++  final LaporanState state;
++  final Color accentColor;
++  final Future<void> Function() onRetry;
++
++  const _Body({required this.state, required this.accentColor, required this.onRetry});
++
++  @override
++  Widget build(BuildContext context) {
++    if (state.errorMessage != null) {
++      return _CenteredScrollable(
++        child: Column(
++          mainAxisSize: MainAxisSize.min,
++          children: [
++            const AppEmptyState(
++              icon: Icons.cloud_off_rounded,
++              title: 'Laporan gagal dimuat',
++              subtitle: 'Tarik ke bawah untuk memuat ulang.',
++            ),
++            const SizedBox(height: AppSpacing.lg),
++            SizedBox(
++              width: 180,
++              child: AppButton.secondary(label: 'Coba Lagi', onPressed: onRetry),
++            ),
++          ],
++        ),
++      );
++    }
++
++    if (!state.reportType.isImplemented) {
++      return _CenteredScrollable(
++        child: AppEmptyState(
++          icon: Icons.construction_rounded,
++          title: 'Segera Hadir',
++          subtitle: 'Laporan ${state.reportType.label} belum tersedia.',
++        ),
++      );
++    }
++
++    return _ReportBody(state: state, accentColor: accentColor);
++  }
++}
++
++/// A scrollable that still fills the viewport, so the content centers
++/// properly AND RefreshIndicator can detect a pull even though the
++/// content is shorter than the screen (docs/refresh-pattern.md step 4).
++class _CenteredScrollable extends StatelessWidget {
++  final Widget child;
++  const _CenteredScrollable({required this.child});
++
++  @override
++  Widget build(BuildContext context) {
++    return LayoutBuilder(
++      builder: (context, constraints) => ListView(
++        physics: const AlwaysScrollableScrollPhysics(),
++        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
++        children: [
++          SizedBox(height: constraints.maxHeight, child: Center(child: child)),
++        ],
++      ),
++    );
++  }
++}
++
+ class _FilterPill extends StatelessWidget {
+   final IconData? icon;
+   final Color? iconColor;
+@@ -125,7 +211,7 @@ class _FilterPill extends StatelessWidget {
+                 style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
+               ),
+             ),
+-            const SizedBox(width: 4),
++            const SizedBox(width: AppSpacing.xs),
+             const Icon(Icons.keyboard_arrow_down_rounded, size: 18, color: AppColors.textMuted),
+           ],
+         ),
+@@ -145,11 +231,11 @@ class _ReportBody extends StatelessWidget {
+     final isIncome = state.reportType == ReportType.pendapatan;
+ 
+     return ListView(
++      physics: const AlwaysScrollableScrollPhysics(),
+       padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.xxl),
+       children: [
+-        Container(
+-          padding: const EdgeInsets.all(AppSpacing.lg),
+-          decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.xl)),
++        AppCardShell(
++          padding: const EdgeInsets.all(AppSpacing.md),
+           child: ReportTrendChart(points: data.trend, color: accentColor),
+         ),
+         const SizedBox(height: AppSpacing.lg),
+@@ -196,23 +282,22 @@ class _ReportBody extends StatelessWidget {
+         if (data.rows.isEmpty)
+           Padding(
+             padding: const EdgeInsets.symmetric(vertical: AppSpacing.xxl),
+-            child: Center(
+-              child: Text(
+-                isIncome ? 'Belum ada transaksi bulan ini.' : 'Belum ada pengeluaran bulan ini.',
+-                style: const TextStyle(fontSize: 13, color: AppColors.textMuted),
+-              ),
++            child: AppEmptyState(
++              icon: Icons.receipt_long_rounded,
++              title: isIncome ? 'Belum ada transaksi' : 'Belum ada pengeluaran',
++              subtitle: 'Tidak ada data pada bulan ini.',
+             ),
+           )
+         else
+-          Container(
+-            decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.lg)),
++          AppCardShell(
++            padding: EdgeInsets.zero,
+             child: Column(
+               children: data.rows.asMap().entries.map((entry) {
+                 final row = entry.value;
+                 final isLast = entry.key == data.rows.length - 1;
+                 return Container(
+                   decoration: BoxDecoration(border: isLast ? null : const Border(bottom: BorderSide(color: AppColors.border))),
+-                  padding: const EdgeInsets.all(AppSpacing.lg),
++                  padding: const EdgeInsets.all(AppSpacing.md),
+                   child: Row(
+                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                     children: [
+@@ -220,12 +305,25 @@ class _ReportBody extends StatelessWidget {
+                         child: Column(
+                           crossAxisAlignment: CrossAxisAlignment.start,
+                           children: [
+-                            Text(row.title, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+-                            const SizedBox(height: 2),
+-                            Text(row.subtitle, style: const TextStyle(fontSize: 13, color: AppColors.textMuted)),
++                            Text(
++                              row.title,
++                              maxLines: 1,
++                              overflow: TextOverflow.ellipsis,
++                              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: AppColors.textPrimary),
++                            ),
++                            if (row.subtitle.isNotEmpty) ...[
++                              const SizedBox(height: AppSpacing.xs),
++                              Text(
++                                row.subtitle,
++                                maxLines: 1,
++                                overflow: TextOverflow.ellipsis,
++                                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.textMuted),
++                              ),
++                            ],
+                           ],
+                         ),
+                       ),
++                      const SizedBox(width: AppSpacing.sm),
+                       Text(
+                         formatRupiah(row.amount),
+                         style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: accentColor),
+@@ -249,43 +347,31 @@ class _StatCard extends StatelessWidget {
+ 
+   @override
+   Widget build(BuildContext context) {
+-    return Container(
+-      padding: const EdgeInsets.all(AppSpacing.lg),
+-      decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.lg)),
++    return AppCardShell(
+       child: Column(
+         crossAxisAlignment: CrossAxisAlignment.start,
+         children: [
+           Row(
+             children: [
+               Icon(icon, size: 15, color: AppColors.textSecondary),
+-              const SizedBox(width: 6),
++              const SizedBox(width: AppSpacing.xs),
+               Expanded(
+-                child: Text(label, style: const TextStyle(fontSize: 12.5, color: AppColors.textSecondary), overflow: TextOverflow.ellipsis),
++                child: Text(
++                  label,
++                  maxLines: 1,
++                  overflow: TextOverflow.ellipsis,
++                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.textSecondary),
++                ),
+               ),
+             ],
+           ),
+-          const SizedBox(height: 6),
+-          Text(value, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
+-        ],
+-      ),
+-    );
+-  }
+-}
+-
+-class _ComingSoonBody extends StatelessWidget {
+-  const _ComingSoonBody();
+-
+-  @override
+-  Widget build(BuildContext context) {
+-    return Center(
+-      child: Column(
+-        mainAxisSize: MainAxisSize.min,
+-        children: [
+-          const Icon(Icons.construction_rounded, size: 40, color: AppColors.textMuted),
+-          const SizedBox(height: AppSpacing.md),
+-          const Text('Segera Hadir', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
+-          const SizedBox(height: 4),
+-          const Text('Laporan ini belum tersedia.', style: TextStyle(fontSize: 13, color: AppColors.textMuted)),
++          const SizedBox(height: AppSpacing.xs),
++          Text(
++            value,
++            maxLines: 1,
++            overflow: TextOverflow.ellipsis,
++            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
++          ),
+         ],
+       ),
+     );
+diff --git a/lib/features/laporan/presentation/widgets/report_trend_chart.dart b/lib/features/laporan/presentation/widgets/report_trend_chart.dart
+index 79e7e8d..b133f32 100644
+--- a/lib/features/laporan/presentation/widgets/report_trend_chart.dart
++++ b/lib/features/laporan/presentation/widgets/report_trend_chart.dart
+@@ -101,7 +101,13 @@ class _ReportChartPainter extends CustomPainter {
+ 
+     Offset pointAt(int i) {
+       final x = stepX * i;
+-      final y = chartBottom - (points[i].value / axisMax).clamp(0, 1) * (chartBottom - chartTop);
++      // NOTE: keep every operand here a `double`. Dart only special-cases
++      // `clamp()` to return the receiver's type when receiver AND both
++      // bounds are all int or all double — `someDouble.clamp(0, 1)` is
++      // statically `num`, which makes `y` a `num` and fails to compile at
++      // `Offset(x, y)`. That is exactly what broke this screen before.
++      final ratio = axisMax <= 0 ? 0.0 : (points[i].value / axisMax).clamp(0.0, 1.0);
++      final y = chartBottom - ratio * (chartBottom - chartTop);
+       return Offset(x, y);
+     }
+ 
+diff --git a/lib/features/laporan/presentation/widgets/report_type_picker_sheet.dart b/lib/features/laporan/presentation/widgets/report_type_picker_sheet.dart
+index 1cb1565..14386b0 100644
+--- a/lib/features/laporan/presentation/widgets/report_type_picker_sheet.dart
++++ b/lib/features/laporan/presentation/widgets/report_type_picker_sheet.dart
+@@ -2,11 +2,19 @@ import 'package:flutter/material.dart';
+ 
+ import '../../../../core/theme/app_colors.dart';
+ import '../../../../core/theme/app_spacing.dart';
++import '../../../../core/widgets/app_sheet_header.dart';
+ import '../../domain/laporan_models.dart';
+ 
+-/// "Pilih Jenis Laporan" picker, ported 1:1 from the HTML mockup: a
+-/// bottom sheet with a close button and one row per [ReportType], each
+-/// with a circular icon and a checkmark on the selected one.
++/// "Pilih Jenis Laporan" picker: a bottom sheet with one row per
++/// [ReportType], each with a circular icon and a checkmark on the
++/// selected one.
++///
++/// Header uses [AppSheetHeader] per the component standards doc §11 —
++/// the previous hand-rolled Row could collide title and close button.
++/// The rows sit in a scrollable, shrink-wrapped [ListView] so the sheet
++/// grows to its content but never overflows on a short screen (the old
++/// fixed Column with `isScrollControlled: false` overflowed once the
++/// list passed the 9/16-height cap).
+ class ReportTypePickerSheet extends StatelessWidget {
+   final ReportType current;
+   final ValueChanged<ReportType> onSelect;
+@@ -16,7 +24,7 @@ class ReportTypePickerSheet extends StatelessWidget {
+   static const _icons = {
+     ReportType.pendapatan: Icons.trending_up_rounded,
+     ReportType.pengeluaran: Icons.trending_down_rounded,
+-    ReportType.laba: Icons.account_balance_wallet_outlined,
++    ReportType.labaRugi: Icons.account_balance_wallet_outlined,
+     ReportType.produk: Icons.inventory_2_outlined,
+     ReportType.customer: Icons.people_alt_outlined,
+   };
+@@ -26,63 +34,69 @@ class ReportTypePickerSheet extends StatelessWidget {
+     return SafeArea(
+       top: false,
+       child: Container(
+-        decoration: const BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.vertical(top: Radius.circular(AppRadius.xl))),
++        constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.85),
++        decoration: const BoxDecoration(
++          color: AppColors.surface,
++          borderRadius: BorderRadius.vertical(top: Radius.circular(AppRadius.xl)),
++        ),
+         child: Column(
+           mainAxisSize: MainAxisSize.min,
+           children: [
+-            Padding(
+-              padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.lg, AppSpacing.lg, AppSpacing.md),
+-              child: Row(
+-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+-                children: [
+-                  const Text('Pilih Jenis Laporan', style: TextStyle(fontSize: 19, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
+-                  Material(
+-                    color: AppColors.background,
+-                    shape: const CircleBorder(),
+-                    child: InkWell(
+-                      onTap: () => Navigator.of(context).pop(),
+-                      customBorder: const CircleBorder(),
+-                      child: const SizedBox(
+-                        width: 36,
+-                        height: 36,
+-                        child: Icon(Icons.close_rounded, size: 18, color: AppColors.textSecondary),
++            const Padding(
++              padding: EdgeInsets.only(top: AppSpacing.sm),
++              child: AppSheetHeader(title: 'Pilih Jenis Laporan'),
++            ),
++            Flexible(
++              child: ListView(
++                shrinkWrap: true,
++                padding: EdgeInsets.zero,
++                children: ReportType.values.map((type) {
++                  final isSelected = type == current;
++                  return InkWell(
++                    onTap: () {
++                      onSelect(type);
++                      Navigator.of(context).pop();
++                    },
++                    child: Container(
++                      decoration: const BoxDecoration(border: Border(top: BorderSide(color: AppColors.border))),
++                      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.lg),
++                      child: Row(
++                        children: [
++                          Container(
++                            width: 40,
++                            height: 40,
++                            decoration: BoxDecoration(
++                              color: isSelected ? AppColors.info.withValues(alpha: 0.12) : AppColors.background,
++                              shape: BoxShape.circle,
++                            ),
++                            child: Icon(_icons[type], size: 19, color: isSelected ? AppColors.info : AppColors.textSecondary),
++                          ),
++                          const SizedBox(width: AppSpacing.md),
++                          Expanded(
++                            child: Text(
++                              type.label,
++                              maxLines: 1,
++                              overflow: TextOverflow.ellipsis,
++                              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: AppColors.textPrimary),
++                            ),
++                          ),
++                          if (!type.isImplemented)
++                            const Padding(
++                              padding: EdgeInsets.only(right: AppSpacing.sm),
++                              child: Text(
++                                'SEGERA',
++                                style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, letterSpacing: 0.25, color: AppColors.textMuted),
++                              ),
++                            ),
++                          if (isSelected) const Icon(Icons.check_rounded, size: 18, color: AppColors.textPrimary),
++                        ],
+                       ),
+                     ),
+-                  ),
+-                ],
++                  );
++                }).toList(),
+               ),
+             ),
+-            ...ReportType.values.map((type) {
+-              final isSelected = type == current;
+-              return InkWell(
+-                onTap: () {
+-                  onSelect(type);
+-                  Navigator.of(context).pop();
+-                },
+-                child: Container(
+-                  decoration: const BoxDecoration(border: Border(top: BorderSide(color: AppColors.border))),
+-                  padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.lg),
+-                  child: Row(
+-                    children: [
+-                      Container(
+-                        width: 40,
+-                        height: 40,
+-                        decoration: BoxDecoration(
+-                          color: isSelected ? AppColors.info.withValues(alpha: 0.12) : AppColors.background,
+-                          shape: BoxShape.circle,
+-                        ),
+-                        child: Icon(_icons[type], size: 19, color: isSelected ? AppColors.info : AppColors.textSecondary),
+-                      ),
+-                      const SizedBox(width: AppSpacing.md),
+-                      Expanded(
+-                        child: Text(type.label, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+-                      ),
+-                      if (isSelected) const Icon(Icons.check_rounded, size: 18, color: AppColors.textPrimary),
+-                    ],
+-                  ),
+-                ),
+-              );
+-            }),
++            const SizedBox(height: AppSpacing.sm),
+           ],
+         ),
+       ),
+diff --git a/lib/features/menu_shell/presentation/menu_grid_items.dart b/lib/features/menu_shell/presentation/menu_grid_items.dart
+index 0ce4feb..3e39fa7 100644
+--- a/lib/features/menu_shell/presentation/menu_grid_items.dart
++++ b/lib/features/menu_shell/presentation/menu_grid_items.dart
+@@ -4,6 +4,7 @@ import '../../../core/navigation/app_nav.dart';
+ import '../../../core/theme/app_colors.dart';
+ import '../../../core/widgets/placeholder_screen.dart';
+ import '../../arus_kas/presentation/arus_kas_screen.dart';
++import '../../cabang/presentation/manajemen_cabang_screen.dart';
+ import '../../dompet/presentation/dompet_screen.dart';
+ import '../../hpp_opname/presentation/hpp_opname_screen.dart';
+ import '../../laporan/presentation/laporan_screen.dart';
+@@ -26,7 +27,7 @@ class MenuGridItem {
+ }
+ 
+ /// The 3x3 grid, kept 1:1 with the supplied React mockup's item set and
+-/// order (Dompet, Menu, Laba Rugi, Kas, Pelanggan, Laporan, Staff, HPP,
++/// order (Dompet, Menu, Cabang, Kas, Pelanggan, Laporan, Staff, HPP,
+ /// Pengaturan) — colors are the toned-down muted palette (see AppColors
+ /// doc comment), not the mockup's fully-saturated set. Icons are Material
+ /// equivalents of the mockup's lucide-react icons.
+@@ -77,7 +78,16 @@ List<MenuGridItem> buildMenuGridItems({
+       color: AppColors.tileMenu,
+       onTap: () => pushDestination((_) => const MenuManagementScreen()),
+     ),
+-    placeholderTile(label: 'Laba Rugi', icon: Icons.receipt_long_rounded, color: AppColors.tileLabaRugi),
++    // Laba Rugi used to sit here pointing at a PlaceholderScreen. It is
++    // a report, so it now lives behind Laporan's report-type picker
++    // (ReportType.labaRugi) instead of owning a grid tile, and this slot
++    // went to Cabang.
++    MenuGridItem(
++      label: 'Cabang',
++      icon: Icons.storefront_rounded,
++      color: AppColors.tileCabang,
++      onTap: () => pushDestination((_) => const ManajemenCabangScreen()),
++    ),
+     MenuGridItem(
+       label: 'Kas',
+       icon: Icons.compare_arrows_rounded,
+-- 
+2.43.0
+

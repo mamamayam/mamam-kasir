@@ -60,13 +60,26 @@ class LaporanRepository {
 
   String _monthPrefix(int year, int month) => '$year-${month.toString().padLeft(2, '0')}';
 
+  /// SQLite's SUM()/COUNT() can hand back either an int or a double
+  /// depending on platform/driver and whether any floating-point value
+  /// was seen during aggregation — casting straight `as int` on that
+  /// column threw and silently blanked this whole report whenever the
+  /// driver returned a double. Route every numeric column read through
+  /// this so an unexpected num subtype never crashes the report.
+  int _asInt(Object? value) {
+    if (value == null) return 0;
+    if (value is int) return value;
+    if (value is num) return value.round();
+    return int.tryParse(value.toString()) ?? 0;
+  }
+
   Future<int> _sumPaidTotalForDay(Database db, int year, int month, int day) async {
     final dateStr = '$year-${month.toString().padLeft(2, '0')}-${day.toString().padLeft(2, '0')}';
     final result = await db.rawQuery(
       "SELECT COALESCE(SUM(total), 0) as total FROM transactions WHERE status = 'paid' AND date(paid_at) = ?",
       [dateStr],
     );
-    return result.first['total'] as int;
+    return _asInt(result.first['total']);
   }
 
   Future<int> _sumExpenseForDay(Database db, int year, int month, int day) async {
@@ -75,7 +88,7 @@ class LaporanRepository {
       "SELECT COALESCE(SUM(amount), 0) as total FROM cash_movements WHERE type = 'expense' AND date(created_at) = ?",
       [dateStr],
     );
-    return result.first['total'] as int;
+    return _asInt(result.first['total']);
   }
 
   Future<int> _countPaidOrdersForMonth(Database db, int year, int month) async {
@@ -83,7 +96,7 @@ class LaporanRepository {
       "SELECT COUNT(*) as cnt FROM transactions WHERE status = 'paid' AND strftime('%Y-%m', paid_at) = ?",
       [_monthPrefix(year, month)],
     );
-    return result.first['cnt'] as int;
+    return _asInt(result.first['cnt']);
   }
 
   Future<int> _countExpensesForMonth(Database db, int year, int month) async {
@@ -91,7 +104,7 @@ class LaporanRepository {
       "SELECT COUNT(*) as cnt FROM cash_movements WHERE type = 'expense' AND strftime('%Y-%m', created_at) = ?",
       [_monthPrefix(year, month)],
     );
-    return result.first['cnt'] as int;
+    return _asInt(result.first['cnt']);
   }
 
   Future<List<ReportRow>> _getPendapatanRows(Database db, int year, int month) async {
@@ -99,15 +112,25 @@ class LaporanRepository {
       "SELECT * FROM transactions WHERE status = 'paid' AND strftime('%Y-%m', paid_at) = ? ORDER BY paid_at DESC LIMIT 50",
       [_monthPrefix(year, month)],
     );
-    return rows.map((row) {
-      final paidAt = DateTime.parse(row['paid_at'] as String);
-      final customerName = row['customer_name'] as String? ?? 'Pelanggan';
-      return ReportRow(
-        title: customerName,
-        subtitle: 'Mamam Ayam - ${_formatDate(paidAt)}',
-        amount: row['total'] as int,
-      );
-    }).toList();
+    final result = <ReportRow>[];
+    for (final row in rows) {
+      // One malformed row (missing/unparseable paid_at, unexpected
+      // numeric type) used to throw and blank the entire report instead
+      // of just dropping that row.
+      try {
+        final rawPaidAt = row['paid_at'];
+        final paidAt = rawPaidAt is String ? DateTime.parse(rawPaidAt) : DateTime.now();
+        final customerName = row['customer_name'] as String? ?? 'Pelanggan';
+        result.add(ReportRow(
+          title: customerName,
+          subtitle: 'Mamam Ayam - ${_formatDate(paidAt)}',
+          amount: _asInt(row['total']),
+        ));
+      } catch (_) {
+        continue;
+      }
+    }
+    return result;
   }
 
   Future<List<ReportRow>> _getPengeluaranRows(Database db, int year, int month) async {
@@ -115,15 +138,22 @@ class LaporanRepository {
       "SELECT * FROM cash_movements WHERE type = 'expense' AND strftime('%Y-%m', created_at) = ? ORDER BY created_at DESC LIMIT 50",
       [_monthPrefix(year, month)],
     );
-    return rows.map((row) {
-      final createdAt = DateTime.parse(row['created_at'] as String);
-      final reason = row['reason'] as String? ?? 'Belanja';
-      return ReportRow(
-        title: reason,
-        subtitle: 'Mamam Ayam - ${_formatDate(createdAt)}',
-        amount: row['amount'] as int,
-      );
-    }).toList();
+    final result = <ReportRow>[];
+    for (final row in rows) {
+      try {
+        final rawCreatedAt = row['created_at'];
+        final createdAt = rawCreatedAt is String ? DateTime.parse(rawCreatedAt) : DateTime.now();
+        final reason = row['reason'] as String? ?? 'Belanja';
+        result.add(ReportRow(
+          title: reason,
+          subtitle: 'Mamam Ayam - ${_formatDate(createdAt)}',
+          amount: _asInt(row['amount']),
+        ));
+      } catch (_) {
+        continue;
+      }
+    }
+    return result;
   }
 
   String _formatDate(DateTime date) {

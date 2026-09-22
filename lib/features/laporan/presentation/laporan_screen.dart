@@ -67,9 +67,14 @@ class LaporanScreen extends ConsumerWidget {
             Expanded(
               child: state.isLoading
                   ? Center(child: CircularProgressIndicator(color: accentColor))
-                  : !state.reportType.isImplemented
-                      ? const _ComingSoonBody()
-                      : _ReportBody(state: state, accentColor: accentColor),
+                  : state.errorMessage != null
+                      ? _ReportErrorBody(
+                          message: state.errorMessage!,
+                          onRetry: controller.load,
+                        )
+                      : !state.reportType.isImplemented
+                          ? const _ComingSoonBody()
+                          : _ReportBody(state: state, accentColor: accentColor),
             ),
           ],
         ),
@@ -267,6 +272,37 @@ class _StatCard extends StatelessWidget {
           const SizedBox(height: 6),
           Text(value, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
         ],
+      ),
+    );
+  }
+}
+
+class _ReportErrorBody extends StatelessWidget {
+  final String message;
+  final VoidCallback onRetry;
+  const _ReportErrorBody({required this.message, required this.onRetry});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xl),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.error_outline_rounded, size: 40, color: AppColors.textMuted),
+            const SizedBox(height: AppSpacing.md),
+            const Text('Gagal Memuat Laporan', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
+            const SizedBox(height: 4),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 13, color: AppColors.textMuted),
+            ),
+            const SizedBox(height: AppSpacing.lg),
+            TextButton(onPressed: onRetry, child: const Text('Coba Lagi')),
+          ],
+        ),
       ),
     );
   }
