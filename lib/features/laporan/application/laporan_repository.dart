@@ -3,6 +3,11 @@ import 'package:sqflite_sqlcipher/sqflite.dart';
 import '../../../core/data/app_database.dart';
 import '../domain/laporan_models.dart';
 
+/// NOT CURRENTLY CALLED: LaporanController routes to LaporanDummyData
+/// instead (see laporan_dummy_data.dart) because this repository's real
+/// queries rendered LaporanScreen blank in testing — root cause not
+/// isolated. Left as-is, ready to swap back in once that's fixed.
+///
 /// Reads Pendapatan/Pengeluaran report data for a given month from the
 /// same tables the rest of the app writes to — same "compute on read, no
 /// separate reports store" approach as DashboardRepository /

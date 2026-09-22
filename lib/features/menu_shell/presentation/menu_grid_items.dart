@@ -7,9 +7,10 @@ import '../../arus_kas/presentation/arus_kas_screen.dart';
 import '../../cabang/presentation/manajemen_cabang_screen.dart';
 import '../../dompet/presentation/dompet_screen.dart';
 import '../../hpp_opname/presentation/hpp_opname_screen.dart';
-import '../../laporan/presentation/laporan_screen.dart';
 import '../../menu_management/presentation/menu_management_screen.dart';
+import '../../pelanggan/presentation/pelanggan_screen.dart';
 import '../../pengaturan/presentation/pengaturan_screen.dart';
+import 'placeholders/laporan_mockup_placeholder_screen.dart';
 
 /// One tile in the swipe-up menu's 3x3 grid.
 class MenuGridItem {
@@ -94,12 +95,21 @@ List<MenuGridItem> buildMenuGridItems({
       color: AppColors.tileKas,
       onTap: () => pushDestination((_) => const ArusKasScreen()),
     ),
-    placeholderTile(label: 'Pelanggan', icon: Icons.people_alt_rounded, color: AppColors.tilePelanggan),
+    MenuGridItem(
+      label: 'Pelanggan',
+      icon: Icons.people_alt_rounded,
+      color: AppColors.tilePelanggan,
+      onTap: () => pushDestination((_) => const PelangganScreen()),
+    ),
+    // Temporarily points at a static mockup placeholder (no DB/provider
+    // wiring) instead of the real LaporanScreen, which is currently
+    // broken. Swap back to LaporanScreen once it's fixed; see doc
+    // comment on LaporanMockupPlaceholderScreen.
     MenuGridItem(
       label: 'Laporan',
       icon: Icons.pie_chart_rounded,
       color: AppColors.tileLaporan,
-      onTap: () => pushDestination((_) => const LaporanScreen()),
+      onTap: () => pushDestination((_) => const LaporanMockupPlaceholderScreen()),
     ),
     placeholderTile(label: 'Staff', icon: Icons.badge_rounded, color: AppColors.tileStaff),
     MenuGridItem(

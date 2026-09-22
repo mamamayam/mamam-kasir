@@ -18,9 +18,10 @@ import 'widgets/report_type_picker_sheet.dart';
 
 /// Laporan (Reports) screen: report-type + month filter pills, a trend
 /// chart, 4 stat cards, and a transaction list. Pendapatan/Pengeluaran
-/// are fully wired to real data; Laba Rugi/Produk/Customer show a
-/// "Segera Hadir" placeholder body (selectable in the picker, with no
-/// designed report content yet).
+/// render this full body from LaporanDummyData (placeholder numbers, not
+/// wired to POS/DB — see that file's doc comment); Laba Rugi/Produk/
+/// Customer show a "Segera Hadir" placeholder body instead (selectable in
+/// the picker, with no designed report content yet).
 ///
 /// Every branch of the body is a scrollable wrapped in a
 /// [RefreshIndicator] with [AlwaysScrollableScrollPhysics], per

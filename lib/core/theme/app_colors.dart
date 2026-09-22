@@ -48,6 +48,18 @@ class AppColors {
   static const Color tileHpp = Color(0xFF1FA3AE); // cyan
   static const Color tilePengaturan = Color(0xFF5C6478); // slate
 
+  // Pelanggan feature — visual tokens taken 1:1 from the approved
+  // pelanggan_v3_gabungan.html mockup. Kept as SEPARATE tokens (rather
+  // than editing background/textPrimary above) because the existing
+  // neutrals are used across ~31 files and must not shift; these differ
+  // only slightly (e.g. #F2F2F5 vs #F8F9FC) but the mockup was approved
+  // pixel-for-pixel, so they're preserved exactly.
+  static const Color pelangganBackground = Color(0xFFF2F2F5);
+  static const Color pelangganBorder = Color(0xFFECEDF1);
+  static const Color pelangganTextPrimary = Color(0xFF0F2540);
+  static const Color pelangganTextMuted = Color(0xFF9AA1AC);
+  static const Color pelangganDanger = Color(0xFFF0574A);
+
   // Top-row action cards (Notifikasi / Approval) — dark rounded icon chip,
   // matching the reference screenshot's style.
   static const Color actionIconBg = Color(0xFF1F2230);

@@ -1,6 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../domain/laporan_models.dart';
+import 'laporan_dummy_data.dart';
 import 'laporan_repository.dart';
 
 final laporanRepositoryProvider = Provider<LaporanRepository>((ref) => LaporanRepository());
@@ -48,6 +49,10 @@ final laporanProvider = StateNotifierProvider.autoDispose<LaporanController, Lap
 });
 
 class LaporanController extends StateNotifier<LaporanState> {
+  /// Kept (injected, unused for now) so swapping `load()` below back to
+  /// real queries — once the blank-render bug in LaporanRepository's
+  /// cross-feature DB read is found — is a small diff, not a rewire.
+  // ignore: unused_field
   final LaporanRepository _repository;
 
   /// Guards against an out-of-order result overwriting a newer one when
@@ -72,12 +77,16 @@ class LaporanController extends StateNotifier<LaporanState> {
 
     _commit(requestId, (s) => s.copyWith(isLoading: true, clearError: true));
 
+    // Dummy data (LaporanDummyData) instead of _repository's real
+    // transactions/cash_expenses queries — see that file's doc comment
+    // for why. Still routed through the same await/isLoading/try
+    // structure as a real fetch so swapping the source back later
+    // doesn't change this screen's control flow.
+    await Future<void>.delayed(Duration.zero);
     try {
       final type = state.reportType;
       final month = state.selectedMonth;
-      final data = type == ReportType.pendapatan
-          ? await _repository.getPendapatanReport(month)
-          : await _repository.getPengeluaranReport(month);
+      final data = type == ReportType.pendapatan ? LaporanDummyData.pendapatan(month) : LaporanDummyData.pengeluaran(month);
       _commit(requestId, (s) => s.copyWith(data: data, isLoading: false, clearError: true));
     } catch (e) {
       _commit(requestId, (s) => s.copyWith(isLoading: false, data: ReportData.empty(), errorMessage: 'Gagal memuat laporan: $e'));
