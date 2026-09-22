@@ -7,6 +7,11 @@ import '../../arus_kas/presentation/arus_kas_screen.dart';
 import '../../cabang/presentation/manajemen_cabang_screen.dart';
 import '../../dompet/presentation/dompet_screen.dart';
 import '../../hpp_opname/presentation/hpp_opname_screen.dart';
+<<<<<<< ours
+=======
+import '../../hrd/presentation/hrd_entry_screen.dart';
+import '../../laporan/presentation/laporan_screen.dart';
+>>>>>>> theirs
 import '../../menu_management/presentation/menu_management_screen.dart';
 import '../../pelanggan/presentation/pelanggan_screen.dart';
 import '../../pengaturan/presentation/pengaturan_screen.dart';
@@ -41,10 +46,12 @@ class MenuGridItem {
 /// it was — no re-tap of the swipe-up trigger needed.
 ///
 /// "Menu" opens its real, fully-built screen ([MenuManagementScreen] —
-/// the reference pattern for future feature screens); the rest open a
-/// shared [PlaceholderScreen] so nothing feels empty on tap. Placeholders
-/// get swapped for real feature screens one at a time later, without
-/// changing how they're reached.
+/// the reference pattern for future feature screens); "Staff" opens the
+/// HRD module (Owner flow only — see [HrdEntryScreen]'s doc comment for
+/// why the Staff PIN flow lives in a separate menu entry instead); the
+/// rest open a shared [PlaceholderScreen] so nothing feels empty on tap.
+/// Placeholders get swapped for real feature screens one at a time
+/// later, without changing how they're reached.
 List<MenuGridItem> buildMenuGridItems({
   required BuildContext context,
   required VoidCallback onDismissSheet,
@@ -111,7 +118,12 @@ List<MenuGridItem> buildMenuGridItems({
       color: AppColors.tileLaporan,
       onTap: () => pushDestination((_) => const LaporanMockupPlaceholderScreen()),
     ),
-    placeholderTile(label: 'Staff', icon: Icons.badge_rounded, color: AppColors.tileStaff),
+    MenuGridItem(
+      label: 'Staff',
+      icon: Icons.badge_rounded,
+      color: AppColors.tileStaff,
+      onTap: () => pushDestination((_) => const HrdEntryScreen()),
+    ),
     MenuGridItem(
       label: 'HPP',
       icon: Icons.calculate_rounded,

@@ -173,7 +173,6 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                 onTap: () => showMenuBottomSheet(
                   context,
                   unreadNotifications: state.unreadNotifications,
-                  pendingApprovals: state.pendingApprovals,
                 ),
               ),
             ),

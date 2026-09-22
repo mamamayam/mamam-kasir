@@ -1,8 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/navigation/app_nav.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_spacing.dart';
+import '../../hrd/application/hrd_provider.dart';
+import '../../hrd/presentation/owner/hrd_owner_approval_screen.dart';
+import '../../hrd/presentation/staff/hrd_staff_entry_screen.dart';
 import 'menu_action_card.dart';
 import 'menu_grid_items.dart';
 
@@ -10,10 +14,12 @@ import 'menu_grid_items.dart';
 /// building the sheet inline so the trigger (pill / swipe gesture) stays
 /// decoupled from the sheet's own content.
 ///
-/// `unreadNotifications`/`pendingApprovals` default to 0 — there is no
-/// notifications/approvals table yet (see DashboardState's doc comment),
-/// so callers without a real source for these can omit them rather than
-/// needing to construct a whole summary object just to pass zeros.
+/// `unreadNotifications` defaults to 0 — there is no notifications table
+/// yet (see DashboardState's doc comment), so callers without a real
+/// source can omit it rather than needing to construct a whole summary
+/// object just to pass zero. The Approval card's badge count is read
+/// live from [hrdControllerProvider] instead of being passed in, since a
+/// real pending-approvals count now exists (see [HrdOwnerApprovalScreen]).
 ///
 /// Uses [AppNav.showModal] rather than a raw [showModalBottomSheet] —
 /// this sheet is the reference case for the app's stack-navigation model
@@ -26,24 +32,20 @@ import 'menu_grid_items.dart';
 Future<void> showMenuBottomSheet(
   BuildContext context, {
   int unreadNotifications = 0,
-  int pendingApprovals = 0,
 }) {
   return AppNav.showModal(
     context,
-    builder: (context) => MenuBottomSheetContent(
-      unreadNotifications: unreadNotifications,
-      pendingApprovals: pendingApprovals,
-    ),
+    builder: (context) => MenuBottomSheetContent(unreadNotifications: unreadNotifications),
   );
 }
 
-class MenuBottomSheetContent extends StatelessWidget {
+class MenuBottomSheetContent extends ConsumerWidget {
   final int unreadNotifications;
-  final int pendingApprovals;
-  const MenuBottomSheetContent({super.key, required this.unreadNotifications, required this.pendingApprovals});
+  const MenuBottomSheetContent({super.key, required this.unreadNotifications});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final pendingApprovals = ref.watch(hrdControllerProvider.select((s) => s.pendingApprovals.length));
     final items = buildMenuGridItems(
       context: context,
       onDismissSheet: () => Navigator.of(context).pop(),
@@ -97,7 +99,21 @@ class MenuBottomSheetContent extends StatelessWidget {
                           icon: Icons.fact_check_rounded,
                           title: 'Approval',
                           subtitle: '$pendingApprovals menunggu',
-                          onTap: () => Navigator.of(context).pop(),
+                          onTap: () => AppNav.push(context, (_) => const HrdOwnerApprovalScreen()),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: AppSpacing.md),
+                    // Staff PIN flow entry point — deliberately separate from the
+                    // Owner-only "Staff" grid tile (see HrdEntryScreen's doc
+                    // comment). Open to anyone on the shared device.
+                    Row(
+                      children: [
+                        MenuActionCard(
+                          icon: Icons.payments_rounded,
+                          title: 'Cek Gaji Saya',
+                          subtitle: 'Untuk karyawan',
+                          onTap: () => AppNav.push(context, (_) => const HrdStaffEntryScreen()),
                         ),
                       ],
                     ),

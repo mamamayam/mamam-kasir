@@ -10,13 +10,27 @@ import '../theme/app_colors.dart';
 ///   transparent.
 /// - Digit text: 24/w700/[AppColors.textPrimary].
 /// - Layout: 3 columns × 4 rows — 1-2-3 / 4-5-6 / 7-8-9 / (empty)-0-backspace.
+///   The (empty) cell can optionally host [bottomLeft].
 /// - Row spacing: `EdgeInsets.symmetric(vertical: 6)`.
 class AppPinKeypad extends StatelessWidget {
   final bool disabled;
   final ValueChanged<String> onDigit;
   final VoidCallback onBackspace;
 
-  const AppPinKeypad({super.key, required this.onDigit, required this.onBackspace, this.disabled = false});
+  /// Optional widget for the bottom-left cell, which is empty by default
+  /// (`(kosong)-0-backspace`). Purely additive: existing PIN screens omit
+  /// it and are unchanged. Used by the staff PIN screen for its "back to
+  /// name list" key. The widget is responsible for its own tap handling
+  /// and is centered in the same 72×72 cell as the digit buttons.
+  final Widget? bottomLeft;
+
+  const AppPinKeypad({
+    super.key,
+    required this.onDigit,
+    required this.onBackspace,
+    this.disabled = false,
+    this.bottomLeft,
+  });
 
   static const _rows = [
     ['1', '2', '3'],
@@ -35,7 +49,7 @@ class AppPinKeypad extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
             children: row.map((key) {
               if (key.isEmpty) {
-                return const SizedBox(width: 72, height: 72);
+                return SizedBox(width: 72, height: 72, child: bottomLeft == null ? null : Center(child: bottomLeft));
               }
               if (key == 'back') {
                 return _KeypadButton(
