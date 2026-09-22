@@ -1,4 +1,4 @@
-From 5bbe038ba4ccfaa7f2110d0e65b8f8a554c2380a Mon Sep 17 00:00:00 2001
+From 35c03ddacebddedabb0b55d45b9066e4d699ef8c Mon Sep 17 00:00:00 2001
 From: Mamam Kasir Dev <dev@mamamayam.local>
 Date: Fri, 18 Sep 2026 15:10:16 +0000
 Subject: [PATCH] fix(laporan): repair num/double compile error, dispose race,
@@ -13,13 +13,13 @@ Subject: [PATCH] fix(laporan): repair num/double compile error, dispose race,
  lib/features/cabang/domain/cabang_models.dart |  76 +++++
  .../presentation/manajemen_cabang_screen.dart | 297 ++++++++++++++++++
  .../laporan/application/laporan_provider.dart |  55 +++-
- .../application/laporan_repository.dart       | 208 ++++++++----
+ .../application/laporan_repository.dart       | 242 ++++++++------
  .../laporan/domain/laporan_models.dart        |  22 +-
- .../laporan/presentation/laporan_screen.dart  | 192 +++++++----
+ .../laporan/presentation/laporan_screen.dart  | 228 ++++++++------
  .../widgets/report_trend_chart.dart           |   8 +-
  .../widgets/report_type_picker_sheet.dart     | 122 +++----
  .../presentation/menu_grid_items.dart         |  14 +-
- 14 files changed, 978 insertions(+), 187 deletions(-)
+ 14 files changed, 980 insertions(+), 255 deletions(-)
  create mode 100644 lib/features/cabang/application/cabang_provider.dart
  create mode 100644 lib/features/cabang/application/cabang_repository.dart
  create mode 100644 lib/features/cabang/domain/cabang_models.dart
@@ -746,7 +746,7 @@ index 1ba6f4f..2a01b18 100644
    }
  }
 diff --git a/lib/features/laporan/application/laporan_repository.dart b/lib/features/laporan/application/laporan_repository.dart
-index 51c59c0..4451826 100644
+index 0ff2a4d..4451826 100644
 --- a/lib/features/laporan/application/laporan_repository.dart
 +++ b/lib/features/laporan/application/laporan_repository.dart
 @@ -4,9 +4,28 @@ import '../../../core/data/app_database.dart';
@@ -875,38 +875,30 @@ index 51c59c0..4451826 100644
        trend: trend,
        rows: rows,
      );
-@@ -60,72 +106,118 @@ class LaporanRepository {
+@@ -60,48 +106,60 @@ class LaporanRepository {
  
    String _monthPrefix(int year, int month) => '$year-${month.toString().padLeft(2, '0')}';
  
--  Future<int> _sumPaidTotalForDay(Database db, int year, int month, int day) async {
--    final dateStr = '$year-${month.toString().padLeft(2, '0')}-${day.toString().padLeft(2, '0')}';
--    final result = await db.rawQuery(
--      "SELECT COALESCE(SUM(total), 0) as total FROM transactions WHERE status = 'paid' AND date(paid_at) = ?",
--      [dateStr],
--    );
--    return result.first['total'] as int;
--  }
--
--  Future<int> _sumExpenseForDay(Database db, int year, int month, int day) async {
--    final dateStr = '$year-${month.toString().padLeft(2, '0')}-${day.toString().padLeft(2, '0')}';
--    final result = await db.rawQuery(
--      "SELECT COALESCE(SUM(amount), 0) as total FROM cash_movements WHERE type = 'expense' AND date(created_at) = ?",
--      [dateStr],
--    );
--    return result.first['total'] as int;
+-  /// SQLite's SUM()/COUNT() can hand back either an int or a double
+-  /// depending on platform/driver and whether any floating-point value
+-  /// was seen during aggregation — casting straight `as int` on that
+-  /// column threw and silently blanked this whole report whenever the
+-  /// driver returned a double. Route every numeric column read through
+-  /// this so an unexpected num subtype never crashes the report.
 +  /// sqflite can hand back `int` or `double` for aggregate columns
 +  /// depending on the expression, so never cast an aggregate straight to
 +  /// `int` — a hard `as int` on a `double` throws at runtime and kills
 +  /// the whole report.
-+  int _asInt(Object? value) {
-+    if (value == null) return 0;
-+    if (value is int) return value;
+   int _asInt(Object? value) {
+     if (value == null) return 0;
+     if (value is int) return value;
+-    if (value is num) return value.round();
 +    if (value is num) return value.toInt();
-+    return int.tryParse(value.toString()) ?? 0;
+     return int.tryParse(value.toString()) ?? 0;
    }
  
--  Future<int> _countPaidOrdersForMonth(Database db, int year, int month) async {
+-  Future<int> _sumPaidTotalForDay(Database db, int year, int month, int day) async {
+-    final dateStr = '$year-${month.toString().padLeft(2, '0')}-${day.toString().padLeft(2, '0')}';
 +  /// One GROUP BY query for the whole month instead of one query per
 +  /// day. The per-day loop this replaces fired up to 31 sequential
 +  /// round-trips against an encrypted DB, which was slow enough that
@@ -923,20 +915,36 @@ index 51c59c0..4451826 100644
 +    required int daysInMonth,
 +  }) async {
      final result = await db.rawQuery(
--      "SELECT COUNT(*) as cnt FROM transactions WHERE status = 'paid' AND strftime('%Y-%m', paid_at) = ?",
+-      "SELECT COALESCE(SUM(total), 0) as total FROM transactions WHERE status = 'paid' AND date(paid_at) = ?",
+-      [dateStr],
 +      "SELECT CAST(strftime('%d', $dateColumn) AS INTEGER) AS day, "
 +      "COALESCE(SUM($amountColumn), 0) AS total "
 +      "FROM $table "
 +      "WHERE $filter AND strftime('%Y-%m', $dateColumn) = ? "
 +      "GROUP BY day",
-       [_monthPrefix(year, month)],
++      [_monthPrefix(year, month)],
      );
--    return result.first['cnt'] as int;
-+
+-    return _asInt(result.first['total']);
+-  }
+ 
+-  Future<int> _sumExpenseForDay(Database db, int year, int month, int day) async {
+-    final dateStr = '$year-${month.toString().padLeft(2, '0')}-${day.toString().padLeft(2, '0')}';
+-    final result = await db.rawQuery(
+-      "SELECT COALESCE(SUM(amount), 0) as total FROM cash_movements WHERE type = 'expense' AND date(created_at) = ?",
+-      [dateStr],
+-    );
+-    return _asInt(result.first['total']);
+-  }
 +    final byDay = <int, int>{
 +      for (final row in result) _asInt(row['day']): _asInt(row['total']),
 +    };
-+
+ 
+-  Future<int> _countPaidOrdersForMonth(Database db, int year, int month) async {
+-    final result = await db.rawQuery(
+-      "SELECT COUNT(*) as cnt FROM transactions WHERE status = 'paid' AND strftime('%Y-%m', paid_at) = ?",
+-      [_monthPrefix(year, month)],
+-    );
+-    return _asInt(result.first['cnt']);
 +    return [
 +      for (var day = 1; day <= daysInMonth; day++) ReportTrendPoint(day: day, value: byDay[day] ?? 0),
 +    ];
@@ -956,9 +964,8 @@ index 51c59c0..4451826 100644
 +      "SELECT COUNT(*) as cnt FROM $table WHERE $filter AND strftime('%Y-%m', $dateColumn) = ?",
        [_monthPrefix(year, month)],
      );
--    return result.first['cnt'] as int;
-+    return _asInt(result.first['cnt']);
-   }
+     return _asInt(result.first['cnt']);
+@@ -109,51 +167,55 @@ class LaporanRepository {
  
    Future<List<ReportRow>> _getPendapatanRows(Database db, int year, int month) async {
      final rows = await db.rawQuery(
@@ -968,23 +975,37 @@ index 51c59c0..4451826 100644
 +      "ORDER BY paid_at DESC LIMIT 50",
        [_monthPrefix(year, month)],
      );
+-    final result = <ReportRow>[];
+-    for (final row in rows) {
+-      // One malformed row (missing/unparseable paid_at, unexpected
+-      // numeric type) used to throw and blank the entire report instead
+-      // of just dropping that row.
+-      try {
+-        final rawPaidAt = row['paid_at'];
+-        final paidAt = rawPaidAt is String ? DateTime.parse(rawPaidAt) : DateTime.now();
+-        final customerName = row['customer_name'] as String? ?? 'Pelanggan';
+-        result.add(ReportRow(
+-          title: customerName,
+-          subtitle: 'Mamam Ayam - ${_formatDate(paidAt)}',
+-          amount: _asInt(row['total']),
+-        ));
+-      } catch (_) {
+-        continue;
+-      }
+-    }
+-    return result;
 +
-     return rows.map((row) {
--      final paidAt = DateTime.parse(row['paid_at'] as String);
--      final customerName = row['customer_name'] as String? ?? 'Pelanggan';
++    return rows.map((row) {
 +      final paidAt = _parseDate(row['paid_at']);
 +      // PRD: a transaction with no customer is "Pelanggan Umum".
 +      final customerName = (row['customer_name'] as String?)?.trim();
 +      final displayNumber = (row['display_number'] as String?) ?? '-';
-       return ReportRow(
--        title: customerName,
--        subtitle: 'Mamam Ayam - ${_formatDate(paidAt)}',
--        amount: row['total'] as int,
++      return ReportRow(
 +        title: (customerName == null || customerName.isEmpty) ? 'Pelanggan Umum' : customerName,
 +        subtitle: paidAt == null ? displayNumber : '$displayNumber - ${_formatDate(paidAt)}',
 +        amount: _asInt(row['total']),
-       );
-     }).toList();
++      );
++    }).toList();
    }
  
    Future<List<ReportRow>> _getPengeluaranRows(Database db, int year, int month) async {
@@ -995,10 +1016,24 @@ index 51c59c0..4451826 100644
 +      "ORDER BY transaction_date DESC, created_at DESC LIMIT 50",
        [_monthPrefix(year, month)],
      );
+-    final result = <ReportRow>[];
+-    for (final row in rows) {
+-      try {
+-        final rawCreatedAt = row['created_at'];
+-        final createdAt = rawCreatedAt is String ? DateTime.parse(rawCreatedAt) : DateTime.now();
+-        final reason = row['reason'] as String? ?? 'Belanja';
+-        result.add(ReportRow(
+-          title: reason,
+-          subtitle: 'Mamam Ayam - ${_formatDate(createdAt)}',
+-          amount: _asInt(row['amount']),
+-        ));
+-      } catch (_) {
+-        continue;
+-      }
+-    }
+-    return result;
 +
-     return rows.map((row) {
--      final createdAt = DateTime.parse(row['created_at'] as String);
--      final reason = row['reason'] as String? ?? 'Belanja';
++    return rows.map((row) {
 +      final date = _parseDate(row['transaction_date']);
 +      final category = (row['category'] as String?)?.trim();
 +      final store = (row['store_or_supplier_name'] as String?)?.trim();
@@ -1007,27 +1042,22 @@ index 51c59c0..4451826 100644
 +        if (store != null && store.isNotEmpty && category != null && category.isNotEmpty) category,
 +        if (date != null) _formatDate(date),
 +      ];
-       return ReportRow(
--        title: reason,
--        subtitle: 'Mamam Ayam - ${_formatDate(createdAt)}',
--        amount: row['amount'] as int,
++      return ReportRow(
 +        title: title,
 +        subtitle: parts.join(' - '),
 +        amount: _asInt(row['amount']),
-       );
-     }).toList();
-   }
- 
++      );
++    }).toList();
++  }
++
 +  /// Tolerant parse: a malformed/NULL timestamp degrades the one row's
 +  /// subtitle instead of throwing and blanking the entire report.
 +  DateTime? _parseDate(Object? value) {
 +    if (value is! String || value.isEmpty) return null;
 +    return DateTime.tryParse(value);
-+  }
-+
+   }
+ 
    String _formatDate(DateTime date) {
-     const months = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
-     final hh = date.hour.toString().padLeft(2, '0');
 diff --git a/lib/features/laporan/domain/laporan_models.dart b/lib/features/laporan/domain/laporan_models.dart
 index 4b566ab..3ab78c5 100644
 --- a/lib/features/laporan/domain/laporan_models.dart
@@ -1065,7 +1095,7 @@ index 4b566ab..3ab78c5 100644
    customer('Customer');
  
 diff --git a/lib/features/laporan/presentation/laporan_screen.dart b/lib/features/laporan/presentation/laporan_screen.dart
-index 10edc99..04f30b8 100644
+index 7428191..04f30b8 100644
 --- a/lib/features/laporan/presentation/laporan_screen.dart
 +++ b/lib/features/laporan/presentation/laporan_screen.dart
 @@ -6,6 +6,9 @@ import '../../../core/navigation/app_nav.dart';
@@ -1117,14 +1147,19 @@ index 10edc99..04f30b8 100644
      return Scaffold(
        backgroundColor: AppColors.background,
        body: SafeArea(
-@@ -66,10 +82,14 @@ class LaporanScreen extends ConsumerWidget {
+@@ -66,15 +82,14 @@ class LaporanScreen extends ConsumerWidget {
              const SizedBox(height: AppSpacing.lg),
              Expanded(
                child: state.isLoading
 -                  ? Center(child: CircularProgressIndicator(color: accentColor))
--                  : !state.reportType.isImplemented
--                      ? const _ComingSoonBody()
--                      : _ReportBody(state: state, accentColor: accentColor),
+-                  : state.errorMessage != null
+-                      ? _ReportErrorBody(
+-                          message: state.errorMessage!,
+-                          onRetry: controller.load,
+-                        )
+-                      : !state.reportType.isImplemented
+-                          ? const _ComingSoonBody()
+-                          : _ReportBody(state: state, accentColor: accentColor),
 +                  // Component standards §14: full-screen loading is always
 +                  // AppColors.brand, even on a screen with its own accent.
 +                  ? const Center(child: CircularProgressIndicator(color: AppColors.brand))
@@ -1136,7 +1171,7 @@ index 10edc99..04f30b8 100644
              ),
            ],
          ),
-@@ -81,7 +101,6 @@ class LaporanScreen extends ConsumerWidget {
+@@ -86,7 +101,6 @@ class LaporanScreen extends ConsumerWidget {
      final controller = ref.read(laporanProvider.notifier);
      AppNav.showModal(
        context,
@@ -1144,7 +1179,7 @@ index 10edc99..04f30b8 100644
        builder: (_) => ReportTypePickerSheet(
          current: ref.read(laporanProvider).reportType,
          onSelect: controller.setReportType,
-@@ -90,6 +109,73 @@ class LaporanScreen extends ConsumerWidget {
+@@ -95,6 +109,73 @@ class LaporanScreen extends ConsumerWidget {
    }
  }
  
@@ -1218,7 +1253,7 @@ index 10edc99..04f30b8 100644
  class _FilterPill extends StatelessWidget {
    final IconData? icon;
    final Color? iconColor;
-@@ -125,7 +211,7 @@ class _FilterPill extends StatelessWidget {
+@@ -130,7 +211,7 @@ class _FilterPill extends StatelessWidget {
                  style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
                ),
              ),
@@ -1227,7 +1262,7 @@ index 10edc99..04f30b8 100644
              const Icon(Icons.keyboard_arrow_down_rounded, size: 18, color: AppColors.textMuted),
            ],
          ),
-@@ -145,11 +231,11 @@ class _ReportBody extends StatelessWidget {
+@@ -150,11 +231,11 @@ class _ReportBody extends StatelessWidget {
      final isIncome = state.reportType == ReportType.pendapatan;
  
      return ListView(
@@ -1242,7 +1277,7 @@ index 10edc99..04f30b8 100644
            child: ReportTrendChart(points: data.trend, color: accentColor),
          ),
          const SizedBox(height: AppSpacing.lg),
-@@ -196,23 +282,22 @@ class _ReportBody extends StatelessWidget {
+@@ -201,23 +282,22 @@ class _ReportBody extends StatelessWidget {
          if (data.rows.isEmpty)
            Padding(
              padding: const EdgeInsets.symmetric(vertical: AppSpacing.xxl),
@@ -1273,7 +1308,7 @@ index 10edc99..04f30b8 100644
                    child: Row(
                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
                      children: [
-@@ -220,12 +305,25 @@ class _ReportBody extends StatelessWidget {
+@@ -225,12 +305,25 @@ class _ReportBody extends StatelessWidget {
                          child: Column(
                            crossAxisAlignment: CrossAxisAlignment.start,
                            children: [
@@ -1302,7 +1337,7 @@ index 10edc99..04f30b8 100644
                        Text(
                          formatRupiah(row.amount),
                          style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: accentColor),
-@@ -249,43 +347,31 @@ class _StatCard extends StatelessWidget {
+@@ -254,74 +347,31 @@ class _StatCard extends StatelessWidget {
  
    @override
    Widget build(BuildContext context) {
@@ -1332,6 +1367,37 @@ index 10edc99..04f30b8 100644
 -          const SizedBox(height: 6),
 -          Text(value, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
 -        ],
+-      ),
+-    );
+-  }
+-}
+-
+-class _ReportErrorBody extends StatelessWidget {
+-  final String message;
+-  final VoidCallback onRetry;
+-  const _ReportErrorBody({required this.message, required this.onRetry});
+-
+-  @override
+-  Widget build(BuildContext context) {
+-    return Center(
+-      child: Padding(
+-        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xl),
+-        child: Column(
+-          mainAxisSize: MainAxisSize.min,
+-          children: [
+-            const Icon(Icons.error_outline_rounded, size: 40, color: AppColors.textMuted),
+-            const SizedBox(height: AppSpacing.md),
+-            const Text('Gagal Memuat Laporan', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
+-            const SizedBox(height: 4),
+-            Text(
+-              message,
+-              textAlign: TextAlign.center,
+-              style: const TextStyle(fontSize: 13, color: AppColors.textMuted),
+-            ),
+-            const SizedBox(height: AppSpacing.lg),
+-            TextButton(onPressed: onRetry, child: const Text('Coba Lagi')),
+-          ],
+-        ),
 -      ),
 -    );
 -  }
