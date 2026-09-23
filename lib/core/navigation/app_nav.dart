@@ -33,6 +33,18 @@ class AppNav {
     return showModalBottomSheet<T>(
       context: context,
       isScrollControlled: isScrollControlled,
+      // Fixes the title ("Checkout" / "Pembayaran") rendering underneath
+      // the Android status bar (clock/battery) on full-height modals
+      // like CartDrawer and PaymentModal (DraggableScrollableSheet with
+      // initialChildSize: 1). showModalBottomSheet's own top inset
+      // handling defaults to false, and that outer gap is what the
+      // sheet's own internal `SafeArea(bottom: false)` was relying on —
+      // without this, the sheet route is allowed to draw under the
+      // status bar before its internal SafeArea ever gets a chance to
+      // pad it. Safe for shorter, non-full-height sheets too: it only
+      // adds top clearance when a route actually extends under the
+      // status bar, so half-screen pickers are unaffected.
+      useSafeArea: true,
       backgroundColor: Colors.transparent,
       builder: builder,
     );

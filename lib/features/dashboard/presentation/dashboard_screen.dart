@@ -148,14 +148,14 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                                       ),
                                 ),
                                 const SizedBox(height: AppSpacing.lg),
-                                SalesTrendChart(
-                                  points: state.trend,
-                                  onPointTap: (point) => _showTrendDetail(context, point),
-                                ),
-                                const SizedBox(height: AppSpacing.lg),
                                 QuickActionsRow(
                                   onKasirTap: () => AppNav.push(context, (_) => const PosScreen()),
                                   onRiwayatTap: () => AppNav.push(context, (_) => const HistoryScreen()),
+                                ),
+                                const SizedBox(height: AppSpacing.lg),
+                                SalesTrendChart(
+                                  points: state.trend,
+                                  onPointTap: (point) => _showTrendDetail(context, point),
                                 ),
                               ],
                             ),
