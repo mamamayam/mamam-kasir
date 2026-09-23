@@ -7,11 +7,8 @@ import '../../arus_kas/presentation/arus_kas_screen.dart';
 import '../../cabang/presentation/manajemen_cabang_screen.dart';
 import '../../dompet/presentation/dompet_screen.dart';
 import '../../hpp_opname/presentation/hpp_opname_screen.dart';
-<<<<<<< ours
-=======
 import '../../hrd/presentation/hrd_entry_screen.dart';
 import '../../laporan/presentation/laporan_screen.dart';
->>>>>>> theirs
 import '../../menu_management/presentation/menu_management_screen.dart';
 import '../../pelanggan/presentation/pelanggan_screen.dart';
 import '../../pengaturan/presentation/pengaturan_screen.dart';

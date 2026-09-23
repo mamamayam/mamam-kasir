@@ -1,0 +1,1025 @@
+diff --git a/lib/features/menu_shell/presentation/menu_grid_items.dart b/lib/features/menu_shell/presentation/menu_grid_items.dart
+index 47c39c5..1c2c4c3 100644
+--- a/lib/features/menu_shell/presentation/menu_grid_items.dart
++++ b/lib/features/menu_shell/presentation/menu_grid_items.dart
+@@ -7,11 +7,8 @@ import '../../arus_kas/presentation/arus_kas_screen.dart';
+ import '../../cabang/presentation/manajemen_cabang_screen.dart';
+ import '../../dompet/presentation/dompet_screen.dart';
+ import '../../hpp_opname/presentation/hpp_opname_screen.dart';
+-<<<<<<< ours
+-=======
+ import '../../hrd/presentation/hrd_entry_screen.dart';
+ import '../../laporan/presentation/laporan_screen.dart';
+->>>>>>> theirs
+ import '../../menu_management/presentation/menu_management_screen.dart';
+ import '../../pelanggan/presentation/pelanggan_screen.dart';
+ import '../../pengaturan/presentation/pengaturan_screen.dart';
+diff --git a/lib/features/menu_shell/presentation/placeholders/laporan_mockup_placeholder_screen.dart b/lib/features/menu_shell/presentation/placeholders/laporan_mockup_placeholder_screen.dart
+index bb602ab..85bf3af 100644
+--- a/lib/features/menu_shell/presentation/placeholders/laporan_mockup_placeholder_screen.dart
++++ b/lib/features/menu_shell/presentation/placeholders/laporan_mockup_placeholder_screen.dart
+@@ -1,31 +1,21 @@
+ import 'package:flutter/material.dart';
++import 'package:fl_chart/fl_chart.dart';
+ 
+ import '../../../../core/theme/app_colors.dart';
+ import '../../../../core/theme/app_spacing.dart';
+-import '../../../../core/widgets/app_card_shell.dart';
+-import '../../../../core/widgets/app_sheet_header.dart';
+-import '../../../../core/widgets/ios_page_header.dart';
+ 
+ /// STATIC MOCKUP PLACEHOLDER — Laporan.
+ ///
+-/// This is a visual-only conversion of the supplied `laporan-mockup.html`
+-/// reference, standing in for the swipe-up menu's "Laporan" tile while
+-/// the real, DB-wired [LaporanScreen] (lib/features/laporan/...) is
+-/// broken. It intentionally does NOT touch, import, or port any part of
+-/// the real Laporan feature (provider/repository/domain) — every number,
+-/// label and row below is hardcoded demo data taken straight from the
+-/// mockup, matching its two reference states (Pendapatan / Pengeluaran).
++/// Visual-only conversion of `laporan-mockup.html`, standing in for the
++/// swipe-up menu's "Laporan" tile while the real, DB-wired LaporanScreen
++/// (lib/features/laporan/...) is still blank/broken. Dummy data only —
++/// deliberately NOT wired to Riverpod, Supabase, or any real data
++/// source. Swap the menu tile back to the real LaporanScreen once it's
++/// built out, then delete this file.
+ ///
+-/// Do not wire this to Supabase, Riverpod, or any real data source. When
+-/// the real LaporanScreen is fixed, swap the menu tile back to it (see
+-/// menu_grid_items.dart) and delete this file — same one-at-a-time
+-/// placeholder-swap pattern PlaceholderScreen already documents.
+-///
+-/// Kept 1:1 with AGENTS.md's visual/component standards: header via
+-/// [IosPageHeader], cards via [AppCardShell], picker sheet via
+-/// [AppSheetHeader], and all colors/spacing/radius from AppColors /
+-/// AppSpacing / AppRadius tokens (no hardcoded hex or magic numbers) —
+-/// same tokens the mockup's own CSS variables were copied from.
++/// Kept simple on purpose: does not follow AGENTS.md component
++/// standards (no IosPageHeader/AppCardShell) — just needs to render and
++/// be tappable for now.
+ class LaporanMockupPlaceholderScreen extends StatefulWidget {
+   const LaporanMockupPlaceholderScreen({super.key});
+ 
+@@ -33,188 +23,488 @@ class LaporanMockupPlaceholderScreen extends StatefulWidget {
+   State<LaporanMockupPlaceholderScreen> createState() => _LaporanMockupPlaceholderScreenState();
+ }
+ 
++// ---------------------------------------------------------------------------
++// Dummy data — mirrors the reference HTML mockup exactly.
++// ---------------------------------------------------------------------------
++class _LaporanRow {
++  final String title;
++  final String sub;
++  final String amount;
++  const _LaporanRow({required this.title, required this.sub, required this.amount});
++}
++
++class _LaporanStat {
++  final IconData icon;
++  final String label;
++  final String value;
++  const _LaporanStat({required this.icon, required this.label, required this.value});
++}
++
++class _ReportType {
++  final String key;
++  final String label;
++  final IconData icon;
++  final Color color;
++  final List<double>? chartPoints; // null => not implemented yet
++  final List<_LaporanStat> stats;
++  final String amountKind; // 'income' | 'expense'
++  final List<_LaporanRow> rows;
++
++  const _ReportType({
++    required this.key,
++    required this.label,
++    required this.icon,
++    required this.color,
++    required this.chartPoints,
++    required this.stats,
++    required this.amountKind,
++    required this.rows,
++  });
++}
++
++final Map<String, _ReportType> _kDummyReports = {
++  'pendapatan': _ReportType(
++    key: 'pendapatan',
++    label: 'Pendapatan',
++    icon: Icons.trending_up_rounded,
++    color: AppColors.info,
++    chartPoints: const [0, 20, 0, 0, 0, 60, 0, 0, 20, 0, 40],
++    stats: const [
++      _LaporanStat(icon: Icons.attach_money_rounded, label: 'Pendapatan', value: 'Rp 140.140'),
++      _LaporanStat(icon: Icons.receipt_long_rounded, label: 'Total Pesanan', value: '5'),
++      _LaporanStat(icon: Icons.trending_up_rounded, label: 'Rata-rata Nilai Pesanan', value: 'Rp 28.028'),
++      _LaporanStat(icon: Icons.calendar_month_rounded, label: 'Rata-rata Harian', value: 'Rp 12.740'),
++    ],
++    amountKind: 'income',
++    rows: const [
++      _LaporanRow(title: 'Pelanggan', sub: 'Mamam Ayam - 11 Sep, 11:50', amount: 'Rp 42.180'),
++      _LaporanRow(title: 'Pelanggan', sub: 'Mamam Ayam - 09 Sep, 15:06', amount: 'Rp 19.980'),
++      _LaporanRow(title: 'Pelanggan', sub: 'Mamam Ayam - 06 Sep, 07:42', amount: 'Rp 19.980'),
++      _LaporanRow(title: 'Pelanggan', sub: 'Mamam Ayam - 06 Sep, 07:39', amount: 'Rp 38.000'),
++      _LaporanRow(title: 'Pelanggan', sub: 'Mamam Ayam - 02 Sep, 14:08', amount: 'Rp 20.000'),
++    ],
++  ),
++  'pengeluaran': _ReportType(
++    key: 'pengeluaran',
++    label: 'Pengeluaran',
++    icon: Icons.trending_down_rounded,
++    color: AppColors.danger,
++    chartPoints: const [0, 0, 0, 30, 0, 0, 0, 0, 0, 0, 0],
++    stats: const [
++      _LaporanStat(icon: Icons.trending_down_rounded, label: 'Total Pengeluaran', value: 'Rp 25.000'),
++      _LaporanStat(icon: Icons.receipt_long_rounded, label: 'Transaksi', value: '1'),
++      _LaporanStat(icon: Icons.trending_up_rounded, label: 'Rata-rata per Transaksi', value: 'Rp 25.000'),
++      _LaporanStat(icon: Icons.calendar_month_rounded, label: 'Rata-rata Harian', value: 'Rp 2.273'),
++    ],
++    amountKind: 'expense',
++    rows: const [
++      _LaporanRow(title: 'Belanja', sub: 'Mamam Ayam - 04 Sep, 17:55', amount: 'Rp 25.000'),
++    ],
++  ),
++  'laba': _ReportType(
++    key: 'laba',
++    label: 'Laba',
++    icon: Icons.account_balance_wallet_rounded,
++    color: AppColors.brand,
++    chartPoints: null,
++    stats: const [],
++    amountKind: 'income',
++    rows: const [],
++  ),
++  'produk': _ReportType(
++    key: 'produk',
++    label: 'Produk',
++    icon: Icons.inventory_2_rounded,
++    color: AppColors.brand,
++    chartPoints: null,
++    stats: const [],
++    amountKind: 'income',
++    rows: const [],
++  ),
++  'customer': _ReportType(
++    key: 'customer',
++    label: 'Customer',
++    icon: Icons.people_alt_rounded,
++    color: AppColors.brand,
++    chartPoints: null,
++    stats: const [],
++    amountKind: 'income',
++    rows: const [],
++  ),
++};
++
+ class _LaporanMockupPlaceholderScreenState extends State<LaporanMockupPlaceholderScreen> {
+-  _MockReportType _current = _MockReportType.pendapatan;
++  String _activeKey = 'pendapatan';
++  DateTime _month = DateTime(2026, 9);
++
++  _ReportType get _active => _kDummyReports[_activeKey]!;
++
++  static const _monthNames = [
++    'Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun',
++    'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des',
++  ];
++
++  String get _monthLabel => '${_monthNames[_month.month - 1]} ${_month.year}';
++
++  void _openReportPicker() {
++    showModalBottomSheet(
++      context: context,
++      backgroundColor: Colors.transparent,
++      isScrollControlled: true,
++      builder: (sheetContext) => _ReportPickerSheet(
++        activeKey: _activeKey,
++        onSelect: (key) {
++          final target = _kDummyReports[key]!;
++          if (target.chartPoints == null) {
++            Navigator.of(sheetContext).pop();
++            ScaffoldMessenger.of(context).showSnackBar(
++              SnackBar(content: Text('Laporan ${target.label} belum tersedia')),
++            );
++            return;
++          }
++          setState(() => _activeKey = key);
++          Navigator.of(sheetContext).pop();
++        },
++      ),
++    );
++  }
++
++  Future<void> _pickMonth() async {
++    final picked = await showDatePicker(
++      context: context,
++      initialDate: _month,
++      firstDate: DateTime(2020),
++      lastDate: DateTime(2100),
++      helpText: 'Pilih Bulan',
++    );
++    if (picked != null) {
++      setState(() => _month = DateTime(picked.year, picked.month));
++    }
++  }
+ 
+   @override
+   Widget build(BuildContext context) {
+-    final data = _mockData[_current]!;
+-
+     return Scaffold(
+       backgroundColor: AppColors.background,
+       body: SafeArea(
+         child: Column(
+           children: [
+-            IosPageHeader(
+-              title: const Text('Laporan'),
+-              trailingIcon: Icons.more_horiz_rounded,
+-              onTrailingTap: () => _openTypePicker(context),
++            _Header(
++              title: 'Laporan',
++              onBack: () => Navigator.of(context).maybePop(),
++              onTrailing: _openReportPicker,
+             ),
+-            Padding(
+-              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
++            Expanded(
++              child: SingleChildScrollView(
++                padding: const EdgeInsets.only(bottom: AppSpacing.xxl),
++                child: Column(
++                  crossAxisAlignment: CrossAxisAlignment.stretch,
++                  children: [
++                    _FilterRow(
++                      active: _active,
++                      monthLabel: _monthLabel,
++                      onTapReportType: _openReportPicker,
++                      onTapMonth: _pickMonth,
++                    ),
++                    const SizedBox(height: AppSpacing.lg),
++                    _ChartCard(report: _active),
++                    const SizedBox(height: AppSpacing.md),
++                    _StatGrid(stats: _active.stats),
++                    const SizedBox(height: AppSpacing.sm),
++                    _TransactionListCard(report: _active),
++                  ],
++                ),
++              ),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++// ---------------------------------------------------------------------------
++// Header
++// ---------------------------------------------------------------------------
++class _Header extends StatelessWidget {
++  final String title;
++  final VoidCallback onBack;
++  final VoidCallback onTrailing;
++
++  const _Header({required this.title, required this.onBack, required this.onTrailing});
++
++  @override
++  Widget build(BuildContext context) {
++    return SizedBox(
++      height: 64,
++      child: Padding(
++        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
++        child: Stack(
++          alignment: Alignment.center,
++          children: [
++            Align(
++              alignment: Alignment.centerLeft,
++              child: _CircleButton(icon: Icons.arrow_back_ios_new_rounded, onTap: onBack),
++            ),
++            Text(
++              title,
++              style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
++            ),
++            Align(
++              alignment: Alignment.centerRight,
++              child: _CircleButton(icon: Icons.more_horiz_rounded, onTap: onTrailing),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++class _CircleButton extends StatelessWidget {
++  final IconData icon;
++  final VoidCallback onTap;
++
++  const _CircleButton({required this.icon, required this.onTap});
++
++  @override
++  Widget build(BuildContext context) {
++    return Material(
++      color: AppColors.surface,
++      shape: const CircleBorder(),
++      elevation: 0,
++      child: InkWell(
++        customBorder: const CircleBorder(),
++        onTap: onTap,
++        child: Container(
++          width: 44,
++          height: 44,
++          decoration: BoxDecoration(
++            shape: BoxShape.circle,
++            boxShadow: [
++              BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 10, offset: const Offset(0, 2)),
++            ],
++          ),
++          child: Icon(icon, size: 20, color: AppColors.textPrimary),
++        ),
++      ),
++    );
++  }
++}
++
++// ---------------------------------------------------------------------------
++// Filter row: report-type pill + month pill
++// ---------------------------------------------------------------------------
++class _FilterRow extends StatelessWidget {
++  final _ReportType active;
++  final String monthLabel;
++  final VoidCallback onTapReportType;
++  final VoidCallback onTapMonth;
++
++  const _FilterRow({
++    required this.active,
++    required this.monthLabel,
++    required this.onTapReportType,
++    required this.onTapMonth,
++  });
++
++  @override
++  Widget build(BuildContext context) {
++    return Padding(
++      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
++      child: Row(
++        children: [
++          Expanded(
++            child: _PillSelect(
++              onTap: onTapReportType,
+               child: Row(
+                 children: [
+-                  Expanded(
+-                    child: _FilterPill(
+-                      icon: data.icon,
+-                      iconColor: data.color,
+-                      label: data.label,
+-                      onTap: () => _openTypePicker(context),
+-                    ),
++                  Container(
++                    width: 26,
++                    height: 26,
++                    decoration: BoxDecoration(shape: BoxShape.circle, color: active.color.withValues(alpha: 0.12)),
++                    child: Icon(active.icon, size: 15, color: active.color),
+                   ),
+                   const SizedBox(width: AppSpacing.sm),
+-                  const _FilterPill(label: 'Sep 2026', center: true),
++                  Flexible(
++                    child: Text(
++                      active.label,
++                      overflow: TextOverflow.ellipsis,
++                      style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
++                    ),
++                  ),
++                  const SizedBox(width: AppSpacing.xs),
++                  const Icon(Icons.keyboard_arrow_down_rounded, size: 16, color: AppColors.textMuted),
+                 ],
+               ),
+             ),
+-            const SizedBox(height: AppSpacing.lg),
+-            Expanded(
+-              child: ListView(
+-                physics: const AlwaysScrollableScrollPhysics(),
+-                padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.xxl),
++          ),
++          const SizedBox(width: AppSpacing.md),
++          Expanded(
++            child: _PillSelect(
++              onTap: onTapMonth,
++              child: Row(
++                mainAxisAlignment: MainAxisAlignment.center,
+                 children: [
+-                  AppCardShell(
+-                    padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.xl, AppSpacing.lg, AppSpacing.md),
+-                    child: _MockTrendChart(points: data.chartPoints, color: data.color),
+-                  ),
+-                  const SizedBox(height: AppSpacing.lg),
+-                  Row(
+-                    children: [
+-                      Expanded(child: _StatCard(stat: data.stats[0])),
+-                      const SizedBox(width: AppSpacing.md),
+-                      Expanded(child: _StatCard(stat: data.stats[1])),
+-                    ],
+-                  ),
+-                  const SizedBox(height: AppSpacing.md),
+-                  Row(
+-                    children: [
+-                      Expanded(child: _StatCard(stat: data.stats[2])),
+-                      const SizedBox(width: AppSpacing.md),
+-                      Expanded(child: _StatCard(stat: data.stats[3])),
+-                    ],
+-                  ),
+-                  const SizedBox(height: AppSpacing.lg),
+-                  AppCardShell(
+-                    padding: EdgeInsets.zero,
+-                    child: Column(
+-                      children: data.rows.asMap().entries.map((entry) {
+-                        final row = entry.value;
+-                        final isLast = entry.key == data.rows.length - 1;
+-                        return Container(
+-                          decoration: BoxDecoration(
+-                            border: isLast ? null : const Border(bottom: BorderSide(color: AppColors.border)),
+-                          ),
+-                          padding: const EdgeInsets.all(AppSpacing.lg),
+-                          child: Row(
+-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+-                            children: [
+-                              Expanded(
+-                                child: Column(
+-                                  crossAxisAlignment: CrossAxisAlignment.start,
+-                                  children: [
+-                                    Text(
+-                                      row.title,
+-                                      maxLines: 1,
+-                                      overflow: TextOverflow.ellipsis,
+-                                      style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: AppColors.textPrimary),
+-                                    ),
+-                                    const SizedBox(height: 2),
+-                                    Text(
+-                                      row.subtitle,
+-                                      maxLines: 1,
+-                                      overflow: TextOverflow.ellipsis,
+-                                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.textMuted),
+-                                    ),
+-                                  ],
+-                                ),
+-                              ),
+-                              const SizedBox(width: AppSpacing.sm),
+-                              Text(
+-                                row.amount,
+-                                style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: data.color),
+-                              ),
+-                            ],
+-                          ),
+-                        );
+-                      }).toList(),
+-                    ),
++                  Text(
++                    monthLabel,
++                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
+                   ),
++                  const SizedBox(width: AppSpacing.xs),
++                  const Icon(Icons.keyboard_arrow_down_rounded, size: 16, color: AppColors.textMuted),
+                 ],
+               ),
+             ),
+-          ],
+-        ),
++          ),
++        ],
+       ),
+     );
+   }
++}
+ 
+-  void _openTypePicker(BuildContext context) {
+-    showModalBottomSheet(
+-      context: context,
+-      isScrollControlled: true,
+-      backgroundColor: Colors.transparent,
+-      builder: (_) => _MockReportTypePickerSheet(
+-        current: _current,
+-        onSelect: (type) => setState(() => _current = type),
++class _PillSelect extends StatelessWidget {
++  final Widget child;
++  final VoidCallback onTap;
++
++  const _PillSelect({required this.child, required this.onTap});
++
++  @override
++  Widget build(BuildContext context) {
++    return Material(
++      color: AppColors.surface,
++      borderRadius: BorderRadius.circular(AppRadius.pill),
++      child: InkWell(
++        borderRadius: BorderRadius.circular(AppRadius.pill),
++        onTap: onTap,
++        child: Padding(
++          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: 12),
++          child: child,
++        ),
+       ),
+     );
+   }
+ }
+ 
+-class _FilterPill extends StatelessWidget {
+-  final IconData? icon;
+-  final Color? iconColor;
+-  final String label;
+-  final VoidCallback? onTap;
+-  final bool center;
++// ---------------------------------------------------------------------------
++// Chart card
++// ---------------------------------------------------------------------------
++class _ChartCard extends StatelessWidget {
++  final _ReportType report;
+ 
+-  const _FilterPill({this.icon, this.iconColor, required this.label, this.onTap, this.center = false});
++  const _ChartCard({required this.report});
+ 
+   @override
+   Widget build(BuildContext context) {
+-    return InkWell(
+-      onTap: onTap,
+-      borderRadius: BorderRadius.circular(AppRadius.pill),
+-      child: Container(
+-        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.md),
+-        decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.pill)),
+-        child: Row(
+-          mainAxisAlignment: center ? MainAxisAlignment.center : MainAxisAlignment.start,
+-          children: [
+-            if (icon != null) ...[
+-              Container(
+-                width: 26,
+-                height: 26,
+-                decoration: BoxDecoration(color: (iconColor ?? AppColors.textSecondary).withValues(alpha: 0.12), shape: BoxShape.circle),
+-                child: Icon(icon, size: 15, color: iconColor),
+-              ),
+-              const SizedBox(width: AppSpacing.sm),
+-            ],
+-            Flexible(
+-              child: Text(
+-                label,
+-                overflow: TextOverflow.ellipsis,
+-                style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
++    final points = report.chartPoints;
++
++    return Container(
++      margin: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
++      padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.xl, AppSpacing.md, AppSpacing.md),
++      decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.xl)),
++      child: SizedBox(
++        height: 220,
++        child: points == null
++            ? const Center(
++                child: Text('Belum ada data', style: TextStyle(color: AppColors.textMuted, fontSize: 13)),
++              )
++            : LineChart(
++                LineChartData(
++                  minY: 0,
++                  maxY: 60,
++                  gridData: FlGridData(
++                    show: true,
++                    drawVerticalLine: false,
++                    horizontalInterval: 20,
++                    getDrawingHorizontalLine: (_) => FlLine(color: AppColors.border, strokeWidth: 1),
++                  ),
++                  borderData: FlBorderData(show: false),
++                  titlesData: FlTitlesData(
++                    topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
++                    rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
++                    leftTitles: AxisTitles(
++                      sideTitles: SideTitles(
++                        showTitles: true,
++                        reservedSize: 44,
++                        interval: 20,
++                        getTitlesWidget: (value, meta) => Text(
++                          value == 0 ? 'Rp 0' : 'Rp ${value.toInt()}.0K',
++                          style: const TextStyle(fontSize: 10.5, color: AppColors.textMuted),
++                        ),
++                      ),
++                    ),
++                    bottomTitles: AxisTitles(
++                      sideTitles: SideTitles(
++                        showTitles: true,
++                        reservedSize: 22,
++                        interval: 2,
++                        getTitlesWidget: (value, meta) {
++                          final i = value.toInt();
++                          if (i < 0 || i >= points.length) return const SizedBox.shrink();
++                          return Padding(
++                            padding: const EdgeInsets.only(top: 6),
++                            child: Text('${i + 1}', style: const TextStyle(fontSize: 10.5, color: AppColors.textMuted)),
++                          );
++                        },
++                      ),
++                    ),
++                  ),
++                  lineBarsData: [
++                    LineChartBarData(
++                      spots: [for (int i = 0; i < points.length; i++) FlSpot(i.toDouble(), points[i])],
++                      isCurved: false,
++                      color: report.color,
++                      barWidth: 2.6,
++                      dotData: const FlDotData(show: false),
++                      belowBarData: BarAreaData(show: true, color: report.color.withValues(alpha: 0.08)),
++                    ),
++                  ],
++                  lineTouchData: const LineTouchData(enabled: true),
++                ),
+               ),
+-            ),
+-            const SizedBox(width: AppSpacing.xs),
+-            const Icon(Icons.keyboard_arrow_down_rounded, size: 18, color: AppColors.textMuted),
+-          ],
+-        ),
++      ),
++    );
++  }
++}
++
++// ---------------------------------------------------------------------------
++// Stat cards — 2x2 grid
++// ---------------------------------------------------------------------------
++class _StatGrid extends StatelessWidget {
++  final List<_LaporanStat> stats;
++
++  const _StatGrid({required this.stats});
++
++  @override
++  Widget build(BuildContext context) {
++    if (stats.isEmpty) return const SizedBox.shrink();
++    return Padding(
++      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
++      child: GridView.count(
++        crossAxisCount: 2,
++        shrinkWrap: true,
++        physics: const NeverScrollableScrollPhysics(),
++        mainAxisSpacing: AppSpacing.md,
++        crossAxisSpacing: AppSpacing.md,
++        childAspectRatio: 1.7,
++        children: stats.map((s) => _StatCard(stat: s)).toList(),
+       ),
+     );
+   }
+ }
+ 
+ class _StatCard extends StatelessWidget {
+-  final _MockStat stat;
++  final _LaporanStat stat;
++
+   const _StatCard({required this.stat});
+ 
+   @override
+   Widget build(BuildContext context) {
+-    return AppCardShell(
++    return Container(
++      padding: const EdgeInsets.all(AppSpacing.lg),
++      decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.lg)),
+       child: Column(
+         crossAxisAlignment: CrossAxisAlignment.start,
++        mainAxisAlignment: MainAxisAlignment.center,
+         children: [
+           Row(
+             children: [
+@@ -223,7 +513,6 @@ class _StatCard extends StatelessWidget {
+               Expanded(
+                 child: Text(
+                   stat.label,
+-                  maxLines: 1,
+                   overflow: TextOverflow.ellipsis,
+                   style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.textSecondary),
+                 ),
+@@ -233,8 +522,6 @@ class _StatCard extends StatelessWidget {
+           const SizedBox(height: 6),
+           Text(
+             stat.value,
+-            maxLines: 1,
+-            overflow: TextOverflow.ellipsis,
+             style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
+           ),
+         ],
+@@ -243,68 +530,84 @@ class _StatCard extends StatelessWidget {
+   }
+ }
+ 
+-/// Static placeholder in place of the chart — a plain flat box with an
+-/// icon and label, fixed height, no CustomPainter/canvas work at all.
+-/// Kept intentionally dumb (per instruction: "grafiknya dummy aja") so
+-/// it can never produce a layout/render exception the way a custom
+-/// painter driven by ambiguous constraints could.
+-class _MockTrendChart extends StatelessWidget {
+-  final List<double> points;
+-  final Color color;
+-  const _MockTrendChart({required this.points, required this.color});
++// ---------------------------------------------------------------------------
++// Transaction list card
++// ---------------------------------------------------------------------------
++class _TransactionListCard extends StatelessWidget {
++  final _ReportType report;
++
++  const _TransactionListCard({required this.report});
+ 
+   @override
+   Widget build(BuildContext context) {
++    if (report.rows.isEmpty) {
++      return Container(
++        margin: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
++        padding: const EdgeInsets.all(AppSpacing.xl),
++        decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.lg)),
++        alignment: Alignment.center,
++        child: const Text('Belum ada transaksi', style: TextStyle(color: AppColors.textMuted, fontSize: 13)),
++      );
++    }
++
++    final amountColor = report.amountKind == 'income' ? AppColors.info : AppColors.danger;
++
+     return Container(
+-      height: 160,
+-      width: double.infinity,
+-      decoration: BoxDecoration(
+-        color: color.withValues(alpha: 0.06),
+-        borderRadius: BorderRadius.circular(AppRadius.md),
+-      ),
+-      alignment: Alignment.center,
++      margin: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, 0),
++      decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(AppRadius.lg)),
++      clipBehavior: Clip.antiAlias,
+       child: Column(
+-        mainAxisSize: MainAxisSize.min,
+         children: [
+-          Icon(Icons.show_chart_rounded, size: 32, color: color),
+-          const SizedBox(height: AppSpacing.sm),
+-          Text(
+-            'Grafik tren',
+-            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: color),
+-          ),
++          for (int i = 0; i < report.rows.length; i++)
++            Container(
++              padding: const EdgeInsets.all(AppSpacing.lg),
++              decoration: BoxDecoration(
++                border: i == report.rows.length - 1 ? null : const Border(bottom: BorderSide(color: AppColors.border)),
++              ),
++              child: Row(
++                children: [
++                  Expanded(
++                    child: Column(
++                      crossAxisAlignment: CrossAxisAlignment.start,
++                      children: [
++                        Text(
++                          report.rows[i].title,
++                          style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: AppColors.textPrimary),
++                        ),
++                        const SizedBox(height: 2),
++                        Text(report.rows[i].sub, style: const TextStyle(fontSize: 13, color: AppColors.textMuted)),
++                      ],
++                    ),
++                  ),
++                  Text(
++                    report.rows[i].amount,
++                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: amountColor),
++                  ),
++                ],
++              ),
++            ),
+         ],
+       ),
+     );
+   }
+ }
+ 
+-class _MockReportTypePickerSheet extends StatelessWidget {
+-  final _MockReportType current;
+-  final ValueChanged<_MockReportType> onSelect;
+-  const _MockReportTypePickerSheet({required this.current, required this.onSelect});
+-
+-  static const _icons = {
+-    _MockReportType.pendapatan: Icons.trending_up_rounded,
+-    _MockReportType.pengeluaran: Icons.trending_down_rounded,
+-    _MockReportType.laba: Icons.account_balance_wallet_outlined,
+-    _MockReportType.produk: Icons.inventory_2_outlined,
+-    _MockReportType.customer: Icons.people_alt_outlined,
+-  };
+-
+-  static const _labels = {
+-    _MockReportType.pendapatan: 'Pendapatan',
+-    _MockReportType.pengeluaran: 'Pengeluaran',
+-    _MockReportType.laba: 'Laba',
+-    _MockReportType.produk: 'Produk',
+-    _MockReportType.customer: 'Customer',
+-  };
++// ---------------------------------------------------------------------------
++// "Pilih Jenis Laporan" bottom sheet
++// ---------------------------------------------------------------------------
++class _ReportPickerSheet extends StatelessWidget {
++  final String activeKey;
++  final ValueChanged<String> onSelect;
++
++  const _ReportPickerSheet({required this.activeKey, required this.onSelect});
+ 
+   @override
+   Widget build(BuildContext context) {
++    final options = _kDummyReports.values.toList();
++
+     return SafeArea(
+-      top: false,
+       child: Container(
+-        constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.85),
++        constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.82),
+         decoration: const BoxDecoration(
+           color: AppColors.surface,
+           borderRadius: BorderRadius.vertical(top: Radius.circular(AppRadius.xl)),
+@@ -312,140 +615,73 @@ class _MockReportTypePickerSheet extends StatelessWidget {
+         child: Column(
+           mainAxisSize: MainAxisSize.min,
+           children: [
+-            const Padding(
+-              padding: EdgeInsets.only(top: AppSpacing.sm),
+-              child: AppSheetHeader(title: 'Pilih Jenis Laporan'),
++            Padding(
++              padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.xl, AppSpacing.lg, AppSpacing.lg),
++              child: Row(
++                children: [
++                  const Expanded(
++                    child: Text(
++                      'Pilih Jenis Laporan',
++                      style: TextStyle(fontSize: 19, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
++                    ),
++                  ),
++                  Material(
++                    color: AppColors.background,
++                    shape: const CircleBorder(),
++                    child: InkWell(
++                      customBorder: const CircleBorder(),
++                      onTap: () => Navigator.of(context).pop(),
++                      child: const SizedBox(
++                        width: 36,
++                        height: 36,
++                        child: Icon(Icons.close_rounded, size: 16, color: AppColors.textSecondary),
++                      ),
++                    ),
++                  ),
++                ],
++              ),
+             ),
+             Flexible(
+-              child: ListView(
++              child: ListView.builder(
+                 shrinkWrap: true,
+-                padding: EdgeInsets.zero,
+-                children: _MockReportType.values.map((type) {
+-                  final isSelected = type == current;
+-                  final isImplemented = _mockData.containsKey(type);
++                itemCount: options.length,
++                itemBuilder: (context, i) {
++                  final opt = options[i];
++                  final isActive = opt.key == activeKey;
+                   return InkWell(
+-                    onTap: () {
+-                      if (!isImplemented) return;
+-                      onSelect(type);
+-                      Navigator.of(context).pop();
+-                    },
++                    onTap: () => onSelect(opt.key),
+                     child: Container(
++                      padding: const EdgeInsets.all(AppSpacing.lg),
+                       decoration: const BoxDecoration(border: Border(top: BorderSide(color: AppColors.border))),
+-                      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.lg),
+                       child: Row(
+                         children: [
+                           Container(
+                             width: 40,
+                             height: 40,
+                             decoration: BoxDecoration(
+-                              color: isSelected ? AppColors.info.withValues(alpha: 0.12) : AppColors.background,
+                               shape: BoxShape.circle,
++                              color: isActive ? AppColors.info.withValues(alpha: 0.12) : AppColors.background,
+                             ),
+-                            child: Icon(_icons[type], size: 19, color: isSelected ? AppColors.info : AppColors.textSecondary),
++                            child: Icon(opt.icon, size: 19, color: isActive ? AppColors.info : AppColors.textSecondary),
+                           ),
+                           const SizedBox(width: AppSpacing.md),
+                           Expanded(
+                             child: Text(
+-                              _labels[type]!,
+-                              maxLines: 1,
+-                              overflow: TextOverflow.ellipsis,
+-                              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: AppColors.textPrimary),
++                              opt.label,
++                              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.textPrimary),
+                             ),
+                           ),
+-                          if (!isImplemented)
+-                            const Padding(
+-                              padding: EdgeInsets.only(right: AppSpacing.sm),
+-                              child: Text(
+-                                'SEGERA',
+-                                style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, letterSpacing: 0.25, color: AppColors.textMuted),
+-                              ),
+-                            ),
+-                          if (isSelected) const Icon(Icons.check_rounded, size: 18, color: AppColors.textPrimary),
++                          if (isActive) const Icon(Icons.check_rounded, size: 18, color: AppColors.textPrimary),
+                         ],
+                       ),
+                     ),
+                   );
+-                }).toList(),
++                },
+               ),
+             ),
+-            const SizedBox(height: AppSpacing.sm),
+           ],
+         ),
+       ),
+     );
+   }
+ }
+-
+-enum _MockReportType { pendapatan, pengeluaran, laba, produk, customer }
+-
+-class _MockStat {
+-  final IconData icon;
+-  final String label;
+-  final String value;
+-  const _MockStat({required this.icon, required this.label, required this.value});
+-}
+-
+-class _MockRow {
+-  final String title;
+-  final String subtitle;
+-  final String amount;
+-  const _MockRow({required this.title, required this.subtitle, required this.amount});
+-}
+-
+-class _MockReportData {
+-  final String label;
+-  final IconData icon;
+-  final Color color;
+-  final List<double> chartPoints;
+-  final List<_MockStat> stats;
+-  final List<_MockRow> rows;
+-  const _MockReportData({
+-    required this.label,
+-    required this.icon,
+-    required this.color,
+-    required this.chartPoints,
+-    required this.stats,
+-    required this.rows,
+-  });
+-}
+-
+-/// Demo data lifted verbatim from laporan-mockup.html — only the two
+-/// fully-designed states (Pendapatan / Pengeluaran) have data; Laba,
+-/// Produk, Customer stay picker-only entries marked "SEGERA", exactly
+-/// as the mockup describes them.
+-final Map<_MockReportType, _MockReportData> _mockData = {
+-  _MockReportType.pendapatan: const _MockReportData(
+-    label: 'Pendapatan',
+-    icon: Icons.trending_up_rounded,
+-    color: AppColors.info,
+-    chartPoints: [0, 20, 0, 0, 0, 60, 0, 0, 20, 0, 40],
+-    stats: [
+-      _MockStat(icon: Icons.attach_money_rounded, label: 'Pendapatan', value: 'Rp 140.140'),
+-      _MockStat(icon: Icons.receipt_long_rounded, label: 'Total Pesanan', value: '5'),
+-      _MockStat(icon: Icons.trending_up_rounded, label: 'Rata-rata Nilai Pesanan', value: 'Rp 28.028'),
+-      _MockStat(icon: Icons.calendar_today_rounded, label: 'Rata-rata Harian', value: 'Rp 12.740'),
+-    ],
+-    rows: [
+-      _MockRow(title: 'Pelanggan', subtitle: 'Mamam Ayam - 11 Sep, 11:50', amount: 'Rp 42.180'),
+-      _MockRow(title: 'Pelanggan', subtitle: 'Mamam Ayam - 09 Sep, 15:06', amount: 'Rp 19.980'),
+-      _MockRow(title: 'Pelanggan', subtitle: 'Mamam Ayam - 06 Sep, 07:42', amount: 'Rp 19.980'),
+-      _MockRow(title: 'Pelanggan', subtitle: 'Mamam Ayam - 06 Sep, 07:39', amount: 'Rp 38.000'),
+-      _MockRow(title: 'Pelanggan', subtitle: 'Mamam Ayam - 02 Sep, 14:08', amount: 'Rp 20.000'),
+-    ],
+-  ),
+-  _MockReportType.pengeluaran: const _MockReportData(
+-    label: 'Pengeluaran',
+-    icon: Icons.trending_down_rounded,
+-    color: AppColors.danger,
+-    chartPoints: [0, 0, 0, 30, 0, 0, 0, 0, 0, 0, 0],
+-    stats: [
+-      _MockStat(icon: Icons.trending_down_rounded, label: 'Total Pengeluaran', value: 'Rp 25.000'),
+-      _MockStat(icon: Icons.receipt_long_rounded, label: 'Transaksi', value: '1'),
+-      _MockStat(icon: Icons.trending_up_rounded, label: 'Rata-rata per Transaksi', value: 'Rp 25.000'),
+-      _MockStat(icon: Icons.calendar_today_rounded, label: 'Rata-rata Harian', value: 'Rp 2.273'),
+-    ],
+-    rows: [
+-      _MockRow(title: 'Belanja', subtitle: 'Mamam Ayam - 04 Sep, 17:55', amount: 'Rp 25.000'),
+-    ],
+-  ),
+-};
+diff --git a/pubspec.yaml b/pubspec.yaml
+index 3b4855f..c036640 100644
+--- a/pubspec.yaml
++++ b/pubspec.yaml
+@@ -36,6 +36,9 @@ dependencies:
+   # Icons — swapped out from the web mockup's lucide-react for Flutter-native equivalents
+   cupertino_icons: ^1.0.6
+ 
++  # Chart rendering for Laporan (trend line + filled area)
++  fl_chart: ^0.69.0
++
+ dev_dependencies:
+   flutter_test:
+     sdk: flutter

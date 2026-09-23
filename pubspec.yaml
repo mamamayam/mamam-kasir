@@ -36,6 +36,9 @@ dependencies:
   # Icons — swapped out from the web mockup's lucide-react for Flutter-native equivalents
   cupertino_icons: ^1.0.6
 
+  # Chart rendering for Laporan (trend line + filled area)
+  fl_chart: ^0.69.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

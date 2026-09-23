@@ -9,10 +9,10 @@ import '../../../../core/widgets/app_card_shell.dart';
 import '../../../../core/widgets/ios_page_header.dart';
 import '../../application/hrd_provider.dart';
 import '../../domain/hrd_date_utils.dart';
-import 'owner_approval_screen.dart';
-import 'owner_attendance_today_screen.dart';
-import 'owner_employee_list_screen.dart';
-import 'owner_payroll_recap_screen.dart';
+import 'hrd_owner_approval_screen.dart';
+import 'hrd_owner_attendance_today_screen.dart';
+import 'hrd_owner_employee_list_screen.dart';
+import 'hrd_owner_payroll_recap_screen.dart';
 
 /// Owner Screen 1 — Overview. Reached from the "Staff" swipe-up tile for
 /// an Owner-mode session. Per the migration prompt this screen shows the
@@ -80,7 +80,7 @@ class HrdOwnerOverviewScreen extends ConsumerWidget {
                   const SizedBox(height: AppSpacing.sm),
                   Row(
                     children: [
-                      Expanded(child: _OverviewStat(label: 'Lembur', value: totalOvertime, icon: Icons.schedule_rounded, color: AppColors.tileLabaRugi)),
+                      Expanded(child: _OverviewStat(label: 'Lembur', value: totalOvertime, icon: Icons.schedule_rounded, color: AppColors.tileHpp)),
                       const SizedBox(width: AppSpacing.sm),
                       Expanded(child: _OverviewStat(label: 'Potongan', value: totalDeductions, icon: Icons.remove_circle_rounded, color: AppColors.danger)),
                     ],
