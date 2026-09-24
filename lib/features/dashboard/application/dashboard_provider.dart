@@ -1,5 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/session/app_session.dart';
+import '../../../core/session/app_session_provider.dart';
 import '../domain/dashboard_models.dart';
 import 'dashboard_repository.dart';
 
@@ -9,11 +11,11 @@ final dashboardRepositoryProvider = Provider<DashboardRepository>((ref) => Dashb
 /// as DompetState) so the page has one loading/error surface instead of
 /// juggling separate async providers.
 ///
-/// `user`/`unreadNotifications`/`pendingApprovals` stay at their
-/// unset/zero defaults — there is no Staff/Auth module (for `user`) or
-/// notifications/approvals table (for the other two) to read from yet.
-/// Once those modules exist, this state gains real fields for them
-/// instead of the counts being invented here.
+/// `unreadNotifications`/`pendingApprovals` stay at their unset/zero
+/// defaults — there is no notifications/approvals table to read from
+/// yet (pendingApprovals for the Owner approval sheet is read directly
+/// from hrdControllerProvider elsewhere, not through here). `user` is
+/// now real — see [DashboardController]'s constructor.
 class DashboardState {
   final SessionUser user;
   final DashboardMetrics? metrics;
@@ -55,14 +57,34 @@ class DashboardState {
 }
 
 final dashboardProvider = StateNotifierProvider.autoDispose<DashboardController, DashboardState>((ref) {
-  return DashboardController(ref.watch(dashboardRepositoryProvider));
+  final controller = DashboardController(ref.watch(dashboardRepositoryProvider));
+
+  // Keep DashboardState.user in sync with the real logged-in session
+  // (see SessionMarker's doc comment — this is the "real Auth/Staff
+  // module" it was waiting on). fireImmediately so the header shows the
+  // right role/name on first build, not just after the next login.
+  ref.listen<AppSession>(appSessionProvider, (previous, next) {
+    controller.setUser(_toSessionUser(next));
+  }, fireImmediately: true);
+
+  return controller;
 });
+
+SessionUser _toSessionUser(AppSession session) {
+  if (!session.isLoggedIn) return const SessionUser();
+  final roleLabel = session.role == AppRole.owner ? 'Owner' : 'Staff';
+  return SessionUser(name: session.username, role: roleLabel);
+}
 
 class DashboardController extends StateNotifier<DashboardState> {
   final DashboardRepository _repository;
 
   DashboardController(this._repository) : super(const DashboardState()) {
     load();
+  }
+
+  void setUser(SessionUser user) {
+    state = state.copyWith(user: user);
   }
 
   Future<void> load() async {

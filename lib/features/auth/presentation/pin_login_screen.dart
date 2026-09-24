@@ -5,29 +5,40 @@ import '../../../core/theme/app_colors.dart';
 import '../../../core/widgets/app_pin_keypad.dart';
 import '../../dashboard/presentation/dashboard_screen.dart';
 import '../domain/pin_auth_state.dart';
+import 'login_screen.dart';
 import 'pin_auth_controller.dart';
 
-class PinLoginScreen extends ConsumerWidget {
+class PinLoginScreen extends ConsumerStatefulWidget {
   const PinLoginScreen({super.key});
 
-  void _handleDigit(WidgetRef ref, BuildContext context, String digit) {
-    ref.read(pinAuthControllerProvider.notifier).addDigit(digit);
-
-    final state = ref.read(pinAuthControllerProvider);
-    if (state.enteredDigits.length == PinAuthState.pinLength && !state.isError) {
-      // Successful shell-demo PIN — proceed to dashboard.
-      Future.microtask(() {
-        if (context.mounted) {
-          Navigator.of(context).pushReplacement(
-            MaterialPageRoute(builder: (_) => const DashboardScreen()),
-          );
-        }
-      });
-    }
-  }
-
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<PinLoginScreen> createState() => _PinLoginScreenState();
+}
+
+class _PinLoginScreenState extends ConsumerState<PinLoginScreen> {
+  @override
+  Widget build(BuildContext context) {
+    // Listen (not just watch) for the exact moment PIN verification
+    // succeeds — addDigit's underlying _verify is now async (checks the
+    // real stored PIN via AppSessionController.verifyPin), so we can no
+    // longer just read state synchronously right after calling addDigit
+    // like the old shell-demo version did; that would race the async
+    // check and never see the success. A successful verify leaves
+    // enteredDigits at full length with no error/lock (only a failed
+    // verify clears enteredDigits back to '') — that combination is
+    // unambiguous, so we only navigate on the transition into it to
+    // avoid re-navigating on every rebuild.
+    ref.listen<PinAuthState>(pinAuthControllerProvider, (previous, next) {
+      final succeeded = next.enteredDigits.length == PinAuthState.pinLength && !next.isError && !next.isLocked;
+      final justSucceeded = succeeded && previous?.enteredDigits != next.enteredDigits;
+
+      if (justSucceeded) {
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(builder: (_) => const DashboardScreen()),
+        );
+      }
+    });
+
     final state = ref.watch(pinAuthControllerProvider);
 
     return Scaffold(
@@ -70,14 +81,16 @@ class PinLoginScreen extends ConsumerWidget {
               const Spacer(flex: 2),
               AppPinKeypad(
                 disabled: state.isLocked,
-                onDigit: (d) => _handleDigit(ref, context, d),
+                onDigit: (d) => ref.read(pinAuthControllerProvider.notifier).addDigit(d),
                 onBackspace: () => ref.read(pinAuthControllerProvider.notifier).backspace(),
               ),
               const SizedBox(height: 12),
               TextButton(
                 onPressed: () {
-                  // Login-other-account: routes to full User ID + password
-                  // login per spec — stub navigation target for shell phase.
+                  Navigator.of(context).pushAndRemoveUntil(
+                    MaterialPageRoute(builder: (_) => const LoginScreen()),
+                    (route) => false,
+                  );
                 },
                 child: const Text(
                   'Login dengan akun lain',

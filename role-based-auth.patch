@@ -1,0 +1,1008 @@
+diff --git a/lib/core/session/app_session.dart b/lib/core/session/app_session.dart
+new file mode 100644
+index 0000000..5d1102f
+--- /dev/null
++++ b/lib/core/session/app_session.dart
+@@ -0,0 +1,32 @@
++/// App-level access role — who is logged in and what they're allowed to
++/// see. This is deliberately separate from [HrdRole] (payroll job
++/// position, e.g. "Manajer"/"Kasir" — see hrd_seed_data.dart), which is
++/// unrelated to app access.
++///
++/// Scope for this pass (see [[mamam-kasir-flutter]] notes): exactly one
++/// role per user, Owner or Staff. "Staff" is deliberately the umbrella
++/// term for anyone who isn't Owner (future: kurir, waitress, kasir,
++/// etc.) — not narrowed to "Cashier". A Manager tier and granular
++/// per-tile permission modes (not allowed/direct/approval per AGENTS.md)
++/// are explicitly deferred, not implemented here.
++enum AppRole { owner, staff }
++
++/// Who is currently logged into this device, if anyone.
++///
++/// This is the single source of truth for "who am I" at the app level —
++/// [hrdViewerModeProvider] and any future per-tile permission check
++/// should derive from this rather than keeping their own copy.
++class AppSession {
++  final String? username;
++  final AppRole? role;
++
++  const AppSession({this.username, this.role});
++
++  bool get isLoggedIn => username != null && role != null;
++
++  AppSession copyWith({String? username, AppRole? role}) {
++    return AppSession(username: username ?? this.username, role: role ?? this.role);
++  }
++
++  static const empty = AppSession();
++}
+diff --git a/lib/core/session/app_session_provider.dart b/lib/core/session/app_session_provider.dart
+new file mode 100644
+index 0000000..9fa81eb
+--- /dev/null
++++ b/lib/core/session/app_session_provider.dart
+@@ -0,0 +1,95 @@
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++import 'package:flutter_secure_storage/flutter_secure_storage.dart';
++import 'package:shared_preferences/shared_preferences.dart';
++
++import 'app_session.dart';
++
++// ---------------------------------------------------------------------------
++// Storage keys
++// ---------------------------------------------------------------------------
++// username/role are non-sensitive identity, kept in shared_preferences.
++// PIN is the closest thing to a credential this device holds, kept in
++// flutter_secure_storage (OS keychain/keystore) per AGENTS.md's
++// "encrypt local DB and OS secure key storage" security rule.
++const _kPrefsUsernameKey = 'session_username';
++const _kPrefsRoleKey = 'session_role';
++const _kSecurePinKey = 'session_device_pin';
++
++const _secureStorage = FlutterSecureStorage();
++
++/// Current logged-in session (username + role), if any. Persisted across
++/// app restarts via shared_preferences so the splash screen can route
++/// straight to the PIN lock instead of full login.
++///
++/// This is the intended replacement for hrdViewerModeProvider's
++/// placeholder env-var (see hrd_provider.dart doc comment) — that
++/// provider should derive HrdViewerMode from this session's role.
++final appSessionProvider = StateNotifierProvider<AppSessionController, AppSession>(
++  (ref) => AppSessionController()..restore(),
++);
++
++class AppSessionController extends StateNotifier<AppSession> {
++  AppSessionController() : super(AppSession.empty);
++
++  /// Loads any previously-saved session from disk. Called once on
++  /// startup; the splash screen awaits this indirectly by reading
++  /// [restored] before deciding where to route.
++  Future<void> restore() async {
++    final prefs = await SharedPreferences.getInstance();
++    final username = prefs.getString(_kPrefsUsernameKey);
++    final roleName = prefs.getString(_kPrefsRoleKey);
++    if (username == null || roleName == null) return;
++
++    final role = AppRole.values.where((r) => r.name == roleName).firstOrNull;
++    if (role == null) return;
++
++    state = AppSession(username: username, role: role);
++  }
++
++  /// Called after successful username+password verification.
++  Future<void> login({required String username, required AppRole role}) async {
++    final prefs = await SharedPreferences.getInstance();
++    await prefs.setString(_kPrefsUsernameKey, username);
++    await prefs.setString(_kPrefsRoleKey, role.name);
++    state = AppSession(username: username, role: role);
++  }
++
++  /// Clears the session (username/role) but deliberately leaves the
++  /// device PIN in place — logging out doesn't require re-registering a
++  /// PIN if the same person (or another authorized user) logs back in.
++  /// Full device PIN reset is a separate, explicit action.
++  Future<void> logout() async {
++    final prefs = await SharedPreferences.getInstance();
++    await prefs.remove(_kPrefsUsernameKey);
++    await prefs.remove(_kPrefsRoleKey);
++    state = AppSession.empty;
++  }
++
++  // ---------------------------------------------------------------------
++  // Device PIN — separate from the session identity above. One PIN per
++  // device for this pass (not one PIN per user), matching AGENTS.md's
++  // "one user = one active device" framing for now; multi-account PIN
++  // switching is future work.
++  // ---------------------------------------------------------------------
++
++  Future<bool> hasPinSet() async {
++    final pin = await _secureStorage.read(key: _kSecurePinKey);
++    return pin != null && pin.isNotEmpty;
++  }
++
++  Future<void> setPin(String pin) async {
++    await _secureStorage.write(key: _kSecurePinKey, value: pin);
++  }
++
++  Future<bool> verifyPin(String pin) async {
++    final saved = await _secureStorage.read(key: _kSecurePinKey);
++    return saved != null && saved == pin;
++  }
++
++  /// Clears the stored device PIN (e.g. "Cabut Otorisasi Device" per
++  /// AGENTS.md — not wired to any UI yet, but the method exists so that
++  /// feature can call it directly once built).
++  Future<void> clearPin() async {
++    await _secureStorage.delete(key: _kSecurePinKey);
++  }
++}
+diff --git a/lib/features/auth/domain/hardcoded_accounts.dart b/lib/features/auth/domain/hardcoded_accounts.dart
+new file mode 100644
+index 0000000..d6a49c6
+--- /dev/null
++++ b/lib/features/auth/domain/hardcoded_accounts.dart
+@@ -0,0 +1,33 @@
++import '../../../core/session/app_session.dart';
++
++/// PLACEHOLDER account list for username+password login.
++///
++/// No Supabase connection exists yet for this pass (Supabase.initialize
++/// is not called anywhere — see [[mamam-kasir-flutter]] notes). This is
++/// intentionally the ONLY source of truth for login credentials right
++/// now; swap for a real Supabase Auth / users-table lookup once the
++/// backend phase lands, without changing anything else in the login
++/// flow (LoginScreen only depends on [verifyHardcodedCredentials]).
++class HardcodedAccount {
++  final String username;
++  final String password;
++  final AppRole role;
++
++  const HardcodedAccount({required this.username, required this.password, required this.role});
++}
++
++const List<HardcodedAccount> kHardcodedAccounts = [
++  HardcodedAccount(username: 'owner', password: 'owner123', role: AppRole.owner),
++  HardcodedAccount(username: 'staff', password: 'staff123', role: AppRole.staff),
++];
++
++/// Returns the matching role if the credentials are valid, else null.
++/// Username match is case-insensitive; password is exact.
++AppRole? verifyHardcodedCredentials(String username, String password) {
++  for (final account in kHardcodedAccounts) {
++    if (account.username.toLowerCase() == username.trim().toLowerCase() && account.password == password) {
++      return account.role;
++    }
++  }
++  return null;
++}
+diff --git a/lib/features/auth/presentation/login_screen.dart b/lib/features/auth/presentation/login_screen.dart
+new file mode 100644
+index 0000000..158d250
+--- /dev/null
++++ b/lib/features/auth/presentation/login_screen.dart
+@@ -0,0 +1,229 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../../../core/session/app_session_provider.dart';
++import '../../../core/theme/app_colors.dart';
++import '../../../core/theme/app_spacing.dart';
++import '../domain/hardcoded_accounts.dart';
++import 'set_pin_screen.dart';
++import 'pin_login_screen.dart';
++
++/// Username + password login. Reached from splash (first-ever login on
++/// this device) or from PIN screen's "Login dengan akun lain".
++///
++/// Credentials are checked against [kHardcodedAccounts] only — no
++/// Supabase connection exists yet for this pass (see
++/// [[mamam-kasir-flutter]] notes). Swapping to real auth later should
++/// only require changing what happens inside [_submit], not this
++/// screen's structure.
++class LoginScreen extends ConsumerStatefulWidget {
++  const LoginScreen({super.key});
++
++  @override
++  ConsumerState<LoginScreen> createState() => _LoginScreenState();
++}
++
++class _LoginScreenState extends ConsumerState<LoginScreen> {
++  final _usernameController = TextEditingController();
++  final _passwordController = TextEditingController();
++  bool _obscurePassword = true;
++  bool _isSubmitting = false;
++  String? _errorText;
++
++  @override
++  void dispose() {
++    _usernameController.dispose();
++    _passwordController.dispose();
++    super.dispose();
++  }
++
++  Future<void> _submit() async {
++    final username = _usernameController.text.trim();
++    final password = _passwordController.text;
++
++    if (username.isEmpty || password.isEmpty) {
++      setState(() => _errorText = 'Username dan password wajib diisi');
++      return;
++    }
++
++    setState(() {
++      _isSubmitting = true;
++      _errorText = null;
++    });
++
++    // Small delay so the loading state is perceptible even though the
++    // hardcoded check is instant — keeps the UX honest about "this will
++    // be a real network call later" per [[mamam-kasir-flutter]] notes.
++    await Future.delayed(const Duration(milliseconds: 300));
++
++    final role = verifyHardcodedCredentials(username, password);
++    if (!mounted) return;
++
++    if (role == null) {
++      setState(() {
++        _isSubmitting = false;
++        _errorText = 'Username atau password salah';
++      });
++      return;
++    }
++
++    await ref.read(appSessionProvider.notifier).login(username: username, role: role);
++    if (!mounted) return;
++
++    final hasPinAlready = await ref.read(appSessionProvider.notifier).hasPinSet();
++    if (!mounted) return;
++
++    setState(() => _isSubmitting = false);
++
++    Navigator.of(context).pushAndRemoveUntil(
++      MaterialPageRoute(
++        builder: (_) => hasPinAlready ? const PinLoginScreen() : const SetPinScreen(),
++      ),
++      (route) => false,
++    );
++  }
++
++  void _forgotPassword() {
++    showDialog(
++      context: context,
++      builder: (context) => AlertDialog(
++        title: const Text('Lupa Password'),
++        content: const Text(
++          'Hubungi Owner untuk reset password akun kamu. Owner dapat mengatur ulang '
++          'lewat akun Supabase yang sama dengan Mamam Global.',
++        ),
++        actions: [
++          TextButton(
++            onPressed: () => Navigator.of(context).pop(),
++            child: const Text('Oke'),
++          ),
++        ],
++      ),
++    );
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    return Scaffold(
++      backgroundColor: AppColors.background,
++      body: SafeArea(
++        child: SingleChildScrollView(
++          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xl),
++          child: Column(
++            crossAxisAlignment: CrossAxisAlignment.stretch,
++            children: [
++              const SizedBox(height: 48),
++              Center(
++                child: Container(
++                  width: 64,
++                  height: 64,
++                  decoration: BoxDecoration(
++                    color: AppColors.brand,
++                    borderRadius: BorderRadius.circular(18),
++                  ),
++                  child: const Icon(Icons.storefront_rounded, color: Colors.white, size: 32),
++                ),
++              ),
++              const SizedBox(height: 20),
++              const Text(
++                'Masuk ke Mamam Kasir',
++                textAlign: TextAlign.center,
++                style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
++              ),
++              const SizedBox(height: 6),
++              const Text(
++                'Masukkan username dan password akun kamu',
++                textAlign: TextAlign.center,
++                style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
++              ),
++              const SizedBox(height: 32),
++              const Text('Username', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
++              const SizedBox(height: 8),
++              TextField(
++                controller: _usernameController,
++                textInputAction: TextInputAction.next,
++                autocorrect: false,
++                decoration: _inputDecoration(hint: 'owner atau staff'),
++              ),
++              const SizedBox(height: 16),
++              const Text('Password', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
++              const SizedBox(height: 8),
++              TextField(
++                controller: _passwordController,
++                obscureText: _obscurePassword,
++                textInputAction: TextInputAction.done,
++                onSubmitted: (_) => _submit(),
++                decoration: _inputDecoration(hint: 'Password').copyWith(
++                  suffixIcon: IconButton(
++                    icon: Icon(
++                      _obscurePassword ? Icons.visibility_off_rounded : Icons.visibility_rounded,
++                      size: 20,
++                      color: AppColors.textMuted,
++                    ),
++                    onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
++                  ),
++                ),
++              ),
++              if (_errorText != null) ...[
++                const SizedBox(height: 12),
++                Text(_errorText!, style: const TextStyle(fontSize: 13, color: AppColors.danger, fontWeight: FontWeight.w600)),
++              ],
++              const SizedBox(height: 8),
++              Align(
++                alignment: Alignment.centerRight,
++                child: TextButton(
++                  onPressed: _isSubmitting ? null : _forgotPassword,
++                  child: const Text(
++                    'Lupa password?',
++                    style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.w600, fontSize: 13),
++                  ),
++                ),
++              ),
++              const SizedBox(height: 12),
++              SizedBox(
++                height: 52,
++                child: FilledButton(
++                  onPressed: _isSubmitting ? null : _submit,
++                  style: FilledButton.styleFrom(
++                    backgroundColor: AppColors.textPrimary,
++                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
++                  ),
++                  child: _isSubmitting
++                      ? const SizedBox(
++                          width: 20,
++                          height: 20,
++                          child: CircularProgressIndicator(strokeWidth: 2.4, color: Colors.white),
++                        )
++                      : const Text('Masuk', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
++                ),
++              ),
++              const SizedBox(height: 24),
++            ],
++          ),
++        ),
++      ),
++    );
++  }
++
++  InputDecoration _inputDecoration({required String hint}) {
++    return InputDecoration(
++      hintText: hint,
++      hintStyle: const TextStyle(color: AppColors.textMuted, fontWeight: FontWeight.w500),
++      filled: true,
++      fillColor: AppColors.surface,
++      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
++      border: OutlineInputBorder(
++        borderRadius: BorderRadius.circular(AppRadius.md),
++        borderSide: const BorderSide(color: AppColors.border),
++      ),
++      enabledBorder: OutlineInputBorder(
++        borderRadius: BorderRadius.circular(AppRadius.md),
++        borderSide: const BorderSide(color: AppColors.border),
++      ),
++      focusedBorder: OutlineInputBorder(
++        borderRadius: BorderRadius.circular(AppRadius.md),
++        borderSide: const BorderSide(color: AppColors.brand, width: 1.5),
++      ),
++    );
++  }
++}
+diff --git a/lib/features/auth/presentation/pin_auth_controller.dart b/lib/features/auth/presentation/pin_auth_controller.dart
+index e56eaac..3e3ee72 100644
+--- a/lib/features/auth/presentation/pin_auth_controller.dart
++++ b/lib/features/auth/presentation/pin_auth_controller.dart
+@@ -1,14 +1,17 @@
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
++import '../../../core/session/app_session_provider.dart';
+ import '../domain/pin_auth_state.dart';
+ 
+ final pinAuthControllerProvider =
+     StateNotifierProvider.autoDispose<PinAuthController, PinAuthState>(
+-  (ref) => PinAuthController(),
++  (ref) => PinAuthController(ref),
+ );
+ 
+ class PinAuthController extends StateNotifier<PinAuthState> {
+-  PinAuthController() : super(const PinAuthState());
++  final Ref _ref;
++
++  PinAuthController(this._ref) : super(const PinAuthState());
+ 
+   void addDigit(String digit) {
+     if (state.isLocked) return;
+@@ -31,12 +34,11 @@ class PinAuthController extends StateNotifier<PinAuthState> {
+     );
+   }
+ 
+-  void _verify(String pin) {
+-    // PLACEHOLDER: real verification hits the local encrypted store /
+-    // Supabase auth per docs/03 sync contract. Shell-phase stub only.
+-    const correctPinForShellDemo = '0000';
++  Future<void> _verify(String pin) async {
++    final isCorrect = await _ref.read(appSessionProvider.notifier).verifyPin(pin);
++    if (!mounted) return;
+ 
+-    if (pin == correctPinForShellDemo) {
++    if (isCorrect) {
+       state = state.copyWith(isError: false, failedAttempts: 0);
+       return;
+     }
+diff --git a/lib/features/auth/presentation/pin_login_screen.dart b/lib/features/auth/presentation/pin_login_screen.dart
+index 71acedf..2445cfb 100644
+--- a/lib/features/auth/presentation/pin_login_screen.dart
++++ b/lib/features/auth/presentation/pin_login_screen.dart
+@@ -5,29 +5,40 @@ import '../../../core/theme/app_colors.dart';
+ import '../../../core/widgets/app_pin_keypad.dart';
+ import '../../dashboard/presentation/dashboard_screen.dart';
+ import '../domain/pin_auth_state.dart';
++import 'login_screen.dart';
+ import 'pin_auth_controller.dart';
+ 
+-class PinLoginScreen extends ConsumerWidget {
++class PinLoginScreen extends ConsumerStatefulWidget {
+   const PinLoginScreen({super.key});
+ 
+-  void _handleDigit(WidgetRef ref, BuildContext context, String digit) {
+-    ref.read(pinAuthControllerProvider.notifier).addDigit(digit);
+-
+-    final state = ref.read(pinAuthControllerProvider);
+-    if (state.enteredDigits.length == PinAuthState.pinLength && !state.isError) {
+-      // Successful shell-demo PIN — proceed to dashboard.
+-      Future.microtask(() {
+-        if (context.mounted) {
+-          Navigator.of(context).pushReplacement(
+-            MaterialPageRoute(builder: (_) => const DashboardScreen()),
+-          );
+-        }
+-      });
+-    }
+-  }
++  @override
++  ConsumerState<PinLoginScreen> createState() => _PinLoginScreenState();
++}
+ 
++class _PinLoginScreenState extends ConsumerState<PinLoginScreen> {
+   @override
+-  Widget build(BuildContext context, WidgetRef ref) {
++  Widget build(BuildContext context) {
++    // Listen (not just watch) for the exact moment PIN verification
++    // succeeds — addDigit's underlying _verify is now async (checks the
++    // real stored PIN via AppSessionController.verifyPin), so we can no
++    // longer just read state synchronously right after calling addDigit
++    // like the old shell-demo version did; that would race the async
++    // check and never see the success. A successful verify leaves
++    // enteredDigits at full length with no error/lock (only a failed
++    // verify clears enteredDigits back to '') — that combination is
++    // unambiguous, so we only navigate on the transition into it to
++    // avoid re-navigating on every rebuild.
++    ref.listen<PinAuthState>(pinAuthControllerProvider, (previous, next) {
++      final succeeded = next.enteredDigits.length == PinAuthState.pinLength && !next.isError && !next.isLocked;
++      final justSucceeded = succeeded && previous?.enteredDigits != next.enteredDigits;
++
++      if (justSucceeded) {
++        Navigator.of(context).pushReplacement(
++          MaterialPageRoute(builder: (_) => const DashboardScreen()),
++        );
++      }
++    });
++
+     final state = ref.watch(pinAuthControllerProvider);
+ 
+     return Scaffold(
+@@ -70,14 +81,16 @@ class PinLoginScreen extends ConsumerWidget {
+               const Spacer(flex: 2),
+               AppPinKeypad(
+                 disabled: state.isLocked,
+-                onDigit: (d) => _handleDigit(ref, context, d),
++                onDigit: (d) => ref.read(pinAuthControllerProvider.notifier).addDigit(d),
+                 onBackspace: () => ref.read(pinAuthControllerProvider.notifier).backspace(),
+               ),
+               const SizedBox(height: 12),
+               TextButton(
+                 onPressed: () {
+-                  // Login-other-account: routes to full User ID + password
+-                  // login per spec — stub navigation target for shell phase.
++                  Navigator.of(context).pushAndRemoveUntil(
++                    MaterialPageRoute(builder: (_) => const LoginScreen()),
++                    (route) => false,
++                  );
+                 },
+                 child: const Text(
+                   'Login dengan akun lain',
+diff --git a/lib/features/auth/presentation/set_pin_screen.dart b/lib/features/auth/presentation/set_pin_screen.dart
+new file mode 100644
+index 0000000..b8fdb53
+--- /dev/null
++++ b/lib/features/auth/presentation/set_pin_screen.dart
+@@ -0,0 +1,140 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../../../core/session/app_session_provider.dart';
++import '../../../core/theme/app_colors.dart';
++import '../../../core/widgets/app_pin_keypad.dart';
++import '../../dashboard/presentation/dashboard_screen.dart';
++import '../domain/pin_auth_state.dart';
++
++enum _SetPinStage { enter, confirm }
++
++/// Shown once, right after a successful username+password login on a
++/// device with no PIN saved yet. Asks for the 4-digit PIN twice (entry +
++/// confirmation) before saving it via [AppSessionController.setPin] —
++/// that PIN is what [PinLoginScreen] checks against on every later
++/// login on this device.
++class SetPinScreen extends ConsumerStatefulWidget {
++  const SetPinScreen({super.key});
++
++  @override
++  ConsumerState<SetPinScreen> createState() => _SetPinScreenState();
++}
++
++class _SetPinScreenState extends ConsumerState<SetPinScreen> {
++  _SetPinStage _stage = _SetPinStage.enter;
++  String _firstEntry = '';
++  String _currentDigits = '';
++  bool _isError = false;
++  bool _isSaving = false;
++
++  void _handleDigit(String digit) {
++    if (_isSaving) return;
++    if (_currentDigits.length >= PinAuthState.pinLength) return;
++
++    setState(() {
++      _currentDigits += digit;
++      _isError = false;
++    });
++
++    if (_currentDigits.length == PinAuthState.pinLength) {
++      _onComplete();
++    }
++  }
++
++  void _handleBackspace() {
++    if (_isSaving || _currentDigits.isEmpty) return;
++    setState(() {
++      _currentDigits = _currentDigits.substring(0, _currentDigits.length - 1);
++      _isError = false;
++    });
++  }
++
++  Future<void> _onComplete() async {
++    if (_stage == _SetPinStage.enter) {
++      setState(() {
++        _firstEntry = _currentDigits;
++        _currentDigits = '';
++        _stage = _SetPinStage.confirm;
++      });
++      return;
++    }
++
++    // Confirm stage
++    if (_currentDigits != _firstEntry) {
++      setState(() {
++        _isError = true;
++        _currentDigits = '';
++        _stage = _SetPinStage.enter;
++        _firstEntry = '';
++      });
++      return;
++    }
++
++    setState(() => _isSaving = true);
++    await ref.read(appSessionProvider.notifier).setPin(_currentDigits);
++    if (!mounted) return;
++
++    Navigator.of(context).pushAndRemoveUntil(
++      MaterialPageRoute(builder: (_) => const DashboardScreen()),
++      (route) => false,
++    );
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final isConfirm = _stage == _SetPinStage.confirm;
++
++    return Scaffold(
++      backgroundColor: AppColors.background,
++      body: SafeArea(
++        child: Padding(
++          padding: const EdgeInsets.symmetric(horizontal: 24),
++          child: Column(
++            children: [
++              const Spacer(flex: 2),
++              Container(
++                width: 56,
++                height: 56,
++                decoration: BoxDecoration(color: AppColors.brand, borderRadius: BorderRadius.circular(16)),
++                child: Icon(
++                  isConfirm ? Icons.check_circle_outline_rounded : Icons.pin_rounded,
++                  color: Colors.white,
++                  size: 28,
++                ),
++              ),
++              const SizedBox(height: 16),
++              Text(
++                isConfirm ? 'Konfirmasi PIN' : 'Buat PIN Baru',
++                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
++              ),
++              const SizedBox(height: 6),
++              Text(
++                _isError
++                    ? 'PIN tidak cocok, coba lagi'
++                    : isConfirm
++                        ? 'Masukkan ulang PIN yang sama'
++                        : 'Buat 4 digit PIN untuk masuk lebih cepat lain kali',
++                textAlign: TextAlign.center,
++                style: TextStyle(
++                  fontSize: 13,
++                  fontWeight: FontWeight.w500,
++                  color: _isError ? AppColors.danger : AppColors.textSecondary,
++                ),
++              ),
++              const SizedBox(height: 28),
++              AppPinDots(length: PinAuthState.pinLength, filledCount: _currentDigits.length, isError: _isError),
++              const Spacer(flex: 2),
++              AppPinKeypad(
++                disabled: _isSaving,
++                onDigit: _handleDigit,
++                onBackspace: _handleBackspace,
++              ),
++              const SizedBox(height: 28),
++            ],
++          ),
++        ),
++      ),
++    );
++  }
++}
+diff --git a/lib/features/auth/presentation/splash_screen.dart b/lib/features/auth/presentation/splash_screen.dart
+index 79054cc..f635ca7 100644
+--- a/lib/features/auth/presentation/splash_screen.dart
++++ b/lib/features/auth/presentation/splash_screen.dart
+@@ -1,20 +1,24 @@
+ import 'package:flutter/material.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
++import '../../../core/session/app_session_provider.dart';
+ import '../../../core/theme/app_colors.dart';
++import 'login_screen.dart';
+ import 'pin_login_screen.dart';
++import 'set_pin_screen.dart';
+ 
+ /// Splash screen. Kept intentionally simple per instruction ("splash tetap
+ /// seperti sekarang") — this is a neutral placeholder implementation since
+ /// no existing splash design was supplied; swap the branded content below
+ /// if a specific splash asset/animation already exists elsewhere.
+-class SplashScreen extends StatefulWidget {
++class SplashScreen extends ConsumerStatefulWidget {
+   const SplashScreen({super.key});
+ 
+   @override
+-  State<SplashScreen> createState() => _SplashScreenState();
++  ConsumerState<SplashScreen> createState() => _SplashScreenState();
+ }
+ 
+-class _SplashScreenState extends State<SplashScreen> {
++class _SplashScreenState extends ConsumerState<SplashScreen> {
+   @override
+   void initState() {
+     super.initState();
+@@ -22,13 +26,32 @@ class _SplashScreenState extends State<SplashScreen> {
+   }
+ 
+   Future<void> _navigateNext() async {
+-    // NOTE: real flow should check session/device-auth state here
+-    // (see AGENTS.md security rules: PIN 3-day expiry, device auth,
+-    // second-device logout) before deciding where to route.
+-    await Future.delayed(const Duration(milliseconds: 900));
++    // Full AGENTS.md device-auth rules (3-day PIN expiry forcing
++    // password re-login, second-device logout, etc.) are future work —
++    // for this pass, routing is just: no saved session -> Login
++    // (username+password); saved session but no PIN yet on this device
++    // -> Set PIN; saved session + PIN already set -> PIN lock screen.
++    final splashDelay = Future.delayed(const Duration(milliseconds: 900));
++
++    final sessionController = ref.read(appSessionProvider.notifier);
++    await sessionController.restore();
++    final session = ref.read(appSessionProvider);
++    final hasPinSet = session.isLoggedIn ? await sessionController.hasPinSet() : false;
++
++    await splashDelay;
+     if (!mounted) return;
++
++    final Widget destination;
++    if (!session.isLoggedIn) {
++      destination = const LoginScreen();
++    } else if (!hasPinSet) {
++      destination = const SetPinScreen();
++    } else {
++      destination = const PinLoginScreen();
++    }
++
+     Navigator.of(context).pushReplacement(
+-      MaterialPageRoute(builder: (_) => const PinLoginScreen()),
++      MaterialPageRoute(builder: (_) => destination),
+     );
+   }
+ 
+diff --git a/lib/features/dashboard/application/dashboard_provider.dart b/lib/features/dashboard/application/dashboard_provider.dart
+index 83a040d..060d239 100644
+--- a/lib/features/dashboard/application/dashboard_provider.dart
++++ b/lib/features/dashboard/application/dashboard_provider.dart
+@@ -1,5 +1,7 @@
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
++import '../../../core/session/app_session.dart';
++import '../../../core/session/app_session_provider.dart';
+ import '../domain/dashboard_models.dart';
+ import 'dashboard_repository.dart';
+ 
+@@ -9,11 +11,11 @@ final dashboardRepositoryProvider = Provider<DashboardRepository>((ref) => Dashb
+ /// as DompetState) so the page has one loading/error surface instead of
+ /// juggling separate async providers.
+ ///
+-/// `user`/`unreadNotifications`/`pendingApprovals` stay at their
+-/// unset/zero defaults — there is no Staff/Auth module (for `user`) or
+-/// notifications/approvals table (for the other two) to read from yet.
+-/// Once those modules exist, this state gains real fields for them
+-/// instead of the counts being invented here.
++/// `unreadNotifications`/`pendingApprovals` stay at their unset/zero
++/// defaults — there is no notifications/approvals table to read from
++/// yet (pendingApprovals for the Owner approval sheet is read directly
++/// from hrdControllerProvider elsewhere, not through here). `user` is
++/// now real — see [DashboardController]'s constructor.
+ class DashboardState {
+   final SessionUser user;
+   final DashboardMetrics? metrics;
+@@ -55,9 +57,25 @@ class DashboardState {
+ }
+ 
+ final dashboardProvider = StateNotifierProvider.autoDispose<DashboardController, DashboardState>((ref) {
+-  return DashboardController(ref.watch(dashboardRepositoryProvider));
++  final controller = DashboardController(ref.watch(dashboardRepositoryProvider));
++
++  // Keep DashboardState.user in sync with the real logged-in session
++  // (see SessionMarker's doc comment — this is the "real Auth/Staff
++  // module" it was waiting on). fireImmediately so the header shows the
++  // right role/name on first build, not just after the next login.
++  ref.listen<AppSession>(appSessionProvider, (previous, next) {
++    controller.setUser(_toSessionUser(next));
++  }, fireImmediately: true);
++
++  return controller;
+ });
+ 
++SessionUser _toSessionUser(AppSession session) {
++  if (!session.isLoggedIn) return const SessionUser();
++  final roleLabel = session.role == AppRole.owner ? 'Owner' : 'Staff';
++  return SessionUser(name: session.username, role: roleLabel);
++}
++
+ class DashboardController extends StateNotifier<DashboardState> {
+   final DashboardRepository _repository;
+ 
+@@ -65,6 +83,10 @@ class DashboardController extends StateNotifier<DashboardState> {
+     load();
+   }
+ 
++  void setUser(SessionUser user) {
++    state = state.copyWith(user: user);
++  }
++
+   Future<void> load() async {
+     state = state.copyWith(isLoading: true, errorMessage: null);
+     try {
+diff --git a/lib/features/hrd/application/hrd_provider.dart b/lib/features/hrd/application/hrd_provider.dart
+index 60d7188..02b9e94 100644
+--- a/lib/features/hrd/application/hrd_provider.dart
++++ b/lib/features/hrd/application/hrd_provider.dart
+@@ -1,5 +1,7 @@
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
++import '../../../core/session/app_session.dart';
++import '../../../core/session/app_session_provider.dart';
+ import '../domain/hrd_date_utils.dart';
+ import '../domain/hrd_models.dart';
+ import '../domain/hrd_seed_data.dart';
+@@ -17,17 +19,16 @@ import '../domain/payroll_engine.dart';
+ /// data). The Owner flow must not exist for this session at all.
+ enum HrdViewerMode { owner, sharedDevice }
+ 
+-/// PLACEHOLDER — there is no role/identity in the app yet (PIN login is a
+-/// shell-phase stub, docs/06 phases 3–4 are unbuilt), so the real "derive
+-/// the flow from who is logged in" rule cannot be implemented. This
+-/// provider is the single seam to replace once auth exposes the user's
+-/// role/permissions; it must NOT become an in-app toggle.
+-///
+-/// To preview the Staff flow during development without editing code:
+-/// `flutter run --dart-define=HRD_VIEWER_MODE=sharedDevice`.
++/// Now derived from the real logged-in session (see
++/// [[mamam-kasir-flutter]]/app_session.dart) rather than an env-var
++/// placeholder — Owner login -> [HrdViewerMode.owner], Staff login ->
++/// [HrdViewerMode.sharedDevice]. This was the intended seam per the
++/// original placeholder's doc comment; kept as its own provider (rather
++/// than inlining the check at every call site) so HRD code doesn't need
++/// to know about [AppRole] directly.
+ final hrdViewerModeProvider = Provider<HrdViewerMode>((ref) {
+-  const raw = String.fromEnvironment('HRD_VIEWER_MODE', defaultValue: 'owner');
+-  return raw == 'sharedDevice' ? HrdViewerMode.sharedDevice : HrdViewerMode.owner;
++  final role = ref.watch(appSessionProvider.select((s) => s.role));
++  return role == AppRole.owner ? HrdViewerMode.owner : HrdViewerMode.sharedDevice;
+ });
+ 
+ // ---------------------------------------------------------------------------
+diff --git a/lib/features/menu_shell/presentation/menu_bottom_sheet.dart b/lib/features/menu_shell/presentation/menu_bottom_sheet.dart
+index 6564069..205757c 100644
+--- a/lib/features/menu_shell/presentation/menu_bottom_sheet.dart
++++ b/lib/features/menu_shell/presentation/menu_bottom_sheet.dart
+@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
+ import '../../../core/navigation/app_nav.dart';
++import '../../../core/session/app_session.dart';
++import '../../../core/session/app_session_provider.dart';
+ import '../../../core/theme/app_colors.dart';
+ import '../../../core/theme/app_spacing.dart';
+ import '../../hrd/application/hrd_provider.dart';
+@@ -46,9 +48,37 @@ class MenuBottomSheetContent extends ConsumerWidget {
+   @override
+   Widget build(BuildContext context, WidgetRef ref) {
+     final pendingApprovals = ref.watch(hrdControllerProvider.select((s) => s.pendingApprovals.length));
+-    final items = buildMenuGridItems(
+-      context: context,
+-      onDismissSheet: () => Navigator.of(context).pop(),
++    final role = ref.watch(appSessionProvider.select((s) => s.role));
++    final isOwner = role == AppRole.owner;
++
++    // For this pass the 9-tile grid is Owner-only — Staff's access is
++    // limited to Kasir/Riwayat (dashboard quick actions, not this sheet)
++    // plus the "Staff" card below. See [[mamam-kasir-flutter]] notes:
++    // per-tile custom permissions are a future Owner-facing feature, not
++    // built yet, so this is a hard role check rather than a granular one.
++    final items = isOwner
++        ? buildMenuGridItems(
++            context: context,
++            onDismissSheet: () => Navigator.of(context).pop(),
++          )
++        : const <MenuGridItem>[];
++
++    // Renamed from "Cek Gaji Saya" — this card doubles as the Staff PIN
++    // flow entry point (pick employee -> PIN -> payslip), deliberately
++    // separate from the Owner-only "Staff" grid tile (see
++    // HrdEntryScreen's doc comment). Open to anyone on the shared
++    // device; label/position just changes by who's logged in.
++    final staffCard = MenuActionCard(
++      icon: Icons.payments_rounded,
++      title: 'Staff',
++      subtitle: 'Rincian & lainnya',
++      onTap: () => AppNav.push(context, (_) => const HrdStaffEntryScreen()),
++    );
++    final notifikasiCard = MenuActionCard(
++      icon: Icons.notifications_rounded,
++      title: 'Notifikasi',
++      subtitle: '$unreadNotifications belum dibaca',
++      onTap: () => Navigator.of(context).pop(),
+     );
+ 
+     return SafeArea(
+@@ -85,51 +115,50 @@ class MenuBottomSheetContent extends ConsumerWidget {
+                 child: Column(
+                   crossAxisAlignment: CrossAxisAlignment.start,
+                   children: [
+-                    // Notifikasi / Approval row
+-                    Row(
+-                      children: [
+-                        MenuActionCard(
+-                          icon: Icons.notifications_rounded,
+-                          title: 'Notifikasi',
+-                          subtitle: '$unreadNotifications belum dibaca',
+-                          onTap: () => Navigator.of(context).pop(),
+-                        ),
+-                        const SizedBox(width: AppSpacing.md),
+-                        MenuActionCard(
+-                          icon: Icons.fact_check_rounded,
+-                          title: 'Approval',
+-                          subtitle: '$pendingApprovals menunggu',
+-                          onTap: () => AppNav.push(context, (_) => const HrdOwnerApprovalScreen()),
+-                        ),
+-                      ],
+-                    ),
+-                    const SizedBox(height: AppSpacing.md),
+-                    // Staff PIN flow entry point — deliberately separate from the
+-                    // Owner-only "Staff" grid tile (see HrdEntryScreen's doc
+-                    // comment). Open to anyone on the shared device.
+-                    Row(
+-                      children: [
+-                        MenuActionCard(
+-                          icon: Icons.payments_rounded,
+-                          title: 'Cek Gaji Saya',
+-                          subtitle: 'Untuk karyawan',
+-                          onTap: () => AppNav.push(context, (_) => const HrdStaffEntryScreen()),
+-                        ),
+-                      ],
+-                    ),
+-                    const SizedBox(height: AppSpacing.xl),
+-                    Divider(color: AppColors.border, height: 1),
+-                    const SizedBox(height: AppSpacing.xl),
+-                    // 3x3 grid
+-                    GridView.count(
+-                      crossAxisCount: 3,
+-                      shrinkWrap: true,
+-                      physics: const NeverScrollableScrollPhysics(),
+-                      mainAxisSpacing: AppSpacing.sm,
+-                      crossAxisSpacing: AppSpacing.xs,
+-                      childAspectRatio: 1.0,
+-                      children: items.map((item) => _MenuGridTile(item: item)).toList(),
+-                    ),
++                    if (isOwner) ...[
++                      // Owner: Notifikasi + Approval side by side, "Staff"
++                      // full-width below — unchanged from before, only the
++                      // bottom card's label changed.
++                      Row(
++                        children: [
++                          notifikasiCard,
++                          const SizedBox(width: AppSpacing.md),
++                          MenuActionCard(
++                            icon: Icons.fact_check_rounded,
++                            title: 'Approval',
++                            subtitle: '$pendingApprovals menunggu',
++                            onTap: () => AppNav.push(context, (_) => const HrdOwnerApprovalScreen()),
++                          ),
++                        ],
++                      ),
++                      const SizedBox(height: AppSpacing.md),
++                      Row(children: [staffCard]),
++                    ] else ...[
++                      // Staff: no Approval access — "Staff" takes
++                      // Approval's old slot, both equal-width side by side.
++                      Row(
++                        children: [
++                          notifikasiCard,
++                          const SizedBox(width: AppSpacing.md),
++                          staffCard,
++                        ],
++                      ),
++                    ],
++                    if (items.isNotEmpty) ...[
++                      const SizedBox(height: AppSpacing.xl),
++                      Divider(color: AppColors.border, height: 1),
++                      const SizedBox(height: AppSpacing.xl),
++                      // 3x3 grid — Owner only, see isOwner check above.
++                      GridView.count(
++                        crossAxisCount: 3,
++                        shrinkWrap: true,
++                        physics: const NeverScrollableScrollPhysics(),
++                        mainAxisSpacing: AppSpacing.sm,
++                        crossAxisSpacing: AppSpacing.xs,
++                        childAspectRatio: 1.0,
++                        children: items.map((item) => _MenuGridTile(item: item)).toList(),
++                      ),
++                    ],
+                   ],
+                 ),
+               ),

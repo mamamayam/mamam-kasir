@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/navigation/app_nav.dart';
+import '../../../core/session/app_session.dart';
+import '../../../core/session/app_session_provider.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_spacing.dart';
 import '../../hrd/application/hrd_provider.dart';
@@ -46,9 +48,37 @@ class MenuBottomSheetContent extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final pendingApprovals = ref.watch(hrdControllerProvider.select((s) => s.pendingApprovals.length));
-    final items = buildMenuGridItems(
-      context: context,
-      onDismissSheet: () => Navigator.of(context).pop(),
+    final role = ref.watch(appSessionProvider.select((s) => s.role));
+    final isOwner = role == AppRole.owner;
+
+    // For this pass the 9-tile grid is Owner-only — Staff's access is
+    // limited to Kasir/Riwayat (dashboard quick actions, not this sheet)
+    // plus the "Staff" card below. See [[mamam-kasir-flutter]] notes:
+    // per-tile custom permissions are a future Owner-facing feature, not
+    // built yet, so this is a hard role check rather than a granular one.
+    final items = isOwner
+        ? buildMenuGridItems(
+            context: context,
+            onDismissSheet: () => Navigator.of(context).pop(),
+          )
+        : const <MenuGridItem>[];
+
+    // Renamed from "Cek Gaji Saya" — this card doubles as the Staff PIN
+    // flow entry point (pick employee -> PIN -> payslip), deliberately
+    // separate from the Owner-only "Staff" grid tile (see
+    // HrdEntryScreen's doc comment). Open to anyone on the shared
+    // device; label/position just changes by who's logged in.
+    final staffCard = MenuActionCard(
+      icon: Icons.payments_rounded,
+      title: 'Staff',
+      subtitle: 'Rincian & lainnya',
+      onTap: () => AppNav.push(context, (_) => const HrdStaffEntryScreen()),
+    );
+    final notifikasiCard = MenuActionCard(
+      icon: Icons.notifications_rounded,
+      title: 'Notifikasi',
+      subtitle: '$unreadNotifications belum dibaca',
+      onTap: () => Navigator.of(context).pop(),
     );
 
     return SafeArea(
@@ -85,51 +115,50 @@ class MenuBottomSheetContent extends ConsumerWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Notifikasi / Approval row
-                    Row(
-                      children: [
-                        MenuActionCard(
-                          icon: Icons.notifications_rounded,
-                          title: 'Notifikasi',
-                          subtitle: '$unreadNotifications belum dibaca',
-                          onTap: () => Navigator.of(context).pop(),
-                        ),
-                        const SizedBox(width: AppSpacing.md),
-                        MenuActionCard(
-                          icon: Icons.fact_check_rounded,
-                          title: 'Approval',
-                          subtitle: '$pendingApprovals menunggu',
-                          onTap: () => AppNav.push(context, (_) => const HrdOwnerApprovalScreen()),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: AppSpacing.md),
-                    // Staff PIN flow entry point — deliberately separate from the
-                    // Owner-only "Staff" grid tile (see HrdEntryScreen's doc
-                    // comment). Open to anyone on the shared device.
-                    Row(
-                      children: [
-                        MenuActionCard(
-                          icon: Icons.payments_rounded,
-                          title: 'Cek Gaji Saya',
-                          subtitle: 'Untuk karyawan',
-                          onTap: () => AppNav.push(context, (_) => const HrdStaffEntryScreen()),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: AppSpacing.xl),
-                    Divider(color: AppColors.border, height: 1),
-                    const SizedBox(height: AppSpacing.xl),
-                    // 3x3 grid
-                    GridView.count(
-                      crossAxisCount: 3,
-                      shrinkWrap: true,
-                      physics: const NeverScrollableScrollPhysics(),
-                      mainAxisSpacing: AppSpacing.sm,
-                      crossAxisSpacing: AppSpacing.xs,
-                      childAspectRatio: 1.0,
-                      children: items.map((item) => _MenuGridTile(item: item)).toList(),
-                    ),
+                    if (isOwner) ...[
+                      // Owner: Notifikasi + Approval side by side, "Staff"
+                      // full-width below — unchanged from before, only the
+                      // bottom card's label changed.
+                      Row(
+                        children: [
+                          notifikasiCard,
+                          const SizedBox(width: AppSpacing.md),
+                          MenuActionCard(
+                            icon: Icons.fact_check_rounded,
+                            title: 'Approval',
+                            subtitle: '$pendingApprovals menunggu',
+                            onTap: () => AppNav.push(context, (_) => const HrdOwnerApprovalScreen()),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: AppSpacing.md),
+                      Row(children: [staffCard]),
+                    ] else ...[
+                      // Staff: no Approval access — "Staff" takes
+                      // Approval's old slot, both equal-width side by side.
+                      Row(
+                        children: [
+                          notifikasiCard,
+                          const SizedBox(width: AppSpacing.md),
+                          staffCard,
+                        ],
+                      ),
+                    ],
+                    if (items.isNotEmpty) ...[
+                      const SizedBox(height: AppSpacing.xl),
+                      Divider(color: AppColors.border, height: 1),
+                      const SizedBox(height: AppSpacing.xl),
+                      // 3x3 grid — Owner only, see isOwner check above.
+                      GridView.count(
+                        crossAxisCount: 3,
+                        shrinkWrap: true,
+                        physics: const NeverScrollableScrollPhysics(),
+                        mainAxisSpacing: AppSpacing.sm,
+                        crossAxisSpacing: AppSpacing.xs,
+                        childAspectRatio: 1.0,
+                        children: items.map((item) => _MenuGridTile(item: item)).toList(),
+                      ),
+                    ],
                   ],
                 ),
               ),

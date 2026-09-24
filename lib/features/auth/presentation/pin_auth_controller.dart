@@ -1,14 +1,17 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/session/app_session_provider.dart';
 import '../domain/pin_auth_state.dart';
 
 final pinAuthControllerProvider =
     StateNotifierProvider.autoDispose<PinAuthController, PinAuthState>(
-  (ref) => PinAuthController(),
+  (ref) => PinAuthController(ref),
 );
 
 class PinAuthController extends StateNotifier<PinAuthState> {
-  PinAuthController() : super(const PinAuthState());
+  final Ref _ref;
+
+  PinAuthController(this._ref) : super(const PinAuthState());
 
   void addDigit(String digit) {
     if (state.isLocked) return;
@@ -31,12 +34,11 @@ class PinAuthController extends StateNotifier<PinAuthState> {
     );
   }
 
-  void _verify(String pin) {
-    // PLACEHOLDER: real verification hits the local encrypted store /
-    // Supabase auth per docs/03 sync contract. Shell-phase stub only.
-    const correctPinForShellDemo = '0000';
+  Future<void> _verify(String pin) async {
+    final isCorrect = await _ref.read(appSessionProvider.notifier).verifyPin(pin);
+    if (!mounted) return;
 
-    if (pin == correctPinForShellDemo) {
+    if (isCorrect) {
       state = state.copyWith(isError: false, failedAttempts: 0);
       return;
     }

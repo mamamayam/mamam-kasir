@@ -1,5 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/session/app_session.dart';
+import '../../../core/session/app_session_provider.dart';
 import '../domain/hrd_date_utils.dart';
 import '../domain/hrd_models.dart';
 import '../domain/hrd_seed_data.dart';
@@ -17,17 +19,16 @@ import '../domain/payroll_engine.dart';
 /// data). The Owner flow must not exist for this session at all.
 enum HrdViewerMode { owner, sharedDevice }
 
-/// PLACEHOLDER — there is no role/identity in the app yet (PIN login is a
-/// shell-phase stub, docs/06 phases 3–4 are unbuilt), so the real "derive
-/// the flow from who is logged in" rule cannot be implemented. This
-/// provider is the single seam to replace once auth exposes the user's
-/// role/permissions; it must NOT become an in-app toggle.
-///
-/// To preview the Staff flow during development without editing code:
-/// `flutter run --dart-define=HRD_VIEWER_MODE=sharedDevice`.
+/// Now derived from the real logged-in session (see
+/// [[mamam-kasir-flutter]]/app_session.dart) rather than an env-var
+/// placeholder — Owner login -> [HrdViewerMode.owner], Staff login ->
+/// [HrdViewerMode.sharedDevice]. This was the intended seam per the
+/// original placeholder's doc comment; kept as its own provider (rather
+/// than inlining the check at every call site) so HRD code doesn't need
+/// to know about [AppRole] directly.
 final hrdViewerModeProvider = Provider<HrdViewerMode>((ref) {
-  const raw = String.fromEnvironment('HRD_VIEWER_MODE', defaultValue: 'owner');
-  return raw == 'sharedDevice' ? HrdViewerMode.sharedDevice : HrdViewerMode.owner;
+  final role = ref.watch(appSessionProvider.select((s) => s.role));
+  return role == AppRole.owner ? HrdViewerMode.owner : HrdViewerMode.sharedDevice;
 });
 
 // ---------------------------------------------------------------------------
