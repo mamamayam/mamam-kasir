@@ -1,0 +1,978 @@
+diff --git a/lib/core/data/app_database.dart b/lib/core/data/app_database.dart
+index 20c0f9a..634d464 100644
+--- a/lib/core/data/app_database.dart
++++ b/lib/core/data/app_database.dart
+@@ -3,6 +3,8 @@ import 'package:path_provider/path_provider.dart';
+ import 'package:sqflite_sqlcipher/sqflite.dart';
+ import 'package:uuid/uuid.dart';
+ 
++import 'password_hasher.dart';
++
+ /// App-wide encrypted local database.
+ ///
+ /// Shared across features (not just Menu Management) — each feature's
+@@ -69,7 +71,33 @@ class AppDatabase {
+   // PRD but wiring it retroactively changes how every existing report
+   // and balance is computed — that belongs in its own phase, not in a
+   // change that adds a management screen.
+-  static const _dbVersion = 9;
++  // v10: added users/roles/permissions/user_roles/user_branch_access —
++  // Tahap A (auth/permission foundation), per docs/handoff/04_DATABASE_
++  // CONTRACT.md's logical model. THIS IS THE FIRST REAL MIGRATION in
++  // this codebase: every prior bump (v1 through v9) relied on
++  // onCreate-only "straight recreate" because the app had no real users
++  // yet. From v10 on, devices may already hold real transactions/menu/
++  // dompet/HPP/branch data that must survive the upgrade — see
++  // _onUpgrade's `if (oldVersion < 10)` block, which creates the new
++  // tables and seeds them WITHOUT touching any existing table. Nothing
++  // existing is dropped or recreated.
++  //
++  // Replaces the hardcoded_accounts.dart owner/owner123 + staff/staff123
++  // pair with real seeded rows in `users` (password/PIN hashed, not
++  // plaintext) plus a third seeded `manager/manager123` account. Owner/
++  // Manager/Staff are permission-scoping labels only for now, not a
++  // deeper "job role" concept (see [[mamam-kasir-flutter]] notes) —
++  // `roles.name` and `AppRole`'s enum values both stay 'owner'/
++  // 'manager'/'staff' (NOT renamed to PRD's "Cashier" term; that word is
++  // never used as stored data or user-facing copy, only in comments
++  // explaining the PRD-terminology mapping). `roles` is a real table
++  // (not a hardcoded Dart enum) so custom roles are schema-ready, even
++  // though there's no UI yet to create one. AppRole gained a third value
++  // (`manager`) this pass — see AppRole's doc comment for why a
++  // previously-saved `staff` session value still reads safely after
++  // this upgrade (it required no migration at all, since `staff` remains
++  // a valid enum name).
++  static const _dbVersion = 10;
+ 
+   // TODO(security-foundation): replace with a key generated once and
+   // stored via flutter_secure_storage, per AGENTS.md.
+@@ -437,15 +465,218 @@ class AppDatabase {
+       )
+     ''');
+ 
++    await _createAuthTables(db);
++
+     await _seedDemoData(db);
++    await _seedAuthData(db);
+   }
+ 
+   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+-    // NOTE: no real migrations yet — pre-release, straight recreate is
+-    // handled by bumping _dbVersion and relying on onCreate for now.
+-    // Future migrations get added here as `if (oldVersion < N) { ... }`
+-    // blocks once the DB is in the hands of real users with existing
+-    // data that must be preserved across upgrades.
++    // First real migration in this codebase — see _dbVersion's v10 doc
++    // comment. Every block here must be additive only: CREATE TABLE for
++    // new tables, never DROP/recreate an existing one, so a device
++    // upgrading from v9 keeps every existing transaction/menu/dompet/
++    // HPP/branch row untouched.
++    if (oldVersion < 10) {
++      await _createAuthTables(db);
++      await _seedAuthData(db);
++    }
++    // Future migrations get added here as further `if (oldVersion < N)`
++    // blocks, each additive-only like the one above.
++  }
++
++  /// Creates the users/roles/permissions/user_roles/user_branch_access
++  /// tables. Called from both _onCreate (fresh install) and _onUpgrade
++  /// (existing device crossing the v10 boundary) so there is exactly one
++  /// definition of this schema, not two copies that could drift apart.
++  Future<void> _createAuthTables(Database db) async {
++    // `roles` is a real table, not a hardcoded Dart enum — this is what
++    // "custom roles are schema-ready" means for this pass (see
++    // [[mamam-kasir-flutter]] notes): the schema supports adding a role
++    // row beyond the 3 seeded defaults, even though there is no UI yet
++    // to create one, and app code should not assume exactly 3 rows will
++    // always exist here. `is_default` marks the 3 seeded ones so future
++    // UI can distinguish "built-in" from "custom" without a separate
++    // flag table.
++    await db.execute('''
++      CREATE TABLE roles (
++        id TEXT PRIMARY KEY,
++        name TEXT NOT NULL UNIQUE,
++        is_default INTEGER NOT NULL DEFAULT 0,
++        created_at TEXT NOT NULL,
++        updated_at TEXT NOT NULL
++      )
++    ''');
++
++    // One row per (role, permission key, mode) — PRD's 3-mode model
++    // (deny/direct/approval). Not built against yet (that's Tahap A4's
++    // PermissionService); this table exists now so A1 doesn't have to
++    // be revisited when A4 lands. permission_key is free-text rather
++    // than an enum/FK on purpose — A4's PermissionKey values aren't
++    // defined yet, and this table shouldn't hardcode them ahead of that
++    // design work.
++    await db.execute('''
++      CREATE TABLE permissions (
++        id TEXT PRIMARY KEY,
++        role_id TEXT NOT NULL,
++        permission_key TEXT NOT NULL,
++        mode TEXT NOT NULL, -- 'deny' | 'direct' | 'approval'
++        created_at TEXT NOT NULL,
++        updated_at TEXT NOT NULL,
++        UNIQUE (role_id, permission_key),
++        FOREIGN KEY (role_id) REFERENCES roles (id)
++      )
++    ''');
++
++    // Credentials + lockout state live directly on `users`, all
++    // per-row (i.e. per-user) rather than anywhere device-scoped — this
++    // is the A1 prerequisite for A2's per-user PIN work. password_hash/
++    // pin_hash are salted-hash pairs (see PasswordHasher), never
++    // plaintext. pin_hash/pin_salt are nullable because a freshly
++    // seeded/created user has no PIN until they complete the
++    // "set PIN after first login" flow. failed_pin_attempts/locked_at
++    // implement AGENTS.md's "5 wrong attempts locks the account" as a
++    // per-user, persistent counter (not the old in-memory
++    // pinAuthControllerProvider.autoDispose state) — see A2.
++    // last_pin_at backs AGENTS.md's "3 days with no PIN entry forces
++    // User ID+password login" rule (A3).
++    await db.execute('''
++      CREATE TABLE users (
++        id TEXT PRIMARY KEY,
++        username TEXT NOT NULL UNIQUE,
++        display_name TEXT NOT NULL,
++        password_hash TEXT NOT NULL,
++        password_salt TEXT NOT NULL,
++        pin_hash TEXT,
++        pin_salt TEXT,
++        failed_pin_attempts INTEGER NOT NULL DEFAULT 0,
++        locked_at TEXT,
++        last_pin_at TEXT,
++        is_active INTEGER NOT NULL DEFAULT 1,
++        created_at TEXT NOT NULL,
++        updated_at TEXT NOT NULL
++      )
++    ''');
++
++    // Many-to-many by schema (matches docs/handoff/04_DATABASE_
++    // CONTRACT.md's logical model, which specifies user_roles as its
++    // own join table) even though this pass's product decision is "one
++    // role per user at a time" (see [[mamam-kasir-flutter]] notes) — the
++    // app enforces the one-role rule at the application layer (only
++    // ever inserting one row per user), not by constraining the schema
++    // to a single role_id column on `users`. This keeps the door open
++    // for real multi-role later without another migration.
++    await db.execute('''
++      CREATE TABLE user_roles (
++        id TEXT PRIMARY KEY,
++        user_id TEXT NOT NULL,
++        role_id TEXT NOT NULL,
++        created_at TEXT NOT NULL,
++        UNIQUE (user_id, role_id),
++        FOREIGN KEY (user_id) REFERENCES users (id),
++        FOREIGN KEY (role_id) REFERENCES roles (id)
++      )
++    ''');
++
++    // Per docs/handoff/01_PRD.md's Access section: "Branch-scoped
++    // operational data for Manager" — which branch(es) a non-Owner user
++    // may operate against. Not enforced anywhere yet (no branch-scoped
++    // query filters this pass — see [[mamam-kasir-flutter]] notes on
++    // deferred scope), just the schema slot so it exists when that
++    // enforcement is built, matching the same "table now, logic later"
++    // treatment as `permissions` above.
++    await db.execute('''
++      CREATE TABLE user_branch_access (
++        id TEXT PRIMARY KEY,
++        user_id TEXT NOT NULL,
++        branch_id TEXT NOT NULL,
++        created_at TEXT NOT NULL,
++        UNIQUE (user_id, branch_id),
++        FOREIGN KEY (user_id) REFERENCES users (id),
++        FOREIGN KEY (branch_id) REFERENCES branches (id)
++      )
++    ''');
++  }
++
++  /// Seeds the 3 default roles and the 3 dummy accounts (owner/owner123,
++  /// manager/manager123, staff/staff123 — see [[mamam-kasir-flutter]]
++  /// notes) that replace hardcoded_accounts.dart's in-memory list.
++  /// Called from both _onCreate and _onUpgrade for the same
++  /// single-definition reason as _createAuthTables.
++  ///
++  /// "Hanya satu Owner" (PRD/AGENTS.md's single-Owner rule) is enforced
++  /// ONLY by construction here — this is the one and only place an
++  /// owner role assignment is ever inserted in this pass, since "Halaman
++  /// kelola user" (any UI to create/promote users) is explicitly out of
++  /// scope (see task brief section 5). There is no DB-level CHECK/
++  /// trigger and no repository-level runtime guard preventing a second
++  /// Owner — if a future user-management feature adds the ability to
++  /// assign roles, THAT feature must add its own single-Owner check
++  /// before this construction-only guarantee stops being sufficient.
++  /// Flagged explicitly rather than implied, since sqflite's SQLite
++  /// build here has no easy portable way to express "at most one row
++  /// where X" as a schema-level constraint, and adding a full
++  /// enforcement layer for a UI that doesn't exist yet was out of scope
++  /// per the task's "keep this pass simple" guidance.
++  Future<void> _seedAuthData(Database db) async {
++    // Guard against double-seeding: _onUpgrade runs _createAuthTables +
++    // _seedAuthData together, but if a future migration path ever calls
++    // this again (or a developer re-runs onUpgrade logic in a test), a
++    // second insert would violate the UNIQUE(username) constraint. This
++    // check makes the seed idempotent rather than crash-prone.
++    final existing = await db.query('roles', limit: 1);
++    if (existing.isNotEmpty) return;
++
++    final now = DateTime.now().toIso8601String();
++    const uuid = Uuid();
++
++    final roleIds = <String, String>{
++      'owner': uuid.v4(),
++      'manager': uuid.v4(),
++      'staff': uuid.v4(),
++    };
++
++    for (final entry in roleIds.entries) {
++      await db.insert('roles', {
++        'id': entry.value,
++        'name': entry.key,
++        'is_default': 1,
++        'created_at': now,
++        'updated_at': now,
++      });
++    }
++
++    final accounts = [
++      ('owner', 'owner123', 'Owner', roleIds['owner']!),
++      ('manager', 'manager123', 'Manager', roleIds['manager']!),
++      ('staff', 'staff123', 'Staff', roleIds['staff']!),
++    ];
++
++    for (final (username, password, displayName, roleId) in accounts) {
++      final userId = uuid.v4();
++      final passwordSalt = PasswordHasher.generateSalt();
++      await db.insert('users', {
++        'id': userId,
++        'username': username,
++        'display_name': displayName,
++        'password_hash': PasswordHasher.hash(password, passwordSalt),
++        'password_salt': passwordSalt,
++        'pin_hash': null,
++        'pin_salt': null,
++        'failed_pin_attempts': 0,
++        'locked_at': null,
++        'last_pin_at': null,
++        'is_active': 1,
++        'created_at': now,
++        'updated_at': now,
++      });
++      await db.insert('user_roles', {
++        'id': uuid.v4(),
++        'user_id': userId,
++        'role_id': roleId,
++        'created_at': now,
++      });
++    }
+   }
+ 
+   /// Seeds initial rows on first run.
+diff --git a/lib/core/data/password_hasher.dart b/lib/core/data/password_hasher.dart
+new file mode 100644
+index 0000000..27f2f7c
+--- /dev/null
++++ b/lib/core/data/password_hasher.dart
+@@ -0,0 +1,45 @@
++import 'dart:convert';
++import 'dart:math';
++
++import 'package:crypto/crypto.dart';
++
++/// SHA-256 + per-user random salt hashing for passwords and PINs.
++///
++/// Kept deliberately simple (not bcrypt/argon2, no configurable work
++/// factor) — Tahap A decision: this app's credentials live in an
++/// on-device encrypted SQLCipher database, not a server exposed to
++/// remote brute-force, so a random salt defeating rainbow tables is
++/// enough for this threat model. If that assumption ever changes
++/// (e.g. these hashes get synced to a server), revisit with a
++/// slow/adaptive hash instead.
++///
++/// Used identically for both `users.password_hash`/`password_salt` and
++/// `users.pin_hash`/`pin_salt` — a PIN is just a short password for
++/// this purpose, same algorithm, same salt length.
++class PasswordHasher {
++  PasswordHasher._();
++
++  static final Random _random = Random.secure();
++
++  /// Generates a fresh random salt, base64-encoded for storage as TEXT.
++  static String generateSalt() {
++    final bytes = List<int>.generate(16, (_) => _random.nextInt(256));
++    return base64Url.encode(bytes);
++  }
++
++  /// Hashes [plainText] (a password or a 4-digit PIN) with [salt].
++  /// Deterministic for the same input pair — call again with the stored
++  /// salt to verify a later attempt.
++  static String hash(String plainText, String salt) {
++    final bytes = utf8.encode('$salt:$plainText');
++    return sha256.convert(bytes).toString();
++  }
++
++  /// Constant-time-ish comparison: hashes [plainText] with [salt] and
++  /// compares against [expectedHash]. Using a plain `==` on hex strings
++  /// here is a normal, safe pattern for local on-device verification
++  /// (not a network-facing API where timing side-channels matter).
++  static bool verify({required String plainText, required String salt, required String expectedHash}) {
++    return hash(plainText, salt) == expectedHash;
++  }
++}
+diff --git a/lib/core/session/app_session.dart b/lib/core/session/app_session.dart
+index 5d1102f..debe5c8 100644
+--- a/lib/core/session/app_session.dart
++++ b/lib/core/session/app_session.dart
+@@ -3,29 +3,50 @@
+ /// position, e.g. "Manajer"/"Kasir" — see hrd_seed_data.dart), which is
+ /// unrelated to app access.
+ ///
+-/// Scope for this pass (see [[mamam-kasir-flutter]] notes): exactly one
+-/// role per user, Owner or Staff. "Staff" is deliberately the umbrella
+-/// term for anyone who isn't Owner (future: kurir, waitress, kasir,
+-/// etc.) — not narrowed to "Cashier". A Manager tier and granular
+-/// per-tile permission modes (not allowed/direct/approval per AGENTS.md)
+-/// are explicitly deferred, not implemented here.
+-enum AppRole { owner, staff }
++/// Tahap A: extended from the original 2-role pass (owner/staff) to 3 —
++/// Owner, Manager, Staff — per explicit decision: these 3 are
++/// permission-scoping labels only, not a deeper "job role" concept.
++/// "Staff" stays the umbrella term for anyone who isn't Owner or
++/// Manager (kurir, waitress, kasir, etc.) — the PRD's "Cashier" term is
++/// used only internally for `roles.name` storage compatibility
++/// reasoning in comments, never as this enum's value or as user-facing
++/// copy. Multiple roles per user and full custom-role UI remain
++/// deferred (DB schema supports it — see app_database.dart's `roles`
++/// table — application logic still assumes one role per user).
++///
++/// A previously-saved session with the old 2-role build's `staff` value
++/// still parses safely here (`staff` remains a valid enum name), so no
++/// migration is needed for that stored value specifically — see
++/// AppSessionController.restore.
++enum AppRole { owner, manager, staff }
+ 
+ /// Who is currently logged into this device, if anyone.
+ ///
+ /// This is the single source of truth for "who am I" at the app level —
+ /// [hrdViewerModeProvider] and any future per-tile permission check
+ /// should derive from this rather than keeping their own copy.
++///
++/// `userId` was added in Tahap A/A1 (previously session identity was
++/// username+role only) — A2's per-user PIN storage needs a stable,
++/// rename-proof key, and `users.id` (not `username`, which is editable)
++/// is that key. A session restored from a pre-A1 save (username+role
++/// only, no id persisted) will have `userId == null`; see
++/// AppSessionController.restore for how that's handled.
+ class AppSession {
++  final String? userId;
+   final String? username;
+   final AppRole? role;
+ 
+-  const AppSession({this.username, this.role});
++  const AppSession({this.userId, this.username, this.role});
+ 
+-  bool get isLoggedIn => username != null && role != null;
++  bool get isLoggedIn => userId != null && username != null && role != null;
+ 
+-  AppSession copyWith({String? username, AppRole? role}) {
+-    return AppSession(username: username ?? this.username, role: role ?? this.role);
++  AppSession copyWith({String? userId, String? username, AppRole? role}) {
++    return AppSession(
++      userId: userId ?? this.userId,
++      username: username ?? this.username,
++      role: role ?? this.role,
++    );
+   }
+ 
+   static const empty = AppSession();
+diff --git a/lib/core/session/app_session_provider.dart b/lib/core/session/app_session_provider.dart
+index 9fa81eb..fc6af5b 100644
+--- a/lib/core/session/app_session_provider.dart
++++ b/lib/core/session/app_session_provider.dart
+@@ -11,15 +11,16 @@ import 'app_session.dart';
+ // PIN is the closest thing to a credential this device holds, kept in
+ // flutter_secure_storage (OS keychain/keystore) per AGENTS.md's
+ // "encrypt local DB and OS secure key storage" security rule.
++const _kPrefsUserIdKey = 'session_user_id';
+ const _kPrefsUsernameKey = 'session_username';
+ const _kPrefsRoleKey = 'session_role';
+ const _kSecurePinKey = 'session_device_pin';
+ 
+ const _secureStorage = FlutterSecureStorage();
+ 
+-/// Current logged-in session (username + role), if any. Persisted across
+-/// app restarts via shared_preferences so the splash screen can route
+-/// straight to the PIN lock instead of full login.
++/// Current logged-in session (user id + username + role), if any.
++/// Persisted across app restarts via shared_preferences so the splash
++/// screen can route straight to the PIN lock instead of full login.
+ ///
+ /// This is the intended replacement for hrdViewerModeProvider's
+ /// placeholder env-var (see hrd_provider.dart doc comment) — that
+@@ -34,32 +35,42 @@ class AppSessionController extends StateNotifier<AppSession> {
+   /// Loads any previously-saved session from disk. Called once on
+   /// startup; the splash screen awaits this indirectly by reading
+   /// [restored] before deciding where to route.
++  ///
++  /// A session saved before Tahap A/A1 (username+role only, no user id)
++  /// will have no stored `session_user_id` — that's treated as "not
++  /// logged in" (isLoggedIn requires userId too), which safely routes
++  /// back to Login rather than trying to guess an id. This is the only
++  /// migration a pre-A1 saved session needs: no separate migration
++  /// script, just this fail-closed read.
+   Future<void> restore() async {
+     final prefs = await SharedPreferences.getInstance();
++    final userId = prefs.getString(_kPrefsUserIdKey);
+     final username = prefs.getString(_kPrefsUsernameKey);
+     final roleName = prefs.getString(_kPrefsRoleKey);
+-    if (username == null || roleName == null) return;
++    if (userId == null || username == null || roleName == null) return;
+ 
+     final role = AppRole.values.where((r) => r.name == roleName).firstOrNull;
+     if (role == null) return;
+ 
+-    state = AppSession(username: username, role: role);
++    state = AppSession(userId: userId, username: username, role: role);
+   }
+ 
+   /// Called after successful username+password verification.
+-  Future<void> login({required String username, required AppRole role}) async {
++  Future<void> login({required String userId, required String username, required AppRole role}) async {
+     final prefs = await SharedPreferences.getInstance();
++    await prefs.setString(_kPrefsUserIdKey, userId);
+     await prefs.setString(_kPrefsUsernameKey, username);
+     await prefs.setString(_kPrefsRoleKey, role.name);
+-    state = AppSession(username: username, role: role);
++    state = AppSession(userId: userId, username: username, role: role);
+   }
+ 
+-  /// Clears the session (username/role) but deliberately leaves the
+-  /// device PIN in place — logging out doesn't require re-registering a
+-  /// PIN if the same person (or another authorized user) logs back in.
+-  /// Full device PIN reset is a separate, explicit action.
++  /// Clears the session (identity) but deliberately leaves the device
++  /// PIN in place — logging out doesn't require re-registering a PIN if
++  /// the same person (or another authorized user) logs back in. Full
++  /// device PIN reset is a separate, explicit action.
+   Future<void> logout() async {
+     final prefs = await SharedPreferences.getInstance();
++    await prefs.remove(_kPrefsUserIdKey);
+     await prefs.remove(_kPrefsUsernameKey);
+     await prefs.remove(_kPrefsRoleKey);
+     state = AppSession.empty;
+diff --git a/lib/features/auth/data/auth_repository.dart b/lib/features/auth/data/auth_repository.dart
+new file mode 100644
+index 0000000..e332a89
+--- /dev/null
++++ b/lib/features/auth/data/auth_repository.dart
+@@ -0,0 +1,75 @@
++import '../../../core/data/app_database.dart';
++import '../../../core/data/password_hasher.dart';
++import '../../../core/session/app_session.dart';
++
++/// Result of a successful username+password lookup — just enough to
++/// start a session and route to the PIN flow. Deliberately carries no
++/// hash/salt/credential fields (those never leave the repository layer).
++class AuthenticatedUser {
++  final String id;
++  final String username;
++  final String displayName;
++  final AppRole role;
++
++  const AuthenticatedUser({
++    required this.id,
++    required this.username,
++    required this.displayName,
++    required this.role,
++  });
++}
++
++/// DB-backed replacement for the old hardcoded_accounts.dart in-memory
++/// list (see [[mamam-kasir-flutter]] notes) — login now looks up the
++/// real `users`/`user_roles`/`roles` rows seeded by
++/// AppDatabase._seedAuthData in the v10 migration (owner/owner123,
++/// manager/manager123, staff/staff123 — same credentials as before,
++/// just DB-backed and hashed instead of an in-memory plaintext list).
++///
++/// LoginScreen depends only on [verifyCredentials] (mirroring the old
++/// module-level `verifyHardcodedCredentials` function's role as the
++/// single seam that screen touches), so nothing about LoginScreen's
++/// structure needed to change for this swap.
++class AuthRepository {
++  Future<AuthenticatedUser?> verifyCredentials(String username, String password) async {
++    final db = await AppDatabase.instance.database;
++    final rows = await db.query(
++      'users',
++      where: 'username = ? COLLATE NOCASE AND is_active = 1',
++      whereArgs: [username.trim()],
++      limit: 1,
++    );
++    if (rows.isEmpty) return null;
++
++    final row = rows.first;
++    final isCorrect = PasswordHasher.verify(
++      plainText: password,
++      salt: row['password_salt'] as String,
++      expectedHash: row['password_hash'] as String,
++    );
++    if (!isCorrect) return null;
++
++    final roleRows = await db.rawQuery(
++      '''
++      SELECT roles.name AS role_name
++      FROM user_roles
++      JOIN roles ON roles.id = user_roles.role_id
++      WHERE user_roles.user_id = ?
++      LIMIT 1
++      ''',
++      [row['id']],
++    );
++    if (roleRows.isEmpty) return null; // No role assigned — cannot log in.
++
++    final roleName = roleRows.first['role_name'] as String;
++    final role = AppRole.values.where((r) => r.name == roleName).firstOrNull;
++    if (role == null) return null; // Unknown role name — fail closed.
++
++    return AuthenticatedUser(
++      id: row['id'] as String,
++      username: row['username'] as String,
++      displayName: row['display_name'] as String,
++      role: role,
++    );
++  }
++}
+diff --git a/lib/features/auth/domain/hardcoded_accounts.dart b/lib/features/auth/domain/hardcoded_accounts.dart
+deleted file mode 100644
+index d6a49c6..0000000
+--- a/lib/features/auth/domain/hardcoded_accounts.dart
++++ /dev/null
+@@ -1,33 +0,0 @@
+-import '../../../core/session/app_session.dart';
+-
+-/// PLACEHOLDER account list for username+password login.
+-///
+-/// No Supabase connection exists yet for this pass (Supabase.initialize
+-/// is not called anywhere — see [[mamam-kasir-flutter]] notes). This is
+-/// intentionally the ONLY source of truth for login credentials right
+-/// now; swap for a real Supabase Auth / users-table lookup once the
+-/// backend phase lands, without changing anything else in the login
+-/// flow (LoginScreen only depends on [verifyHardcodedCredentials]).
+-class HardcodedAccount {
+-  final String username;
+-  final String password;
+-  final AppRole role;
+-
+-  const HardcodedAccount({required this.username, required this.password, required this.role});
+-}
+-
+-const List<HardcodedAccount> kHardcodedAccounts = [
+-  HardcodedAccount(username: 'owner', password: 'owner123', role: AppRole.owner),
+-  HardcodedAccount(username: 'staff', password: 'staff123', role: AppRole.staff),
+-];
+-
+-/// Returns the matching role if the credentials are valid, else null.
+-/// Username match is case-insensitive; password is exact.
+-AppRole? verifyHardcodedCredentials(String username, String password) {
+-  for (final account in kHardcodedAccounts) {
+-    if (account.username.toLowerCase() == username.trim().toLowerCase() && account.password == password) {
+-      return account.role;
+-    }
+-  }
+-  return null;
+-}
+diff --git a/lib/features/auth/presentation/login_screen.dart b/lib/features/auth/presentation/login_screen.dart
+index 158d250..33a983d 100644
+--- a/lib/features/auth/presentation/login_screen.dart
++++ b/lib/features/auth/presentation/login_screen.dart
+@@ -4,17 +4,18 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ import '../../../core/session/app_session_provider.dart';
+ import '../../../core/theme/app_colors.dart';
+ import '../../../core/theme/app_spacing.dart';
+-import '../domain/hardcoded_accounts.dart';
++import '../data/auth_repository.dart';
+ import 'set_pin_screen.dart';
+ import 'pin_login_screen.dart';
+ 
+ /// Username + password login. Reached from splash (first-ever login on
+ /// this device) or from PIN screen's "Login dengan akun lain".
+ ///
+-/// Credentials are checked against [kHardcodedAccounts] only — no
+-/// Supabase connection exists yet for this pass (see
+-/// [[mamam-kasir-flutter]] notes). Swapping to real auth later should
+-/// only require changing what happens inside [_submit], not this
++/// Credentials are checked against the real `users` table via
++/// [AuthRepository] (Tahap A/A1 — previously an in-memory hardcoded
++/// list, see [[mamam-kasir-flutter]] notes). Swapping to a future real
++/// backend later should only require changing what
++/// [AuthRepository.verifyCredentials] does internally, not this
+ /// screen's structure.
+ class LoginScreen extends ConsumerStatefulWidget {
+   const LoginScreen({super.key});
+@@ -26,6 +27,7 @@ class LoginScreen extends ConsumerStatefulWidget {
+ class _LoginScreenState extends ConsumerState<LoginScreen> {
+   final _usernameController = TextEditingController();
+   final _passwordController = TextEditingController();
++  final _authRepository = AuthRepository();
+   bool _obscurePassword = true;
+   bool _isSubmitting = false;
+   String? _errorText;
+@@ -51,15 +53,10 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
+       _errorText = null;
+     });
+ 
+-    // Small delay so the loading state is perceptible even though the
+-    // hardcoded check is instant — keeps the UX honest about "this will
+-    // be a real network call later" per [[mamam-kasir-flutter]] notes.
+-    await Future.delayed(const Duration(milliseconds: 300));
+-
+-    final role = verifyHardcodedCredentials(username, password);
++    final authenticated = await _authRepository.verifyCredentials(username, password);
+     if (!mounted) return;
+ 
+-    if (role == null) {
++    if (authenticated == null) {
+       setState(() {
+         _isSubmitting = false;
+         _errorText = 'Username atau password salah';
+@@ -67,7 +64,11 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
+       return;
+     }
+ 
+-    await ref.read(appSessionProvider.notifier).login(username: username, role: role);
++    await ref.read(appSessionProvider.notifier).login(
++          userId: authenticated.id,
++          username: authenticated.username,
++          role: authenticated.role,
++        );
+     if (!mounted) return;
+ 
+     final hasPinAlready = await ref.read(appSessionProvider.notifier).hasPinSet();
+diff --git a/lib/features/dashboard/application/dashboard_provider.dart b/lib/features/dashboard/application/dashboard_provider.dart
+index 060d239..e371498 100644
+--- a/lib/features/dashboard/application/dashboard_provider.dart
++++ b/lib/features/dashboard/application/dashboard_provider.dart
+@@ -72,7 +72,11 @@ final dashboardProvider = StateNotifierProvider.autoDispose<DashboardController,
+ 
+ SessionUser _toSessionUser(AppSession session) {
+   if (!session.isLoggedIn) return const SessionUser();
+-  final roleLabel = session.role == AppRole.owner ? 'Owner' : 'Staff';
++  final roleLabel = switch (session.role!) {
++    AppRole.owner => 'Owner',
++    AppRole.manager => 'Manager',
++    AppRole.staff => 'Staff',
++  };
+   return SessionUser(name: session.username, role: roleLabel);
+ }
+ 
+diff --git a/lib/features/hrd/application/hrd_provider.dart b/lib/features/hrd/application/hrd_provider.dart
+index 02b9e94..ff306fb 100644
+--- a/lib/features/hrd/application/hrd_provider.dart
++++ b/lib/features/hrd/application/hrd_provider.dart
+@@ -21,14 +21,17 @@ enum HrdViewerMode { owner, sharedDevice }
+ 
+ /// Now derived from the real logged-in session (see
+ /// [[mamam-kasir-flutter]]/app_session.dart) rather than an env-var
+-/// placeholder — Owner login -> [HrdViewerMode.owner], Staff login ->
+-/// [HrdViewerMode.sharedDevice]. This was the intended seam per the
++/// placeholder — Owner/Manager login -> [HrdViewerMode.owner], Staff
++/// login -> [HrdViewerMode.sharedDevice]. Manager is temporarily treated
++/// as Owner-equivalent here (Tahap A decision) until A4's granular
++/// PermissionService replaces this role-based check with a real
++/// per-permission-key lookup. This was the intended seam per the
+ /// original placeholder's doc comment; kept as its own provider (rather
+ /// than inlining the check at every call site) so HRD code doesn't need
+ /// to know about [AppRole] directly.
+ final hrdViewerModeProvider = Provider<HrdViewerMode>((ref) {
+   final role = ref.watch(appSessionProvider.select((s) => s.role));
+-  return role == AppRole.owner ? HrdViewerMode.owner : HrdViewerMode.sharedDevice;
++  return role == AppRole.staff ? HrdViewerMode.sharedDevice : HrdViewerMode.owner;
+ });
+ 
+ // ---------------------------------------------------------------------------
+diff --git a/lib/features/menu_shell/presentation/menu_bottom_sheet.dart b/lib/features/menu_shell/presentation/menu_bottom_sheet.dart
+index 205757c..db5d9df 100644
+--- a/lib/features/menu_shell/presentation/menu_bottom_sheet.dart
++++ b/lib/features/menu_shell/presentation/menu_bottom_sheet.dart
+@@ -49,7 +49,10 @@ class MenuBottomSheetContent extends ConsumerWidget {
+   Widget build(BuildContext context, WidgetRef ref) {
+     final pendingApprovals = ref.watch(hrdControllerProvider.select((s) => s.pendingApprovals.length));
+     final role = ref.watch(appSessionProvider.select((s) => s.role));
+-    final isOwner = role == AppRole.owner;
++    // Manager is temporarily treated as Owner-equivalent here (Tahap A
++    // decision) until A4's granular PermissionService replaces this
++    // role-based check with a real per-tile permission lookup.
++    final isOwner = role != AppRole.staff;
+ 
+     // For this pass the 9-tile grid is Owner-only — Staff's access is
+     // limited to Kasir/Riwayat (dashboard quick actions, not this sheet)
+diff --git a/pubspec.yaml b/pubspec.yaml
+index c036640..c693c59 100644
+--- a/pubspec.yaml
++++ b/pubspec.yaml
+@@ -31,6 +31,11 @@ dependencies:
+ 
+   # IDs or exact-money-safe formatting
+   uuid: ^4.4.0
++  # Password/PIN hashing (SHA-256 + per-user random salt) — Tahap A
++  # auth/permission work. Kept simple per explicit decision: this is a
++  # local single-device app, not a server under remote attack, so the
++  # Dart-team crypto package is enough; bcrypt/argon2 would be overkill.
++  crypto: ^3.0.5
+   intl: ^0.19.0
+ 
+   # Icons — swapped out from the web mockup's lucide-react for Flutter-native equivalents
+diff --git a/test/app_database_auth_test.dart b/test/app_database_auth_test.dart
+new file mode 100644
+index 0000000..8e9b332
+--- /dev/null
++++ b/test/app_database_auth_test.dart
+@@ -0,0 +1,152 @@
++// Tests for AppDatabase's v9->v10 migration (users/roles/permissions/
++// user_roles/user_branch_access tables) and the auth seed data.
++//
++// IMPORTANT — these tests need a real device or emulator to run:
++// sqflite_sqlcipher has no FFI/desktop test-mode equivalent to
++// sqflite_common_ffi (which only supports plain sqflite, not the
++// SQLCipher-linked variant this app uses for encryption). There was no
++// prior precedent for testing AppDatabase directly in this codebase —
++// every existing test file (hrd_payroll_engine_test.dart etc.) tests
++// pure-Dart domain logic with no database involved at all.
++//
++// Run with: `flutter test integration_test/` on a connected device/
++// emulator (NOT plain `flutter test`, which uses a host-side VM that
++// cannot load the native SQLCipher library) — or move this under
++// integration_test/ using the integration_test package if migrating
++// that tooling in is preferred. Left under test/ for now to match this
++// PR's file layout; flag this in the Tahap-A report as unverified in
++// this sandboxed environment (no Flutter/device access at all here —
++// see [[mamam-kasir-flutter]] notes on the sandbox's tooling limits).
++import 'dart:io';
++
++import 'package:flutter_test/flutter_test.dart';
++import 'package:mamam_kasir/core/data/app_database.dart';
++import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
++import 'package:plugin_platform_interface/plugin_platform_interface.dart';
++
++class _FakePathProvider extends PlatformInterface implements PathProviderPlatform {
++  static final Object _token = Object();
++  final String tempDirPath;
++  _FakePathProvider.withPath(this.tempDirPath) : super(token: _token);
++
++  @override
++  Future<String?> getApplicationDocumentsPath() async => tempDirPath;
++}
++
++void main() {
++  TestWidgetsFlutterBinding.ensureInitialized();
++
++  late Directory tempDir;
++
++  setUp(() async {
++    tempDir = await Directory.systemTemp.createTemp('mamam_kasir_test_');
++    PathProviderPlatform.instance = _FakePathProvider.withPath(tempDir.path);
++  });
++
++  tearDown(() async {
++    if (await tempDir.exists()) {
++      await tempDir.delete(recursive: true);
++    }
++  });
++
++  group('AppDatabase v10 auth tables (fresh install via onCreate)', () {
++    test('seeds exactly 3 default roles: owner, manager, staff', () async {
++      final db = await AppDatabase.instance.database;
++      final roles = await db.query('roles');
++
++      expect(roles.length, 3);
++      expect(roles.map((r) => r['name']).toSet(), {'owner', 'manager', 'staff'});
++      expect(roles.every((r) => r['is_default'] == 1), isTrue);
++    });
++
++    test('seeds exactly 3 users, each with a hashed (non-plaintext) password', () async {
++      final db = await AppDatabase.instance.database;
++      final users = await db.query('users');
++
++      expect(users.length, 3);
++      expect(users.map((u) => u['username']).toSet(), {'owner', 'manager', 'staff'});
++      for (final user in users) {
++        // The seeded plaintext passwords are 'owner123'/'manager123'/
++        // 'staff123' — none of those literal strings should appear as
++        // the stored hash.
++        expect(user['password_hash'], isNot(equals('owner123')));
++        expect(user['password_hash'], isNot(equals('manager123')));
++        expect(user['password_hash'], isNot(equals('staff123')));
++        expect(user['password_salt'], isNotNull);
++        expect((user['password_salt'] as String).isNotEmpty, isTrue);
++        // No PIN set yet — that's the "set PIN after first login" flow.
++        expect(user['pin_hash'], isNull);
++        expect(user['failed_pin_attempts'], 0);
++        expect(user['locked_at'], isNull);
++      }
++    });
++
++    test('there is only ever one Owner (single-Owner rule)', () async {
++      final db = await AppDatabase.instance.database;
++      final ownerAssignments = await db.rawQuery('''
++        SELECT COUNT(*) as cnt FROM user_roles
++        JOIN roles ON roles.id = user_roles.role_id
++        WHERE roles.name = 'owner'
++      ''');
++
++      expect(ownerAssignments.first['cnt'], 1);
++    });
++
++    test('each seeded user has exactly one role assignment', () async {
++      final db = await AppDatabase.instance.database;
++      final users = await db.query('users');
++
++      for (final user in users) {
++        final roles = await db.query('user_roles', where: 'user_id = ?', whereArgs: [user['id']]);
++        expect(roles.length, 1, reason: '${user['username']} should have exactly one role');
++      }
++    });
++
++    test('existing tables (categories, menu_items, branches, ...) are untouched', () async {
++      final db = await AppDatabase.instance.database;
++
++      // Sanity check that the auth-table addition didn't regress the
++      // pre-existing seed data from _seedDemoData/_seedIngredients/
++      // _seedSampleTransactions.
++      final categories = await db.query('categories');
++      final menuItems = await db.query('menu_items');
++      final branches = await db.query('branches');
++
++      expect(categories, isNotEmpty);
++      expect(menuItems, isNotEmpty);
++      expect(branches, isNotEmpty);
++    });
++  });
++
++  group('roles table supports custom roles (schema-level)', () {
++    test('a role beyond the 3 defaults can be inserted', () async {
++      final db = await AppDatabase.instance.database;
++      final now = DateTime.now().toIso8601String();
++
++      await db.insert('roles', {
++        'id': 'custom-role-test',
++        'name': 'kurir',
++        'is_default': 0,
++        'created_at': now,
++        'updated_at': now,
++      });
++
++      final roles = await db.query('roles');
++      expect(roles.length, 4);
++      expect(roles.any((r) => r['name'] == 'kurir' && r['is_default'] == 0), isTrue);
++    });
++  });
++}
++
++// NOTE: a true "upgrade from v9 preserves existing data" test — opening
++// a database file seeded by a v9-only onCreate (no auth tables), then
++// re-opening it at v10 and asserting the pre-existing rows AND the new
++// auth tables both exist — needs either:
++//   (a) a fixture .db file frozen at v9 checked into the repo, or
++//   (b) temporarily forcing AppDatabase._dbVersion to 9, opening once,
++//       then forcing it back to 10 and reopening the same file path.
++// (b) isn't possible from an external test file since _dbVersion is a
++// private static const; doing this properly means either exposing a
++// test-only seam in AppDatabase or adding a fixture file. Flagged as a
++// genuine gap in this checkpoint's test coverage rather than skipped
++// silently — see the Tahap-A report's "belum diverifikasi" section.
+diff --git a/test/password_hasher_test.dart b/test/password_hasher_test.dart
+new file mode 100644
+index 0000000..4ec6235
+--- /dev/null
++++ b/test/password_hasher_test.dart
+@@ -0,0 +1,89 @@
++// Tests for PasswordHasher (lib/core/data/password_hasher.dart).
++//
++// Pure Dart logic (crypto package only, no sqflite/platform channel), so
++// unlike the DB-dependent tests in app_database_test.dart, this file can
++// run with a plain `flutter test` (or even `dart test`) without needing
++// a device/emulator or sqflite's FFI setup.
++import 'package:flutter_test/flutter_test.dart';
++import 'package:mamam_kasir/core/data/password_hasher.dart';
++
++void main() {
++  group('PasswordHasher', () {
++    test('generateSalt produces a non-empty, non-deterministic value', () {
++      final saltA = PasswordHasher.generateSalt();
++      final saltB = PasswordHasher.generateSalt();
++
++      expect(saltA, isNotEmpty);
++      expect(saltB, isNotEmpty);
++      expect(saltA, isNot(equals(saltB)));
++    });
++
++    test('hash is deterministic for the same input+salt', () {
++      final salt = PasswordHasher.generateSalt();
++      final hashA = PasswordHasher.hash('owner123', salt);
++      final hashB = PasswordHasher.hash('owner123', salt);
++
++      expect(hashA, equals(hashB));
++    });
++
++    test('hash differs for different salts, same plaintext', () {
++      final hashA = PasswordHasher.hash('owner123', PasswordHasher.generateSalt());
++      final hashB = PasswordHasher.hash('owner123', PasswordHasher.generateSalt());
++
++      // Vanishingly unlikely to collide with random 16-byte salts —
++      // this is the property that defeats rainbow-table lookups.
++      expect(hashA, isNot(equals(hashB)));
++    });
++
++    test('verify succeeds for the correct plaintext+salt pair', () {
++      final salt = PasswordHasher.generateSalt();
++      final expectedHash = PasswordHasher.hash('staff123', salt);
++
++      final result = PasswordHasher.verify(
++        plainText: 'staff123',
++        salt: salt,
++        expectedHash: expectedHash,
++      );
++
++      expect(result, isTrue);
++    });
++
++    test('verify fails for wrong plaintext', () {
++      final salt = PasswordHasher.generateSalt();
++      final expectedHash = PasswordHasher.hash('staff123', salt);
++
++      final result = PasswordHasher.verify(
++        plainText: 'wrong-password',
++        salt: salt,
++        expectedHash: expectedHash,
++      );
++
++      expect(result, isFalse);
++    });
++
++    test('verify fails when salt does not match the one used to hash', () {
++      final saltUsedToHash = PasswordHasher.generateSalt();
++      final expectedHash = PasswordHasher.hash('staff123', saltUsedToHash);
++      final differentSalt = PasswordHasher.generateSalt();
++
++      final result = PasswordHasher.verify(
++        plainText: 'staff123',
++        salt: differentSalt,
++        expectedHash: expectedHash,
++      );
++
++      expect(result, isFalse);
++    });
++
++    test('works identically for 4-digit PINs, same as passwords', () {
++      // PasswordHasher is used for both users.password_hash/salt and
++      // users.pin_hash/salt (see its doc comment) — this test just
++      // confirms nothing about it assumes password-length input.
++      final salt = PasswordHasher.generateSalt();
++      final expectedHash = PasswordHasher.hash('1234', salt);
++
++      expect(PasswordHasher.verify(plainText: '1234', salt: salt, expectedHash: expectedHash), isTrue);
++      expect(PasswordHasher.verify(plainText: '4321', salt: salt, expectedHash: expectedHash), isFalse);
++    });
++  });
++}

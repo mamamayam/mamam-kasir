@@ -4,17 +4,18 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/session/app_session_provider.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_spacing.dart';
-import '../domain/hardcoded_accounts.dart';
+import '../data/auth_repository.dart';
 import 'set_pin_screen.dart';
 import 'pin_login_screen.dart';
 
 /// Username + password login. Reached from splash (first-ever login on
 /// this device) or from PIN screen's "Login dengan akun lain".
 ///
-/// Credentials are checked against [kHardcodedAccounts] only — no
-/// Supabase connection exists yet for this pass (see
-/// [[mamam-kasir-flutter]] notes). Swapping to real auth later should
-/// only require changing what happens inside [_submit], not this
+/// Credentials are checked against the real `users` table via
+/// [AuthRepository] (Tahap A/A1 — previously an in-memory hardcoded
+/// list, see [[mamam-kasir-flutter]] notes). Swapping to a future real
+/// backend later should only require changing what
+/// [AuthRepository.verifyCredentials] does internally, not this
 /// screen's structure.
 class LoginScreen extends ConsumerStatefulWidget {
   const LoginScreen({super.key});
@@ -26,6 +27,7 @@ class LoginScreen extends ConsumerStatefulWidget {
 class _LoginScreenState extends ConsumerState<LoginScreen> {
   final _usernameController = TextEditingController();
   final _passwordController = TextEditingController();
+  final _authRepository = AuthRepository();
   bool _obscurePassword = true;
   bool _isSubmitting = false;
   String? _errorText;
@@ -51,15 +53,10 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       _errorText = null;
     });
 
-    // Small delay so the loading state is perceptible even though the
-    // hardcoded check is instant — keeps the UX honest about "this will
-    // be a real network call later" per [[mamam-kasir-flutter]] notes.
-    await Future.delayed(const Duration(milliseconds: 300));
-
-    final role = verifyHardcodedCredentials(username, password);
+    final authenticated = await _authRepository.verifyCredentials(username, password);
     if (!mounted) return;
 
-    if (role == null) {
+    if (authenticated == null) {
       setState(() {
         _isSubmitting = false;
         _errorText = 'Username atau password salah';
@@ -67,7 +64,11 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       return;
     }
 
-    await ref.read(appSessionProvider.notifier).login(username: username, role: role);
+    await ref.read(appSessionProvider.notifier).login(
+          userId: authenticated.id,
+          username: authenticated.username,
+          role: authenticated.role,
+        );
     if (!mounted) return;
 
     final hasPinAlready = await ref.read(appSessionProvider.notifier).hasPinSet();

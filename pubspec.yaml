@@ -31,6 +31,11 @@ dependencies:
 
   # IDs or exact-money-safe formatting
   uuid: ^4.4.0
+  # Password/PIN hashing (SHA-256 + per-user random salt) — Tahap A
+  # auth/permission work. Kept simple per explicit decision: this is a
+  # local single-device app, not a server under remote attack, so the
+  # Dart-team crypto package is enough; bcrypt/argon2 would be overkill.
+  crypto: ^3.0.5
   intl: ^0.19.0
 
   # Icons — swapped out from the web mockup's lucide-react for Flutter-native equivalents

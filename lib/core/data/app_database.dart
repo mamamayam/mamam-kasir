@@ -3,6 +3,8 @@ import 'package:path_provider/path_provider.dart';
 import 'package:sqflite_sqlcipher/sqflite.dart';
 import 'package:uuid/uuid.dart';
 
+import 'password_hasher.dart';
+
 /// App-wide encrypted local database.
 ///
 /// Shared across features (not just Menu Management) — each feature's
@@ -69,7 +71,33 @@ class AppDatabase {
   // PRD but wiring it retroactively changes how every existing report
   // and balance is computed — that belongs in its own phase, not in a
   // change that adds a management screen.
-  static const _dbVersion = 9;
+  // v10: added users/roles/permissions/user_roles/user_branch_access —
+  // Tahap A (auth/permission foundation), per docs/handoff/04_DATABASE_
+  // CONTRACT.md's logical model. THIS IS THE FIRST REAL MIGRATION in
+  // this codebase: every prior bump (v1 through v9) relied on
+  // onCreate-only "straight recreate" because the app had no real users
+  // yet. From v10 on, devices may already hold real transactions/menu/
+  // dompet/HPP/branch data that must survive the upgrade — see
+  // _onUpgrade's `if (oldVersion < 10)` block, which creates the new
+  // tables and seeds them WITHOUT touching any existing table. Nothing
+  // existing is dropped or recreated.
+  //
+  // Replaces the hardcoded_accounts.dart owner/owner123 + staff/staff123
+  // pair with real seeded rows in `users` (password/PIN hashed, not
+  // plaintext) plus a third seeded `manager/manager123` account. Owner/
+  // Manager/Staff are permission-scoping labels only for now, not a
+  // deeper "job role" concept (see [[mamam-kasir-flutter]] notes) —
+  // `roles.name` and `AppRole`'s enum values both stay 'owner'/
+  // 'manager'/'staff' (NOT renamed to PRD's "Cashier" term; that word is
+  // never used as stored data or user-facing copy, only in comments
+  // explaining the PRD-terminology mapping). `roles` is a real table
+  // (not a hardcoded Dart enum) so custom roles are schema-ready, even
+  // though there's no UI yet to create one. AppRole gained a third value
+  // (`manager`) this pass — see AppRole's doc comment for why a
+  // previously-saved `staff` session value still reads safely after
+  // this upgrade (it required no migration at all, since `staff` remains
+  // a valid enum name).
+  static const _dbVersion = 10;
 
   // TODO(security-foundation): replace with a key generated once and
   // stored via flutter_secure_storage, per AGENTS.md.
@@ -437,15 +465,218 @@ class AppDatabase {
       )
     ''');
 
+    await _createAuthTables(db);
+
     await _seedDemoData(db);
+    await _seedAuthData(db);
   }
 
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
-    // NOTE: no real migrations yet — pre-release, straight recreate is
-    // handled by bumping _dbVersion and relying on onCreate for now.
-    // Future migrations get added here as `if (oldVersion < N) { ... }`
-    // blocks once the DB is in the hands of real users with existing
-    // data that must be preserved across upgrades.
+    // First real migration in this codebase — see _dbVersion's v10 doc
+    // comment. Every block here must be additive only: CREATE TABLE for
+    // new tables, never DROP/recreate an existing one, so a device
+    // upgrading from v9 keeps every existing transaction/menu/dompet/
+    // HPP/branch row untouched.
+    if (oldVersion < 10) {
+      await _createAuthTables(db);
+      await _seedAuthData(db);
+    }
+    // Future migrations get added here as further `if (oldVersion < N)`
+    // blocks, each additive-only like the one above.
+  }
+
+  /// Creates the users/roles/permissions/user_roles/user_branch_access
+  /// tables. Called from both _onCreate (fresh install) and _onUpgrade
+  /// (existing device crossing the v10 boundary) so there is exactly one
+  /// definition of this schema, not two copies that could drift apart.
+  Future<void> _createAuthTables(Database db) async {
+    // `roles` is a real table, not a hardcoded Dart enum — this is what
+    // "custom roles are schema-ready" means for this pass (see
+    // [[mamam-kasir-flutter]] notes): the schema supports adding a role
+    // row beyond the 3 seeded defaults, even though there is no UI yet
+    // to create one, and app code should not assume exactly 3 rows will
+    // always exist here. `is_default` marks the 3 seeded ones so future
+    // UI can distinguish "built-in" from "custom" without a separate
+    // flag table.
+    await db.execute('''
+      CREATE TABLE roles (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        is_default INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    ''');
+
+    // One row per (role, permission key, mode) — PRD's 3-mode model
+    // (deny/direct/approval). Not built against yet (that's Tahap A4's
+    // PermissionService); this table exists now so A1 doesn't have to
+    // be revisited when A4 lands. permission_key is free-text rather
+    // than an enum/FK on purpose — A4's PermissionKey values aren't
+    // defined yet, and this table shouldn't hardcode them ahead of that
+    // design work.
+    await db.execute('''
+      CREATE TABLE permissions (
+        id TEXT PRIMARY KEY,
+        role_id TEXT NOT NULL,
+        permission_key TEXT NOT NULL,
+        mode TEXT NOT NULL, -- 'deny' | 'direct' | 'approval'
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (role_id, permission_key),
+        FOREIGN KEY (role_id) REFERENCES roles (id)
+      )
+    ''');
+
+    // Credentials + lockout state live directly on `users`, all
+    // per-row (i.e. per-user) rather than anywhere device-scoped — this
+    // is the A1 prerequisite for A2's per-user PIN work. password_hash/
+    // pin_hash are salted-hash pairs (see PasswordHasher), never
+    // plaintext. pin_hash/pin_salt are nullable because a freshly
+    // seeded/created user has no PIN until they complete the
+    // "set PIN after first login" flow. failed_pin_attempts/locked_at
+    // implement AGENTS.md's "5 wrong attempts locks the account" as a
+    // per-user, persistent counter (not the old in-memory
+    // pinAuthControllerProvider.autoDispose state) — see A2.
+    // last_pin_at backs AGENTS.md's "3 days with no PIN entry forces
+    // User ID+password login" rule (A3).
+    await db.execute('''
+      CREATE TABLE users (
+        id TEXT PRIMARY KEY,
+        username TEXT NOT NULL UNIQUE,
+        display_name TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        password_salt TEXT NOT NULL,
+        pin_hash TEXT,
+        pin_salt TEXT,
+        failed_pin_attempts INTEGER NOT NULL DEFAULT 0,
+        locked_at TEXT,
+        last_pin_at TEXT,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    ''');
+
+    // Many-to-many by schema (matches docs/handoff/04_DATABASE_
+    // CONTRACT.md's logical model, which specifies user_roles as its
+    // own join table) even though this pass's product decision is "one
+    // role per user at a time" (see [[mamam-kasir-flutter]] notes) — the
+    // app enforces the one-role rule at the application layer (only
+    // ever inserting one row per user), not by constraining the schema
+    // to a single role_id column on `users`. This keeps the door open
+    // for real multi-role later without another migration.
+    await db.execute('''
+      CREATE TABLE user_roles (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        role_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (user_id, role_id),
+        FOREIGN KEY (user_id) REFERENCES users (id),
+        FOREIGN KEY (role_id) REFERENCES roles (id)
+      )
+    ''');
+
+    // Per docs/handoff/01_PRD.md's Access section: "Branch-scoped
+    // operational data for Manager" — which branch(es) a non-Owner user
+    // may operate against. Not enforced anywhere yet (no branch-scoped
+    // query filters this pass — see [[mamam-kasir-flutter]] notes on
+    // deferred scope), just the schema slot so it exists when that
+    // enforcement is built, matching the same "table now, logic later"
+    // treatment as `permissions` above.
+    await db.execute('''
+      CREATE TABLE user_branch_access (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        branch_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (user_id, branch_id),
+        FOREIGN KEY (user_id) REFERENCES users (id),
+        FOREIGN KEY (branch_id) REFERENCES branches (id)
+      )
+    ''');
+  }
+
+  /// Seeds the 3 default roles and the 3 dummy accounts (owner/owner123,
+  /// manager/manager123, staff/staff123 — see [[mamam-kasir-flutter]]
+  /// notes) that replace hardcoded_accounts.dart's in-memory list.
+  /// Called from both _onCreate and _onUpgrade for the same
+  /// single-definition reason as _createAuthTables.
+  ///
+  /// "Hanya satu Owner" (PRD/AGENTS.md's single-Owner rule) is enforced
+  /// ONLY by construction here — this is the one and only place an
+  /// owner role assignment is ever inserted in this pass, since "Halaman
+  /// kelola user" (any UI to create/promote users) is explicitly out of
+  /// scope (see task brief section 5). There is no DB-level CHECK/
+  /// trigger and no repository-level runtime guard preventing a second
+  /// Owner — if a future user-management feature adds the ability to
+  /// assign roles, THAT feature must add its own single-Owner check
+  /// before this construction-only guarantee stops being sufficient.
+  /// Flagged explicitly rather than implied, since sqflite's SQLite
+  /// build here has no easy portable way to express "at most one row
+  /// where X" as a schema-level constraint, and adding a full
+  /// enforcement layer for a UI that doesn't exist yet was out of scope
+  /// per the task's "keep this pass simple" guidance.
+  Future<void> _seedAuthData(Database db) async {
+    // Guard against double-seeding: _onUpgrade runs _createAuthTables +
+    // _seedAuthData together, but if a future migration path ever calls
+    // this again (or a developer re-runs onUpgrade logic in a test), a
+    // second insert would violate the UNIQUE(username) constraint. This
+    // check makes the seed idempotent rather than crash-prone.
+    final existing = await db.query('roles', limit: 1);
+    if (existing.isNotEmpty) return;
+
+    final now = DateTime.now().toIso8601String();
+    const uuid = Uuid();
+
+    final roleIds = <String, String>{
+      'owner': uuid.v4(),
+      'manager': uuid.v4(),
+      'staff': uuid.v4(),
+    };
+
+    for (final entry in roleIds.entries) {
+      await db.insert('roles', {
+        'id': entry.value,
+        'name': entry.key,
+        'is_default': 1,
+        'created_at': now,
+        'updated_at': now,
+      });
+    }
+
+    final accounts = [
+      ('owner', 'owner123', 'Owner', roleIds['owner']!),
+      ('manager', 'manager123', 'Manager', roleIds['manager']!),
+      ('staff', 'staff123', 'Staff', roleIds['staff']!),
+    ];
+
+    for (final (username, password, displayName, roleId) in accounts) {
+      final userId = uuid.v4();
+      final passwordSalt = PasswordHasher.generateSalt();
+      await db.insert('users', {
+        'id': userId,
+        'username': username,
+        'display_name': displayName,
+        'password_hash': PasswordHasher.hash(password, passwordSalt),
+        'password_salt': passwordSalt,
+        'pin_hash': null,
+        'pin_salt': null,
+        'failed_pin_attempts': 0,
+        'locked_at': null,
+        'last_pin_at': null,
+        'is_active': 1,
+        'created_at': now,
+        'updated_at': now,
+      });
+      await db.insert('user_roles', {
+        'id': uuid.v4(),
+        'user_id': userId,
+        'role_id': roleId,
+        'created_at': now,
+      });
+    }
   }
 
   /// Seeds initial rows on first run.

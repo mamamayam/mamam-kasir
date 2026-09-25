@@ -49,7 +49,10 @@ class MenuBottomSheetContent extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final pendingApprovals = ref.watch(hrdControllerProvider.select((s) => s.pendingApprovals.length));
     final role = ref.watch(appSessionProvider.select((s) => s.role));
-    final isOwner = role == AppRole.owner;
+    // Manager is temporarily treated as Owner-equivalent here (Tahap A
+    // decision) until A4's granular PermissionService replaces this
+    // role-based check with a real per-tile permission lookup.
+    final isOwner = role != AppRole.staff;
 
     // For this pass the 9-tile grid is Owner-only — Staff's access is
     // limited to Kasir/Riwayat (dashboard quick actions, not this sheet)

@@ -21,14 +21,17 @@ enum HrdViewerMode { owner, sharedDevice }
 
 /// Now derived from the real logged-in session (see
 /// [[mamam-kasir-flutter]]/app_session.dart) rather than an env-var
-/// placeholder — Owner login -> [HrdViewerMode.owner], Staff login ->
-/// [HrdViewerMode.sharedDevice]. This was the intended seam per the
+/// placeholder — Owner/Manager login -> [HrdViewerMode.owner], Staff
+/// login -> [HrdViewerMode.sharedDevice]. Manager is temporarily treated
+/// as Owner-equivalent here (Tahap A decision) until A4's granular
+/// PermissionService replaces this role-based check with a real
+/// per-permission-key lookup. This was the intended seam per the
 /// original placeholder's doc comment; kept as its own provider (rather
 /// than inlining the check at every call site) so HRD code doesn't need
 /// to know about [AppRole] directly.
 final hrdViewerModeProvider = Provider<HrdViewerMode>((ref) {
   final role = ref.watch(appSessionProvider.select((s) => s.role));
-  return role == AppRole.owner ? HrdViewerMode.owner : HrdViewerMode.sharedDevice;
+  return role == AppRole.staff ? HrdViewerMode.sharedDevice : HrdViewerMode.owner;
 });
 
 // ---------------------------------------------------------------------------

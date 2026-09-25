@@ -72,7 +72,11 @@ final dashboardProvider = StateNotifierProvider.autoDispose<DashboardController,
 
 SessionUser _toSessionUser(AppSession session) {
   if (!session.isLoggedIn) return const SessionUser();
-  final roleLabel = session.role == AppRole.owner ? 'Owner' : 'Staff';
+  final roleLabel = switch (session.role!) {
+    AppRole.owner => 'Owner',
+    AppRole.manager => 'Manager',
+    AppRole.staff => 'Staff',
+  };
   return SessionUser(name: session.username, role: roleLabel);
 }
 
