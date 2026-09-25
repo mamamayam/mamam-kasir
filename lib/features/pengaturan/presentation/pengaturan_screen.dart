@@ -2,11 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/navigation/app_nav.dart';
+import '../../../core/session/app_session_provider.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_spacing.dart';
 import '../../../core/widgets/ios_page_header.dart';
 import '../../../core/widgets/placeholder_screen.dart';
-import '../../auth/presentation/pin_login_screen.dart';
+import '../../auth/presentation/change_pin_screen.dart';
+import '../../auth/presentation/login_screen.dart';
 import '../application/auto_print_provider.dart';
 
 /// Pengaturan (Settings) screen, ported 1:1 from the approved HTML
@@ -15,17 +17,22 @@ import '../application/auto_print_provider.dart';
 /// explicitly removed and are not reproduced here.
 ///
 /// Rows fall into three buckets:
-/// - Real and wired: Cetak Struk Otomatis (SharedPreferences), Keluar
-///   Akun (returns to PIN login).
+/// - Real and wired: Cetak Struk Otomatis (SharedPreferences), Keamanan
+///   PIN (Tahap A/A2 — opens [ChangePinScreen]), Keluar Akun (clears the
+///   session via [AppSessionController.logout] and returns to
+///   [LoginScreen] — previously this only navigated to the PIN screen
+///   without actually clearing the session, which was harmless back
+///   when PIN was device-wide but became a real bug once PIN became
+///   per-user in A2: it made "Keluar Akun" unable to actually switch to
+///   a different account, since the old session/userId was still
+///   sitting in shared_preferences).
 /// - Real status, no action yet: Status Sinkronisasi (this app is
 ///   local-first with no cloud sync built — shown as "Tidak aktif"
 ///   rather than inventing a sync state), Printer Bluetooth (no
 ///   Bluetooth library wired up yet — shown as "Tidak tersambung").
 /// - Not yet built, routed to [PlaceholderScreen]: Kelola Karyawan (no
-///   Staff module exists), Backup & Restore (no such feature exists).
-/// Keamanan PIN links to the existing PIN login flow's settings — since
-/// there is no separate "change PIN" screen yet, it also routes to a
-/// placeholder rather than inventing one.
+///   user-management UI exists — out of scope per the Tahap A task
+///   brief), Backup & Restore (no such feature exists).
 class PengaturanScreen extends ConsumerWidget {
   const PengaturanScreen({super.key});
 
@@ -51,15 +58,7 @@ class PengaturanScreen extends ConsumerWidget {
                       _SettingsRow(
                         icon: Icons.lock_outline_rounded,
                         label: 'Keamanan PIN',
-                        onTap: () => AppNav.push(
-                          context,
-                          (_) => const PlaceholderScreen(
-                            title: 'Keamanan PIN',
-                            icon: Icons.lock_outline_rounded,
-                            accentColor: AppColors.textPrimary,
-                            description: 'Pengaturan ganti PIN akan segera hadir.',
-                          ),
-                        ),
+                        onTap: () => AppNav.push(context, (_) => const ChangePinScreen()),
                       ),
                       _SettingsRow(
                         icon: Icons.people_alt_outlined,
@@ -147,7 +146,7 @@ class PengaturanScreen extends ConsumerWidget {
                         labelColor: AppColors.danger,
                         iconColor: AppColors.danger,
                         showTrailingChevron: false,
-                        onTap: () => _confirmLogout(context),
+                        onTap: () => _confirmLogout(context, ref),
                       ),
                     ],
                   ),
@@ -164,19 +163,21 @@ class PengaturanScreen extends ConsumerWidget {
     );
   }
 
-  void _confirmLogout(BuildContext context) {
+  void _confirmLogout(BuildContext context, WidgetRef ref) {
     showDialog(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('Keluar Akun?'),
-        content: const Text('Anda akan kembali ke halaman login PIN.'),
+        content: const Text('Anda akan kembali ke halaman login.'),
         actions: [
           TextButton(onPressed: () => Navigator.of(dialogContext).pop(), child: const Text('Batal')),
           TextButton(
-            onPressed: () {
+            onPressed: () async {
               Navigator.of(dialogContext).pop();
+              await ref.read(appSessionProvider.notifier).logout();
+              if (!context.mounted) return;
               Navigator.of(context).pushAndRemoveUntil(
-                MaterialPageRoute(builder: (_) => const PinLoginScreen()),
+                MaterialPageRoute(builder: (_) => const LoginScreen()),
                 (route) => false,
               );
             },

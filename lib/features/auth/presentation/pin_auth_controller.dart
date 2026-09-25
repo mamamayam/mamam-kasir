@@ -1,17 +1,41 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../../core/session/app_session_provider.dart';
+import '../data/pin_auth_repository.dart';
 import '../domain/pin_auth_state.dart';
 
+final pinAuthRepositoryProvider = Provider<PinAuthRepository>((ref) => PinAuthRepository());
+
+/// Keyed by userId — A2's per-user PIN model means two different users
+/// need two completely independent controllers/states (different
+/// enteredDigits, different lockout), not one shared controller like
+/// the old device-wide version. Still `.autoDispose` (UI-only state;
+/// the actual lockout persistence lives in PinAuthRepository/the DB, not
+/// here), but `.family` so switching users (via "Login dengan akun
+/// lain") never reuses another user's leftover in-memory state.
 final pinAuthControllerProvider =
-    StateNotifierProvider.autoDispose<PinAuthController, PinAuthState>(
-  (ref) => PinAuthController(ref),
+    StateNotifierProvider.autoDispose.family<PinAuthController, PinAuthState, String>(
+  (ref, userId) => PinAuthController(ref.watch(pinAuthRepositoryProvider), userId)..loadInitialLockState(),
 );
 
 class PinAuthController extends StateNotifier<PinAuthState> {
-  final Ref _ref;
+  final PinAuthRepository _repository;
+  final String _userId;
 
-  PinAuthController(this._ref) : super(const PinAuthState());
+  PinAuthController(this._repository, this._userId) : super(const PinAuthState());
+
+  /// Reads the persisted lock state from the DB as soon as this
+  /// controller is created, so a user who was already locked (e.g. app
+  /// was killed mid-lockout, or they navigated away and back) sees the
+  /// locked state immediately rather than starting from a fresh
+  /// isLocked=false — this is what makes lockout survive "restart"
+  /// rather than living only in this autoDispose controller's memory.
+  Future<void> loadInitialLockState() async {
+    final identity = await _repository.loadIdentity(_userId);
+    if (!mounted || identity == null) return;
+    if (identity.isLocked) {
+      state = state.copyWith(isLocked: true);
+    }
+  }
 
   void addDigit(String digit) {
     if (state.isLocked) return;
@@ -35,22 +59,24 @@ class PinAuthController extends StateNotifier<PinAuthState> {
   }
 
   Future<void> _verify(String pin) async {
-    final isCorrect = await _ref.read(appSessionProvider.notifier).verifyPin(pin);
+    final result = await _repository.verifyPin(_userId, pin);
     if (!mounted) return;
 
-    if (isCorrect) {
-      state = state.copyWith(isError: false, failedAttempts: 0);
-      return;
+    switch (result) {
+      case PinVerifyResult.correct:
+        state = state.copyWith(isError: false, failedAttempts: 0);
+      case PinVerifyResult.incorrect:
+        state = state.copyWith(enteredDigits: '', isError: true, failedAttempts: state.failedAttempts + 1);
+      case PinVerifyResult.justLocked:
+      case PinVerifyResult.alreadyLocked:
+        // Both end in the same visible state — the PIN screen doesn't
+        // distinguish "you just got locked" from "you were already
+        // locked when you tried" (see PinVerifyResult's doc comment on
+        // alreadyLocked: attempts against an already-locked account are
+        // rejected without even checking the PIN, so there is nothing
+        // more specific to tell the user in that case anyway).
+        state = state.copyWith(enteredDigits: '', isError: true, isLocked: true);
     }
-
-    final attempts = state.failedAttempts + 1;
-    final locked = attempts >= PinAuthState.maxAttempts;
-    state = state.copyWith(
-      enteredDigits: '',
-      isError: true,
-      failedAttempts: attempts,
-      isLocked: locked,
-    );
   }
 
   void reset() {

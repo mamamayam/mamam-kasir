@@ -5,6 +5,7 @@ import '../../../core/session/app_session_provider.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_spacing.dart';
 import '../data/auth_repository.dart';
+import '../data/pin_auth_repository.dart';
 import 'set_pin_screen.dart';
 import 'pin_login_screen.dart';
 
@@ -53,6 +54,9 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       _errorText = null;
     });
 
+    // A successful call here also clears any PIN lockout for this user
+    // (see AuthRepository.verifyCredentials) — re-login with password is
+    // this app's only PIN-unlock mechanism, per explicit decision.
     final authenticated = await _authRepository.verifyCredentials(username, password);
     if (!mounted) return;
 
@@ -71,7 +75,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
         );
     if (!mounted) return;
 
-    final hasPinAlready = await ref.read(appSessionProvider.notifier).hasPinSet();
+    final hasPinAlready = await ref.read(pinAuthRepositoryProvider).hasPinSet(authenticated.id);
     if (!mounted) return;
 
     setState(() => _isSubmitting = false);

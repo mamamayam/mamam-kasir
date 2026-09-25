@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/session/app_session_provider.dart';
 import '../../../core/theme/app_colors.dart';
+import '../data/pin_auth_repository.dart';
 import 'login_screen.dart';
 import 'pin_login_screen.dart';
 import 'set_pin_screen.dart';
@@ -26,17 +27,22 @@ class _SplashScreenState extends ConsumerState<SplashScreen> {
   }
 
   Future<void> _navigateNext() async {
-    // Full AGENTS.md device-auth rules (3-day PIN expiry forcing
-    // password re-login, second-device logout, etc.) are future work —
-    // for this pass, routing is just: no saved session -> Login
-    // (username+password); saved session but no PIN yet on this device
-    // -> Set PIN; saved session + PIN already set -> PIN lock screen.
+    // The 3-day PIN-expiry -> forced password re-login rule
+    // (PinAuthRepository.requiresPasswordReentry) and true auto-lock are
+    // A3's job to wire in here — for this pass, routing is just: no
+    // saved session -> Login (username+password); saved session but no
+    // PIN yet for that user -> Set PIN; saved session + PIN already set
+    // for that user -> PIN lock screen. "Second-device logout"
+    // enforcement (AGENTS.md's "1 user = 1 active device") is Tahap E,
+    // out of scope here per the task brief.
     final splashDelay = Future.delayed(const Duration(milliseconds: 900));
 
     final sessionController = ref.read(appSessionProvider.notifier);
     await sessionController.restore();
     final session = ref.read(appSessionProvider);
-    final hasPinSet = session.isLoggedIn ? await sessionController.hasPinSet() : false;
+    final hasPinSet = session.isLoggedIn
+        ? await ref.read(pinAuthRepositoryProvider).hasPinSet(session.userId!)
+        : false;
 
     await splashDelay;
     if (!mounted) return;

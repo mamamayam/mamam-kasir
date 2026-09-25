@@ -1,0 +1,1124 @@
+diff --git a/lib/core/session/app_session_provider.dart b/lib/core/session/app_session_provider.dart
+index fc6af5b..74a936c 100644
+--- a/lib/core/session/app_session_provider.dart
++++ b/lib/core/session/app_session_provider.dart
+@@ -1,5 +1,4 @@
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+ import 'package:shared_preferences/shared_preferences.dart';
+ 
+ import 'app_session.dart';
+@@ -7,16 +6,12 @@ import 'app_session.dart';
+ // ---------------------------------------------------------------------------
+ // Storage keys
+ // ---------------------------------------------------------------------------
+-// username/role are non-sensitive identity, kept in shared_preferences.
+-// PIN is the closest thing to a credential this device holds, kept in
+-// flutter_secure_storage (OS keychain/keystore) per AGENTS.md's
+-// "encrypt local DB and OS secure key storage" security rule.
++// username/role/userId are non-sensitive identity, kept in
++// shared_preferences. There is no PIN storage in this file anymore —
++// see the A2 migration note below.
+ const _kPrefsUserIdKey = 'session_user_id';
+ const _kPrefsUsernameKey = 'session_username';
+ const _kPrefsRoleKey = 'session_role';
+-const _kSecurePinKey = 'session_device_pin';
+-
+-const _secureStorage = FlutterSecureStorage();
+ 
+ /// Current logged-in session (user id + username + role), if any.
+ /// Persisted across app restarts via shared_preferences so the splash
+@@ -29,6 +24,18 @@ final appSessionProvider = StateNotifierProvider<AppSessionController, AppSessio
+   (ref) => AppSessionController()..restore(),
+ );
+ 
++/// Identity-only session controller. PIN storage/verification used to
++/// live here as a single device-wide `session_device_pin` secure-storage
++/// key — Tahap A/A2 tore that out entirely (per explicit decision: a
++/// PIN belongs to a user, not a device; a shared device-wide PIN would
++/// let anyone who learns it log in as anyone else, including Owner).
++/// PIN is now handled by [PinAuthRepository] (lib/features/auth/data/
++/// pin_auth_repository.dart), keyed by userId and stored on each user's
++/// own `users` row alongside their password hash — see that class's doc
++/// comment for the full reasoning. There is intentionally no PIN-related
++/// method left on this controller; callers needing PIN behavior should
++/// depend on [PinAuthRepository] directly, using `state.userId` from
++/// this session to know which user's PIN to act on.
+ class AppSessionController extends StateNotifier<AppSession> {
+   AppSessionController() : super(AppSession.empty);
+ 
+@@ -64,10 +71,11 @@ class AppSessionController extends StateNotifier<AppSession> {
+     state = AppSession(userId: userId, username: username, role: role);
+   }
+ 
+-  /// Clears the session (identity) but deliberately leaves the device
+-  /// PIN in place — logging out doesn't require re-registering a PIN if
+-  /// the same person (or another authorized user) logs back in. Full
+-  /// device PIN reset is a separate, explicit action.
++  /// Clears the session (identity) but deliberately leaves the user's
++  /// PIN in place (now stored per-user in the DB, not touched by this
++  /// method at all) — logging out doesn't require re-registering a PIN
++  /// if the same person logs back in. Full PIN reset is a separate,
++  /// explicit action via PinAuthRepository.
+   Future<void> logout() async {
+     final prefs = await SharedPreferences.getInstance();
+     await prefs.remove(_kPrefsUserIdKey);
+@@ -75,32 +83,4 @@ class AppSessionController extends StateNotifier<AppSession> {
+     await prefs.remove(_kPrefsRoleKey);
+     state = AppSession.empty;
+   }
+-
+-  // ---------------------------------------------------------------------
+-  // Device PIN — separate from the session identity above. One PIN per
+-  // device for this pass (not one PIN per user), matching AGENTS.md's
+-  // "one user = one active device" framing for now; multi-account PIN
+-  // switching is future work.
+-  // ---------------------------------------------------------------------
+-
+-  Future<bool> hasPinSet() async {
+-    final pin = await _secureStorage.read(key: _kSecurePinKey);
+-    return pin != null && pin.isNotEmpty;
+-  }
+-
+-  Future<void> setPin(String pin) async {
+-    await _secureStorage.write(key: _kSecurePinKey, value: pin);
+-  }
+-
+-  Future<bool> verifyPin(String pin) async {
+-    final saved = await _secureStorage.read(key: _kSecurePinKey);
+-    return saved != null && saved == pin;
+-  }
+-
+-  /// Clears the stored device PIN (e.g. "Cabut Otorisasi Device" per
+-  /// AGENTS.md — not wired to any UI yet, but the method exists so that
+-  /// feature can call it directly once built).
+-  Future<void> clearPin() async {
+-    await _secureStorage.delete(key: _kSecurePinKey);
+-  }
+ }
+diff --git a/mamam-kasir/lib/core/utils/app_clock.dart b/lib/core/utils/app_clock.dart
+new file mode 100644
+index 0000000..663657f
+--- /dev/null
++++ b/lib/core/utils/app_clock.dart
+@@ -0,0 +1,40 @@
++/// Injectable clock so time-dependent logic (PIN lockout duration,
++/// auto-lock timers, the 3-day-no-PIN rule) can be tested without
++/// waiting on real wall-clock time.
++///
++/// Built in A2 for [PinAuthRepository]'s lockout timing; A3's auto-lock
++/// and 3-day rules should reuse this same abstraction rather than each
++/// introducing their own `DateTime.now()` call, so both can be
++/// controlled by the same fake clock in tests.
++abstract class AppClock {
++  DateTime now();
++
++  /// The real system clock — used everywhere in production.
++  static const AppClock system = _SystemClock();
++}
++
++class _SystemClock implements AppClock {
++  const _SystemClock();
++
++  @override
++  DateTime now() => DateTime.now();
++}
++
++/// Test double: returns a fixed (or manually-advanced) time instead of
++/// the real clock. Not used by app code — only by tests.
++class FakeClock implements AppClock {
++  DateTime _current;
++
++  FakeClock(this._current);
++
++  @override
++  DateTime now() => _current;
++
++  void advance(Duration duration) {
++    _current = _current.add(duration);
++  }
++
++  void set(DateTime time) {
++    _current = time;
++  }
++}
+diff --git a/lib/features/auth/data/auth_repository.dart b/lib/features/auth/data/auth_repository.dart
+index e332a89..478c10e 100644
+--- a/lib/features/auth/data/auth_repository.dart
++++ b/lib/features/auth/data/auth_repository.dart
+@@ -65,6 +65,20 @@ class AuthRepository {
+     final role = AppRole.values.where((r) => r.name == roleName).firstOrNull;
+     if (role == null) return null; // Unknown role name — fail closed.
+ 
++    // A successful username+password login is this app's ONLY unlock
++    // mechanism for a PIN-locked account (explicit decision — no
++    // "unlock by another user" path, since there's only ever one
++    // Owner and PRD doesn't specify a separate unlock flow). Clearing
++    // the lockout here, rather than requiring a second explicit action,
++    // means "re-login with password" IS the unlock — nothing else
++    // needs to remember to call this.
++    await db.update(
++      'users',
++      {'failed_pin_attempts': 0, 'locked_at': null},
++      where: 'id = ?',
++      whereArgs: [row['id']],
++    );
++
+     return AuthenticatedUser(
+       id: row['id'] as String,
+       username: row['username'] as String,
+diff --git a/mamam-kasir/lib/features/auth/data/pin_auth_repository.dart b/lib/features/auth/data/pin_auth_repository.dart
+new file mode 100644
+index 0000000..fdcdb28
+--- /dev/null
++++ b/lib/features/auth/data/pin_auth_repository.dart
+@@ -0,0 +1,210 @@
++import '../../../core/data/app_database.dart';
++import '../../../core/data/password_hasher.dart';
++import '../../../core/session/app_session.dart';
++import '../../../core/utils/app_clock.dart';
++import 'pin_user_identity.dart';
++
++/// Result of a PIN verification attempt.
++enum PinVerifyResult {
++  /// PIN matched — success. Failed-attempt counter was reset to 0.
++  correct,
++
++  /// PIN didn't match, and the account is not (yet) locked. Caller
++  /// should show "PIN salah" and let the user try again.
++  incorrect,
++
++  /// PIN didn't match, and this attempt was the one that crossed
++  /// [PinUserIdentity]'s lock threshold — account is now locked.
++  /// Caller should show the locked state immediately, same as
++  /// [alreadyLocked].
++  justLocked,
++
++  /// Account was already locked before this attempt — the attempt was
++  /// rejected without even checking the PIN. Per AGENTS.md, this app's
++  /// only unlock path is re-login with username+password (see
++  /// AuthRepository.verifyCredentials, which clears the lock) — there is
++  /// no "wait N minutes" auto-unlock.
++  alreadyLocked,
++}
++
++/// Per-user PIN storage, verification, and lockout — the A2 replacement
++/// for the old app_session_provider.dart's single device-wide
++/// `session_device_pin` key.
++///
++/// PIN is stored on the same `users` row as the password (pin_hash/
++/// pin_salt/failed_pin_attempts/locked_at/last_pin_at — see
++/// AppDatabase's v10 migration), not in a separate secure-storage entry
++/// keyed by device. This was the two-option decision the task brief
++/// asked to make explicit: DB row (chosen) vs. secure storage keyed by
++/// user id. DB row was chosen because the lockout counter and
++/// last-PIN-at timestamp need to be queried and updated transactionally
++/// alongside each other on every attempt, which is far simpler as
++/// ordinary SQL UPDATEs than as multiple independent secure-storage
++/// read-modify-write calls (secure_storage has no transactions). The
++/// PIN hash itself sitting in the same SQLCipher-encrypted database as
++/// the password hash is no weaker than secure_storage for this app's
++/// threat model — both are OS-protected, on-device, single-database-file
++/// storage either way.
++///
++/// All methods require a `userId` — there is no "verify against
++/// whichever PIN" path. This is what makes the PIN per-user rather than
++/// per-device: two different users on the same device have two
++/// completely independent rows, counters, and lock states.
++class PinAuthRepository {
++  final AppClock _clock;
++
++  PinAuthRepository({AppClock clock = AppClock.system}) : _clock = clock;
++
++  static const int maxAttempts = 5;
++  static const int pinLength = 4;
++
++  /// Loads the lightweight identity + current lock status for the PIN
++  /// screen to display. Returns null if the user doesn't exist or was
++  /// deactivated — callers should treat that the same as "no session",
++  /// routing to Login rather than showing a broken PIN screen.
++  Future<PinUserIdentity?> loadIdentity(String userId) async {
++    final db = await AppDatabase.instance.database;
++    final rows = await db.query(
++      'users',
++      where: 'id = ? AND is_active = 1',
++      whereArgs: [userId],
++      limit: 1,
++    );
++    if (rows.isEmpty) return null;
++
++    final row = rows.first;
++    final roleRows = await db.rawQuery(
++      '''
++      SELECT roles.name AS role_name
++      FROM user_roles
++      JOIN roles ON roles.id = user_roles.role_id
++      WHERE user_roles.user_id = ?
++      LIMIT 1
++      ''',
++      [userId],
++    );
++    if (roleRows.isEmpty) return null;
++
++    final role = AppRole.values.where((r) => r.name == roleRows.first['role_name']).firstOrNull;
++    if (role == null) return null;
++
++    return PinUserIdentity(
++      userId: row['id'] as String,
++      displayName: row['display_name'] as String,
++      role: role,
++      isLocked: row['locked_at'] != null,
++    );
++  }
++
++  Future<bool> hasPinSet(String userId) async {
++    final db = await AppDatabase.instance.database;
++    final rows = await db.query('users', columns: ['pin_hash'], where: 'id = ?', whereArgs: [userId], limit: 1);
++    if (rows.isEmpty) return false;
++    return rows.first['pin_hash'] != null;
++  }
++
++  /// Sets (or overwrites) a user's PIN — used both by the initial
++  /// "buat PIN baru" flow after first login and by "Ganti PIN" (change,
++  /// no logout required — AGENTS.md). Also clears any lockout, since
++  /// setting a new PIN is itself an authenticated action (only reachable
++  /// after a fresh username+password login or from inside a session
++  /// that's already unlocked) — there is no scenario where a locked
++  /// account should stay locked after its PIN was just legitimately
++  /// changed.
++  Future<void> setPin(String userId, String pin) async {
++    final db = await AppDatabase.instance.database;
++    final salt = PasswordHasher.generateSalt();
++    await db.update(
++      'users',
++      {
++        'pin_hash': PasswordHasher.hash(pin, salt),
++        'pin_salt': salt,
++        'failed_pin_attempts': 0,
++        'locked_at': null,
++        'last_pin_at': _clock.now().toIso8601String(),
++      },
++      where: 'id = ?',
++      whereArgs: [userId],
++    );
++  }
++
++  /// Verifies [pin] for [userId], updating the persistent lockout
++  /// counter as a side effect. This persists to the DB on every call —
++  /// unlike the old autoDispose-provider-held `failedAttempts`, this
++  /// survives app kill/restart and a fresh PinLoginScreen instance,
++  /// because it's never held only in memory.
++  Future<PinVerifyResult> verifyPin(String userId, String pin) async {
++    final db = await AppDatabase.instance.database;
++    final rows = await db.query(
++      'users',
++      columns: ['pin_hash', 'pin_salt', 'failed_pin_attempts', 'locked_at'],
++      where: 'id = ?',
++      whereArgs: [userId],
++      limit: 1,
++    );
++    if (rows.isEmpty) return PinVerifyResult.incorrect;
++
++    final row = rows.first;
++    if (row['locked_at'] != null) return PinVerifyResult.alreadyLocked;
++
++    final pinHash = row['pin_hash'] as String?;
++    final pinSalt = row['pin_salt'] as String?;
++    if (pinHash == null || pinSalt == null) return PinVerifyResult.incorrect; // No PIN set yet.
++
++    final isCorrect = PasswordHasher.verify(plainText: pin, salt: pinSalt, expectedHash: pinHash);
++
++    if (isCorrect) {
++      await db.update(
++        'users',
++        {'failed_pin_attempts': 0, 'last_pin_at': _clock.now().toIso8601String()},
++        where: 'id = ?',
++        whereArgs: [userId],
++      );
++      return PinVerifyResult.correct;
++    }
++
++    final attempts = (row['failed_pin_attempts'] as int) + 1;
++    final nowLocked = attempts >= maxAttempts;
++    await db.update(
++      'users',
++      {
++        'failed_pin_attempts': attempts,
++        if (nowLocked) 'locked_at': _clock.now().toIso8601String(),
++      },
++      where: 'id = ?',
++      whereArgs: [userId],
++    );
++    return nowLocked ? PinVerifyResult.justLocked : PinVerifyResult.incorrect;
++  }
++
++  /// Changes an already-logged-in user's PIN — requires the current PIN
++  /// to be correct first (does NOT log the user out either before or
++  /// after, per AGENTS.md's "PIN change requires no logout"). Returns
++  /// false without changing anything if [currentPin] is wrong.
++  Future<bool> changePin(String userId, {required String currentPin, required String newPin}) async {
++    final result = await verifyPin(userId, currentPin);
++    if (result != PinVerifyResult.correct) return false;
++    await setPin(userId, newPin);
++    return true;
++  }
++
++  /// Whether [userId] has gone 3+ days without a successful PIN entry —
++  /// AGENTS.md's "3 hari tanpa PIN -> wajib User ID + password" rule.
++  /// A user who has never entered a PIN (last_pin_at is null — e.g.
++  /// right after being seeded, before ever completing the "set PIN"
++  /// flow) is NOT treated as over the threshold here; that case is
++  /// naturally already routed to SetPinScreen by hasPinSet, not this
++  /// check. Full wiring into splash/resume is A3's job — this method
++  /// exists now so A3 doesn't need to touch PinAuthRepository again.
++  Future<bool> requiresPasswordReentry(String userId) async {
++    final db = await AppDatabase.instance.database;
++    final rows = await db.query('users', columns: ['last_pin_at'], where: 'id = ?', whereArgs: [userId], limit: 1);
++    if (rows.isEmpty) return false;
++
++    final lastPinAt = rows.first['last_pin_at'] as String?;
++    if (lastPinAt == null) return false;
++
++    final elapsed = _clock.now().difference(DateTime.parse(lastPinAt));
++    return elapsed > const Duration(days: 3);
++  }
++}
+diff --git a/mamam-kasir/lib/features/auth/domain/pin_user_identity.dart b/lib/features/auth/domain/pin_user_identity.dart
+new file mode 100644
+index 0000000..00c13c3
+--- /dev/null
++++ b/lib/features/auth/domain/pin_user_identity.dart
+@@ -0,0 +1,30 @@
++import '../../../core/session/app_session.dart';
++
++/// What the PIN screen is allowed to know about the user it's asking to
++/// unlock. Deliberately excludes password_hash/password_salt/pin_hash/
++/// pin_salt and any other credential field — PinLoginScreen must only
++/// ever receive this model, never a raw `users` row.
++///
++/// Built from a DB row by [PinAuthRepository.loadIdentity] — see that
++/// method for how [isLocked] is derived.
++class PinUserIdentity {
++  final String userId;
++  final String displayName;
++  final AppRole role;
++  final bool isLocked;
++
++  const PinUserIdentity({
++    required this.userId,
++    required this.displayName,
++    required this.role,
++    required this.isLocked,
++  });
++
++  /// Role label for display — Owner/Manager/Staff, matching the labels
++  /// used elsewhere (see dashboard_provider.dart's _toSessionUser).
++  String get roleLabel => switch (role) {
++        AppRole.owner => 'Owner',
++        AppRole.manager => 'Manager',
++        AppRole.staff => 'Staff',
++      };
++}
+diff --git a/mamam-kasir/lib/features/auth/presentation/change_pin_screen.dart b/lib/features/auth/presentation/change_pin_screen.dart
+new file mode 100644
+index 0000000..881f3f5
+--- /dev/null
++++ b/lib/features/auth/presentation/change_pin_screen.dart
+@@ -0,0 +1,193 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../../../core/session/app_session_provider.dart';
++import '../../../core/theme/app_colors.dart';
++import '../../../core/widgets/app_pin_keypad.dart';
++import '../data/pin_auth_repository.dart';
++import '../domain/pin_auth_state.dart';
++
++enum _ChangePinStage { currentPin, newPin, confirmNewPin }
++
++/// "Ganti PIN" — reachable from Pengaturan while already logged in.
++/// Requires the CURRENT PIN first (proves the person holding the phone
++/// actually knows it), then the new PIN twice. Does NOT log the user
++/// out at any point, before or after — per AGENTS.md's "PIN change
++/// requires no logout" and per [PinAuthRepository.changePin], which
++/// this screen is a thin UI wrapper around.
++class ChangePinScreen extends ConsumerStatefulWidget {
++  const ChangePinScreen({super.key});
++
++  @override
++  ConsumerState<ChangePinScreen> createState() => _ChangePinScreenState();
++}
++
++class _ChangePinScreenState extends ConsumerState<ChangePinScreen> {
++  _ChangePinStage _stage = _ChangePinStage.currentPin;
++  String _currentPinEntry = '';
++  String _newPinFirstEntry = '';
++  String _currentDigits = '';
++  bool _isError = false;
++  bool _isSaving = false;
++
++  void _handleDigit(String digit) {
++    if (_isSaving) return;
++    if (_currentDigits.length >= PinAuthState.pinLength) return;
++
++    setState(() {
++      _currentDigits += digit;
++      _isError = false;
++    });
++
++    if (_currentDigits.length == PinAuthState.pinLength) {
++      _onComplete();
++    }
++  }
++
++  void _handleBackspace() {
++    if (_isSaving || _currentDigits.isEmpty) return;
++    setState(() {
++      _currentDigits = _currentDigits.substring(0, _currentDigits.length - 1);
++      _isError = false;
++    });
++  }
++
++  Future<void> _onComplete() async {
++    switch (_stage) {
++      case _ChangePinStage.currentPin:
++        await _verifyCurrentPin();
++      case _ChangePinStage.newPin:
++        setState(() {
++          _newPinFirstEntry = _currentDigits;
++          _currentDigits = '';
++          _stage = _ChangePinStage.confirmNewPin;
++        });
++      case _ChangePinStage.confirmNewPin:
++        await _confirmAndSave();
++    }
++  }
++
++  Future<void> _verifyCurrentPin() async {
++    final userId = ref.read(appSessionProvider).userId;
++    if (userId == null) return;
++
++    setState(() => _isSaving = true);
++    final result = await ref.read(pinAuthRepositoryProvider).verifyPin(userId, _currentDigits);
++    if (!mounted) return;
++
++    if (result != PinVerifyResult.correct) {
++      setState(() {
++        _isSaving = false;
++        _isError = true;
++        _currentDigits = '';
++      });
++      return;
++    }
++
++    setState(() {
++      _isSaving = false;
++      _currentPinEntry = _currentDigits;
++      _currentDigits = '';
++      _stage = _ChangePinStage.newPin;
++    });
++  }
++
++  Future<void> _confirmAndSave() async {
++    if (_currentDigits != _newPinFirstEntry) {
++      setState(() {
++        _isError = true;
++        _currentDigits = '';
++        _newPinFirstEntry = '';
++        _stage = _ChangePinStage.newPin;
++      });
++      return;
++    }
++
++    final userId = ref.read(appSessionProvider).userId;
++    if (userId == null) return;
++
++    setState(() => _isSaving = true);
++    final success = await ref.read(pinAuthRepositoryProvider).changePin(
++          userId,
++          currentPin: _currentPinEntry,
++          newPin: _currentDigits,
++        );
++    if (!mounted) return;
++
++    if (!success) {
++      // The current PIN was re-checked inside changePin and somehow
++      // failed even though _verifyCurrentPin already confirmed it —
++      // extremely unlikely (would need the PIN to change mid-flow from
++      // another device), but fail safely back to the start rather than
++      // silently proceeding.
++      setState(() {
++        _isSaving = false;
++        _isError = true;
++        _currentDigits = '';
++        _currentPinEntry = '';
++        _newPinFirstEntry = '';
++        _stage = _ChangePinStage.currentPin;
++      });
++      return;
++    }
++
++    if (!mounted) return;
++    Navigator.of(context).pop();
++    ScaffoldMessenger.of(context).showSnackBar(
++      const SnackBar(content: Text('PIN berhasil diganti')),
++    );
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final (title, subtitle) = switch (_stage) {
++      _ChangePinStage.currentPin => ('Masukkan PIN Saat Ini', 'Konfirmasi dulu sebelum membuat PIN baru'),
++      _ChangePinStage.newPin => ('Buat PIN Baru', 'Buat 4 digit PIN baru'),
++      _ChangePinStage.confirmNewPin => ('Konfirmasi PIN Baru', 'Masukkan ulang PIN baru yang sama'),
++    };
++
++    return Scaffold(
++      backgroundColor: AppColors.background,
++      body: SafeArea(
++        child: Padding(
++          padding: const EdgeInsets.symmetric(horizontal: 24),
++          child: Column(
++            children: [
++              Align(
++                alignment: Alignment.centerLeft,
++                child: IconButton(
++                  icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 18, color: AppColors.textPrimary),
++                  onPressed: () => Navigator.of(context).pop(),
++                ),
++              ),
++              const Spacer(flex: 2),
++              Container(
++                width: 56,
++                height: 56,
++                decoration: BoxDecoration(color: AppColors.brand, borderRadius: BorderRadius.circular(16)),
++                child: const Icon(Icons.pin_rounded, color: Colors.white, size: 28),
++              ),
++              const SizedBox(height: 16),
++              Text(title, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
++              const SizedBox(height: 6),
++              Text(
++                _isError ? 'PIN salah atau tidak cocok, coba lagi' : subtitle,
++                textAlign: TextAlign.center,
++                style: TextStyle(
++                  fontSize: 13,
++                  fontWeight: FontWeight.w500,
++                  color: _isError ? AppColors.danger : AppColors.textSecondary,
++                ),
++              ),
++              const SizedBox(height: 28),
++              AppPinDots(length: PinAuthState.pinLength, filledCount: _currentDigits.length, isError: _isError),
++              const Spacer(flex: 2),
++              AppPinKeypad(disabled: _isSaving, onDigit: _handleDigit, onBackspace: _handleBackspace),
++              const SizedBox(height: 28),
++            ],
++          ),
++        ),
++      ),
++    );
++  }
++}
+diff --git a/lib/features/auth/presentation/login_screen.dart b/lib/features/auth/presentation/login_screen.dart
+index 33a983d..61f0899 100644
+--- a/lib/features/auth/presentation/login_screen.dart
++++ b/lib/features/auth/presentation/login_screen.dart
+@@ -5,6 +5,7 @@ import '../../../core/session/app_session_provider.dart';
+ import '../../../core/theme/app_colors.dart';
+ import '../../../core/theme/app_spacing.dart';
+ import '../data/auth_repository.dart';
++import '../data/pin_auth_repository.dart';
+ import 'set_pin_screen.dart';
+ import 'pin_login_screen.dart';
+ 
+@@ -53,6 +54,9 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
+       _errorText = null;
+     });
+ 
++    // A successful call here also clears any PIN lockout for this user
++    // (see AuthRepository.verifyCredentials) — re-login with password is
++    // this app's only PIN-unlock mechanism, per explicit decision.
+     final authenticated = await _authRepository.verifyCredentials(username, password);
+     if (!mounted) return;
+ 
+@@ -71,7 +75,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
+         );
+     if (!mounted) return;
+ 
+-    final hasPinAlready = await ref.read(appSessionProvider.notifier).hasPinSet();
++    final hasPinAlready = await ref.read(pinAuthRepositoryProvider).hasPinSet(authenticated.id);
+     if (!mounted) return;
+ 
+     setState(() => _isSubmitting = false);
+diff --git a/lib/features/auth/presentation/pin_auth_controller.dart b/lib/features/auth/presentation/pin_auth_controller.dart
+index 3e3ee72..67eb11c 100644
+--- a/lib/features/auth/presentation/pin_auth_controller.dart
++++ b/lib/features/auth/presentation/pin_auth_controller.dart
+@@ -1,17 +1,41 @@
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
+-import '../../../core/session/app_session_provider.dart';
++import '../data/pin_auth_repository.dart';
+ import '../domain/pin_auth_state.dart';
+ 
++final pinAuthRepositoryProvider = Provider<PinAuthRepository>((ref) => PinAuthRepository());
++
++/// Keyed by userId — A2's per-user PIN model means two different users
++/// need two completely independent controllers/states (different
++/// enteredDigits, different lockout), not one shared controller like
++/// the old device-wide version. Still `.autoDispose` (UI-only state;
++/// the actual lockout persistence lives in PinAuthRepository/the DB, not
++/// here), but `.family` so switching users (via "Login dengan akun
++/// lain") never reuses another user's leftover in-memory state.
+ final pinAuthControllerProvider =
+-    StateNotifierProvider.autoDispose<PinAuthController, PinAuthState>(
+-  (ref) => PinAuthController(ref),
++    StateNotifierProvider.autoDispose.family<PinAuthController, PinAuthState, String>(
++  (ref, userId) => PinAuthController(ref.watch(pinAuthRepositoryProvider), userId)..loadInitialLockState(),
+ );
+ 
+ class PinAuthController extends StateNotifier<PinAuthState> {
+-  final Ref _ref;
++  final PinAuthRepository _repository;
++  final String _userId;
++
++  PinAuthController(this._repository, this._userId) : super(const PinAuthState());
+ 
+-  PinAuthController(this._ref) : super(const PinAuthState());
++  /// Reads the persisted lock state from the DB as soon as this
++  /// controller is created, so a user who was already locked (e.g. app
++  /// was killed mid-lockout, or they navigated away and back) sees the
++  /// locked state immediately rather than starting from a fresh
++  /// isLocked=false — this is what makes lockout survive "restart"
++  /// rather than living only in this autoDispose controller's memory.
++  Future<void> loadInitialLockState() async {
++    final identity = await _repository.loadIdentity(_userId);
++    if (!mounted || identity == null) return;
++    if (identity.isLocked) {
++      state = state.copyWith(isLocked: true);
++    }
++  }
+ 
+   void addDigit(String digit) {
+     if (state.isLocked) return;
+@@ -35,22 +59,24 @@ class PinAuthController extends StateNotifier<PinAuthState> {
+   }
+ 
+   Future<void> _verify(String pin) async {
+-    final isCorrect = await _ref.read(appSessionProvider.notifier).verifyPin(pin);
++    final result = await _repository.verifyPin(_userId, pin);
+     if (!mounted) return;
+ 
+-    if (isCorrect) {
+-      state = state.copyWith(isError: false, failedAttempts: 0);
+-      return;
++    switch (result) {
++      case PinVerifyResult.correct:
++        state = state.copyWith(isError: false, failedAttempts: 0);
++      case PinVerifyResult.incorrect:
++        state = state.copyWith(enteredDigits: '', isError: true, failedAttempts: state.failedAttempts + 1);
++      case PinVerifyResult.justLocked:
++      case PinVerifyResult.alreadyLocked:
++        // Both end in the same visible state — the PIN screen doesn't
++        // distinguish "you just got locked" from "you were already
++        // locked when you tried" (see PinVerifyResult's doc comment on
++        // alreadyLocked: attempts against an already-locked account are
++        // rejected without even checking the PIN, so there is nothing
++        // more specific to tell the user in that case anyway).
++        state = state.copyWith(enteredDigits: '', isError: true, isLocked: true);
+     }
+-
+-    final attempts = state.failedAttempts + 1;
+-    final locked = attempts >= PinAuthState.maxAttempts;
+-    state = state.copyWith(
+-      enteredDigits: '',
+-      isError: true,
+-      failedAttempts: attempts,
+-      isLocked: locked,
+-    );
+   }
+ 
+   void reset() {
+diff --git a/lib/features/auth/presentation/pin_login_screen.dart b/lib/features/auth/presentation/pin_login_screen.dart
+index 2445cfb..a38adc5 100644
+--- a/lib/features/auth/presentation/pin_login_screen.dart
++++ b/lib/features/auth/presentation/pin_login_screen.dart
+@@ -1,13 +1,30 @@
+ import 'package:flutter/material.dart';
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
++import '../../../core/session/app_session_provider.dart';
+ import '../../../core/theme/app_colors.dart';
++import '../../../core/theme/app_spacing.dart';
++import '../../../core/widgets/app_item_thumbnail.dart';
+ import '../../../core/widgets/app_pin_keypad.dart';
++import '../../../core/widgets/app_status_badge.dart';
+ import '../../dashboard/presentation/dashboard_screen.dart';
++import '../data/pin_auth_repository.dart';
+ import '../domain/pin_auth_state.dart';
++import '../domain/pin_user_identity.dart';
+ import 'login_screen.dart';
+ import 'pin_auth_controller.dart';
+ 
++/// Asks for a PIN to unlock the app — but for exactly ONE user: the one
++/// last logged in on this device (from [appSessionProvider]), never a
++/// picker across multiple accounts (per task brief: "layar PIN hanya
++/// menampilkan SATU user"; a user-picker is a separate, out-of-scope
++/// feature). Shows that user's name/role so whoever's holding the phone
++/// knows whose PIN is being asked for (the phone may be shared/passed
++/// between people) — see [PinUserIdentity].
++///
++/// If there is no logged-in session at all, this screen must not render
++/// — there's no "anonymous" PIN screen. [_PinLoginScreenState.build]
++/// redirects to [LoginScreen] immediately in that case.
+ class PinLoginScreen extends ConsumerStatefulWidget {
+   const PinLoginScreen({super.key});
+ 
+@@ -16,11 +33,75 @@ class PinLoginScreen extends ConsumerStatefulWidget {
+ }
+ 
+ class _PinLoginScreenState extends ConsumerState<PinLoginScreen> {
++  Future<PinUserIdentity?>? _identityFuture;
++  String? _loadedForUserId;
++
++  void _goToLogin() {
++    Navigator.of(context).pushAndRemoveUntil(
++      MaterialPageRoute(builder: (_) => const LoginScreen()),
++      (route) => false,
++    );
++  }
++
+   @override
+   Widget build(BuildContext context) {
++    final userId = ref.watch(appSessionProvider.select((s) => s.userId));
++
++    if (userId == null) {
++      // No session at all — per the doc comment above, this screen must
++      // never render "anonymous". Schedule the redirect after this
++      // build finishes (can't call Navigator during build).
++      WidgetsBinding.instance.addPostFrameCallback((_) {
++        if (mounted) _goToLogin();
++      });
++      return const Scaffold(backgroundColor: AppColors.background, body: SizedBox.shrink());
++    }
++
++    // Reload identity if the userId changed (e.g. hot-swapped session in
++    // a test, or — defensively — a future flow that reaches this screen
++    // for a different user without a full navigator reset).
++    if (_loadedForUserId != userId) {
++      _loadedForUserId = userId;
++      _identityFuture = ref.read(pinAuthRepositoryProvider).loadIdentity(userId);
++    }
++
++    return FutureBuilder<PinUserIdentity?>(
++      future: _identityFuture,
++      builder: (context, snapshot) {
++        if (!snapshot.hasData) {
++          return const Scaffold(
++            backgroundColor: AppColors.background,
++            body: Center(child: CircularProgressIndicator()),
++          );
++        }
++
++        final identity = snapshot.data;
++        if (identity == null) {
++          // User row vanished or was deactivated since login — same
++          // fail-closed treatment as "no session at all".
++          WidgetsBinding.instance.addPostFrameCallback((_) {
++            if (mounted) _goToLogin();
++          });
++          return const Scaffold(backgroundColor: AppColors.background, body: SizedBox.shrink());
++        }
++
++        return _PinEntryView(identity: identity, onLoginOtherAccount: _goToLogin);
++      },
++    );
++  }
++}
++
++class _PinEntryView extends ConsumerWidget {
++  final PinUserIdentity identity;
++  final VoidCallback onLoginOtherAccount;
++
++  const _PinEntryView({required this.identity, required this.onLoginOtherAccount});
++
++  @override
++  Widget build(BuildContext context, WidgetRef ref) {
+     // Listen (not just watch) for the exact moment PIN verification
+     // succeeds — addDigit's underlying _verify is now async (checks the
+-    // real stored PIN via AppSessionController.verifyPin), so we can no
++    // real stored PIN via PinAuthRepository.verifyPin), so we can no
+     // longer just read state synchronously right after calling addDigit
+     // like the old shell-demo version did; that would race the async
+     // check and never see the success. A successful verify leaves
+@@ -28,7 +109,7 @@ class _PinLoginScreenState extends ConsumerState<PinLoginScreen> {
+     // verify clears enteredDigits back to '') — that combination is
+     // unambiguous, so we only navigate on the transition into it to
+     // avoid re-navigating on every rebuild.
+-    ref.listen<PinAuthState>(pinAuthControllerProvider, (previous, next) {
++    ref.listen<PinAuthState>(pinAuthControllerProvider(identity.userId), (previous, next) {
+       final succeeded = next.enteredDigits.length == PinAuthState.pinLength && !next.isError && !next.isLocked;
+       final justSucceeded = succeeded && previous?.enteredDigits != next.enteredDigits;
+ 
+@@ -39,7 +120,13 @@ class _PinLoginScreenState extends ConsumerState<PinLoginScreen> {
+       }
+     });
+ 
+-    final state = ref.watch(pinAuthControllerProvider);
++    final state = ref.watch(pinAuthControllerProvider(identity.userId));
++    // identity.isLocked reflects the state as of the last load (right
++    // when this screen opened); state.isLocked reflects the live
++    // controller, which is updated the instant a 5th wrong attempt
++    // locks the account without needing a reload. Either being true
++    // means "show locked".
++    final isLocked = state.isLocked || identity.isLocked;
+ 
+     return Scaffold(
+       backgroundColor: AppColors.background,
+@@ -49,51 +136,41 @@ class _PinLoginScreenState extends ConsumerState<PinLoginScreen> {
+           child: Column(
+             children: [
+               const Spacer(flex: 2),
+-              Container(
+-                width: 56,
+-                height: 56,
+-                decoration: BoxDecoration(
+-                  color: AppColors.brand,
+-                  borderRadius: BorderRadius.circular(16),
+-                ),
+-                child: const Icon(Icons.storefront_rounded, color: Colors.white, size: 28),
+-              ),
+-              const SizedBox(height: 16),
+-              const Text(
+-                'Masukkan PIN',
+-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
++              AppItemThumbnail(name: identity.displayName, size: 72),
++              const SizedBox(height: AppSpacing.md),
++              Text(
++                identity.displayName,
++                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
+               ),
+               const SizedBox(height: 6),
++              AppStatusBadge(identity.roleLabel, AppColors.textSecondary),
++              const SizedBox(height: 20),
+               Text(
+-                state.isLocked
+-                    ? 'Akun terkunci — terlalu banyak percobaan salah'
++                isLocked
++                    ? 'Akun terkunci — terlalu banyak percobaan salah. Login ulang dengan username dan password untuk membuka.'
+                     : state.isError
+                         ? 'PIN salah, coba lagi'
+                         : 'Masukkan 4 digit PIN kamu',
++                textAlign: TextAlign.center,
+                 style: TextStyle(
+                   fontSize: 13,
+                   fontWeight: FontWeight.w500,
+-                  color: state.isError || state.isLocked ? AppColors.danger : AppColors.textSecondary,
++                  color: state.isError || isLocked ? AppColors.danger : AppColors.textSecondary,
+                 ),
+               ),
+               const SizedBox(height: 28),
+               AppPinDots(length: PinAuthState.pinLength, filledCount: state.enteredDigits.length, isError: state.isError),
+               const Spacer(flex: 2),
+               AppPinKeypad(
+-                disabled: state.isLocked,
+-                onDigit: (d) => ref.read(pinAuthControllerProvider.notifier).addDigit(d),
+-                onBackspace: () => ref.read(pinAuthControllerProvider.notifier).backspace(),
++                disabled: isLocked,
++                onDigit: (d) => ref.read(pinAuthControllerProvider(identity.userId).notifier).addDigit(d),
++                onBackspace: () => ref.read(pinAuthControllerProvider(identity.userId).notifier).backspace(),
+               ),
+               const SizedBox(height: 12),
+               TextButton(
+-                onPressed: () {
+-                  Navigator.of(context).pushAndRemoveUntil(
+-                    MaterialPageRoute(builder: (_) => const LoginScreen()),
+-                    (route) => false,
+-                  );
+-                },
++                onPressed: onLoginOtherAccount,
+                 child: const Text(
+-                  'Login dengan akun lain',
++                  'Bukan kamu? Ganti akun',
+                   style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.w600, fontSize: 13),
+                 ),
+               ),
+diff --git a/lib/features/auth/presentation/set_pin_screen.dart b/lib/features/auth/presentation/set_pin_screen.dart
+index b8fdb53..3970381 100644
+--- a/lib/features/auth/presentation/set_pin_screen.dart
++++ b/lib/features/auth/presentation/set_pin_screen.dart
+@@ -5,15 +5,17 @@ import '../../../core/session/app_session_provider.dart';
+ import '../../../core/theme/app_colors.dart';
+ import '../../../core/widgets/app_pin_keypad.dart';
+ import '../../dashboard/presentation/dashboard_screen.dart';
++import '../data/pin_auth_repository.dart';
+ import '../domain/pin_auth_state.dart';
+ 
+ enum _SetPinStage { enter, confirm }
+ 
+-/// Shown once, right after a successful username+password login on a
+-/// device with no PIN saved yet. Asks for the 4-digit PIN twice (entry +
+-/// confirmation) before saving it via [AppSessionController.setPin] —
++/// Shown once, right after a successful username+password login for a
++/// user with no PIN saved yet. Asks for the 4-digit PIN twice (entry +
++/// confirmation) before saving it via [PinAuthRepository.setPin] —
+ /// that PIN is what [PinLoginScreen] checks against on every later
+-/// login on this device.
++/// login by THIS user (any device — PIN is per-user, not per-device,
++/// as of Tahap A/A2; see PinAuthRepository's doc comment).
+ class SetPinScreen extends ConsumerStatefulWidget {
+   const SetPinScreen({super.key});
+ 
+@@ -71,8 +73,11 @@ class _SetPinScreenState extends ConsumerState<SetPinScreen> {
+       return;
+     }
+ 
++    final userId = ref.read(appSessionProvider).userId;
++    if (userId == null) return; // Shouldn't happen — this screen is only reached post-login.
++
+     setState(() => _isSaving = true);
+-    await ref.read(appSessionProvider.notifier).setPin(_currentDigits);
++    await ref.read(pinAuthRepositoryProvider).setPin(userId, _currentDigits);
+     if (!mounted) return;
+ 
+     Navigator.of(context).pushAndRemoveUntil(
+diff --git a/lib/features/auth/presentation/splash_screen.dart b/lib/features/auth/presentation/splash_screen.dart
+index f635ca7..3acc4ed 100644
+--- a/lib/features/auth/presentation/splash_screen.dart
++++ b/lib/features/auth/presentation/splash_screen.dart
+@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
+ import '../../../core/session/app_session_provider.dart';
+ import '../../../core/theme/app_colors.dart';
++import '../data/pin_auth_repository.dart';
+ import 'login_screen.dart';
+ import 'pin_login_screen.dart';
+ import 'set_pin_screen.dart';
+@@ -26,17 +27,22 @@ class _SplashScreenState extends ConsumerState<SplashScreen> {
+   }
+ 
+   Future<void> _navigateNext() async {
+-    // Full AGENTS.md device-auth rules (3-day PIN expiry forcing
+-    // password re-login, second-device logout, etc.) are future work —
+-    // for this pass, routing is just: no saved session -> Login
+-    // (username+password); saved session but no PIN yet on this device
+-    // -> Set PIN; saved session + PIN already set -> PIN lock screen.
++    // The 3-day PIN-expiry -> forced password re-login rule
++    // (PinAuthRepository.requiresPasswordReentry) and true auto-lock are
++    // A3's job to wire in here — for this pass, routing is just: no
++    // saved session -> Login (username+password); saved session but no
++    // PIN yet for that user -> Set PIN; saved session + PIN already set
++    // for that user -> PIN lock screen. "Second-device logout"
++    // enforcement (AGENTS.md's "1 user = 1 active device") is Tahap E,
++    // out of scope here per the task brief.
+     final splashDelay = Future.delayed(const Duration(milliseconds: 900));
+ 
+     final sessionController = ref.read(appSessionProvider.notifier);
+     await sessionController.restore();
+     final session = ref.read(appSessionProvider);
+-    final hasPinSet = session.isLoggedIn ? await sessionController.hasPinSet() : false;
++    final hasPinSet = session.isLoggedIn
++        ? await ref.read(pinAuthRepositoryProvider).hasPinSet(session.userId!)
++        : false;
+ 
+     await splashDelay;
+     if (!mounted) return;
+diff --git a/lib/features/pengaturan/presentation/pengaturan_screen.dart b/lib/features/pengaturan/presentation/pengaturan_screen.dart
+index 56704f7..24c4857 100644
+--- a/lib/features/pengaturan/presentation/pengaturan_screen.dart
++++ b/lib/features/pengaturan/presentation/pengaturan_screen.dart
+@@ -2,11 +2,13 @@ import 'package:flutter/material.dart';
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
+ import '../../../core/navigation/app_nav.dart';
++import '../../../core/session/app_session_provider.dart';
+ import '../../../core/theme/app_colors.dart';
+ import '../../../core/theme/app_spacing.dart';
+ import '../../../core/widgets/ios_page_header.dart';
+ import '../../../core/widgets/placeholder_screen.dart';
+-import '../../auth/presentation/pin_login_screen.dart';
++import '../../auth/presentation/change_pin_screen.dart';
++import '../../auth/presentation/login_screen.dart';
+ import '../application/auto_print_provider.dart';
+ 
+ /// Pengaturan (Settings) screen, ported 1:1 from the approved HTML
+@@ -15,17 +17,22 @@ import '../application/auto_print_provider.dart';
+ /// explicitly removed and are not reproduced here.
+ ///
+ /// Rows fall into three buckets:
+-/// - Real and wired: Cetak Struk Otomatis (SharedPreferences), Keluar
+-///   Akun (returns to PIN login).
++/// - Real and wired: Cetak Struk Otomatis (SharedPreferences), Keamanan
++///   PIN (Tahap A/A2 — opens [ChangePinScreen]), Keluar Akun (clears the
++///   session via [AppSessionController.logout] and returns to
++///   [LoginScreen] — previously this only navigated to the PIN screen
++///   without actually clearing the session, which was harmless back
++///   when PIN was device-wide but became a real bug once PIN became
++///   per-user in A2: it made "Keluar Akun" unable to actually switch to
++///   a different account, since the old session/userId was still
++///   sitting in shared_preferences).
+ /// - Real status, no action yet: Status Sinkronisasi (this app is
+ ///   local-first with no cloud sync built — shown as "Tidak aktif"
+ ///   rather than inventing a sync state), Printer Bluetooth (no
+ ///   Bluetooth library wired up yet — shown as "Tidak tersambung").
+ /// - Not yet built, routed to [PlaceholderScreen]: Kelola Karyawan (no
+-///   Staff module exists), Backup & Restore (no such feature exists).
+-/// Keamanan PIN links to the existing PIN login flow's settings — since
+-/// there is no separate "change PIN" screen yet, it also routes to a
+-/// placeholder rather than inventing one.
++///   user-management UI exists — out of scope per the Tahap A task
++///   brief), Backup & Restore (no such feature exists).
+ class PengaturanScreen extends ConsumerWidget {
+   const PengaturanScreen({super.key});
+ 
+@@ -51,15 +58,7 @@ class PengaturanScreen extends ConsumerWidget {
+                       _SettingsRow(
+                         icon: Icons.lock_outline_rounded,
+                         label: 'Keamanan PIN',
+-                        onTap: () => AppNav.push(
+-                          context,
+-                          (_) => const PlaceholderScreen(
+-                            title: 'Keamanan PIN',
+-                            icon: Icons.lock_outline_rounded,
+-                            accentColor: AppColors.textPrimary,
+-                            description: 'Pengaturan ganti PIN akan segera hadir.',
+-                          ),
+-                        ),
++                        onTap: () => AppNav.push(context, (_) => const ChangePinScreen()),
+                       ),
+                       _SettingsRow(
+                         icon: Icons.people_alt_outlined,
+@@ -147,7 +146,7 @@ class PengaturanScreen extends ConsumerWidget {
+                         labelColor: AppColors.danger,
+                         iconColor: AppColors.danger,
+                         showTrailingChevron: false,
+-                        onTap: () => _confirmLogout(context),
++                        onTap: () => _confirmLogout(context, ref),
+                       ),
+                     ],
+                   ),
+@@ -164,19 +163,21 @@ class PengaturanScreen extends ConsumerWidget {
+     );
+   }
+ 
+-  void _confirmLogout(BuildContext context) {
++  void _confirmLogout(BuildContext context, WidgetRef ref) {
+     showDialog(
+       context: context,
+       builder: (dialogContext) => AlertDialog(
+         title: const Text('Keluar Akun?'),
+-        content: const Text('Anda akan kembali ke halaman login PIN.'),
++        content: const Text('Anda akan kembali ke halaman login.'),
+         actions: [
+           TextButton(onPressed: () => Navigator.of(dialogContext).pop(), child: const Text('Batal')),
+           TextButton(
+-            onPressed: () {
++            onPressed: () async {
+               Navigator.of(dialogContext).pop();
++              await ref.read(appSessionProvider.notifier).logout();
++              if (!context.mounted) return;
+               Navigator.of(context).pushAndRemoveUntil(
+-                MaterialPageRoute(builder: (_) => const PinLoginScreen()),
++                MaterialPageRoute(builder: (_) => const LoginScreen()),
+                 (route) => false,
+               );
+             },

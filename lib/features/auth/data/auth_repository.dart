@@ -65,6 +65,20 @@ class AuthRepository {
     final role = AppRole.values.where((r) => r.name == roleName).firstOrNull;
     if (role == null) return null; // Unknown role name — fail closed.
 
+    // A successful username+password login is this app's ONLY unlock
+    // mechanism for a PIN-locked account (explicit decision — no
+    // "unlock by another user" path, since there's only ever one
+    // Owner and PRD doesn't specify a separate unlock flow). Clearing
+    // the lockout here, rather than requiring a second explicit action,
+    // means "re-login with password" IS the unlock — nothing else
+    // needs to remember to call this.
+    await db.update(
+      'users',
+      {'failed_pin_attempts': 0, 'locked_at': null},
+      where: 'id = ?',
+      whereArgs: [row['id']],
+    );
+
     return AuthenticatedUser(
       id: row['id'] as String,
       username: row['username'] as String,

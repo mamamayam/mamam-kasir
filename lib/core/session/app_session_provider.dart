@@ -1,5 +1,4 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app_session.dart';
@@ -7,16 +6,12 @@ import 'app_session.dart';
 // ---------------------------------------------------------------------------
 // Storage keys
 // ---------------------------------------------------------------------------
-// username/role are non-sensitive identity, kept in shared_preferences.
-// PIN is the closest thing to a credential this device holds, kept in
-// flutter_secure_storage (OS keychain/keystore) per AGENTS.md's
-// "encrypt local DB and OS secure key storage" security rule.
+// username/role/userId are non-sensitive identity, kept in
+// shared_preferences. There is no PIN storage in this file anymore —
+// see the A2 migration note below.
 const _kPrefsUserIdKey = 'session_user_id';
 const _kPrefsUsernameKey = 'session_username';
 const _kPrefsRoleKey = 'session_role';
-const _kSecurePinKey = 'session_device_pin';
-
-const _secureStorage = FlutterSecureStorage();
 
 /// Current logged-in session (user id + username + role), if any.
 /// Persisted across app restarts via shared_preferences so the splash
@@ -29,6 +24,18 @@ final appSessionProvider = StateNotifierProvider<AppSessionController, AppSessio
   (ref) => AppSessionController()..restore(),
 );
 
+/// Identity-only session controller. PIN storage/verification used to
+/// live here as a single device-wide `session_device_pin` secure-storage
+/// key — Tahap A/A2 tore that out entirely (per explicit decision: a
+/// PIN belongs to a user, not a device; a shared device-wide PIN would
+/// let anyone who learns it log in as anyone else, including Owner).
+/// PIN is now handled by [PinAuthRepository] (lib/features/auth/data/
+/// pin_auth_repository.dart), keyed by userId and stored on each user's
+/// own `users` row alongside their password hash — see that class's doc
+/// comment for the full reasoning. There is intentionally no PIN-related
+/// method left on this controller; callers needing PIN behavior should
+/// depend on [PinAuthRepository] directly, using `state.userId` from
+/// this session to know which user's PIN to act on.
 class AppSessionController extends StateNotifier<AppSession> {
   AppSessionController() : super(AppSession.empty);
 
@@ -64,43 +71,16 @@ class AppSessionController extends StateNotifier<AppSession> {
     state = AppSession(userId: userId, username: username, role: role);
   }
 
-  /// Clears the session (identity) but deliberately leaves the device
-  /// PIN in place — logging out doesn't require re-registering a PIN if
-  /// the same person (or another authorized user) logs back in. Full
-  /// device PIN reset is a separate, explicit action.
+  /// Clears the session (identity) but deliberately leaves the user's
+  /// PIN in place (now stored per-user in the DB, not touched by this
+  /// method at all) — logging out doesn't require re-registering a PIN
+  /// if the same person logs back in. Full PIN reset is a separate,
+  /// explicit action via PinAuthRepository.
   Future<void> logout() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_kPrefsUserIdKey);
     await prefs.remove(_kPrefsUsernameKey);
     await prefs.remove(_kPrefsRoleKey);
     state = AppSession.empty;
-  }
-
-  // ---------------------------------------------------------------------
-  // Device PIN — separate from the session identity above. One PIN per
-  // device for this pass (not one PIN per user), matching AGENTS.md's
-  // "one user = one active device" framing for now; multi-account PIN
-  // switching is future work.
-  // ---------------------------------------------------------------------
-
-  Future<bool> hasPinSet() async {
-    final pin = await _secureStorage.read(key: _kSecurePinKey);
-    return pin != null && pin.isNotEmpty;
-  }
-
-  Future<void> setPin(String pin) async {
-    await _secureStorage.write(key: _kSecurePinKey, value: pin);
-  }
-
-  Future<bool> verifyPin(String pin) async {
-    final saved = await _secureStorage.read(key: _kSecurePinKey);
-    return saved != null && saved == pin;
-  }
-
-  /// Clears the stored device PIN (e.g. "Cabut Otorisasi Device" per
-  /// AGENTS.md — not wired to any UI yet, but the method exists so that
-  /// feature can call it directly once built).
-  Future<void> clearPin() async {
-    await _secureStorage.delete(key: _kSecurePinKey);
   }
 }

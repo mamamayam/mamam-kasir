@@ -5,15 +5,17 @@ import '../../../core/session/app_session_provider.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/widgets/app_pin_keypad.dart';
 import '../../dashboard/presentation/dashboard_screen.dart';
+import '../data/pin_auth_repository.dart';
 import '../domain/pin_auth_state.dart';
 
 enum _SetPinStage { enter, confirm }
 
-/// Shown once, right after a successful username+password login on a
-/// device with no PIN saved yet. Asks for the 4-digit PIN twice (entry +
-/// confirmation) before saving it via [AppSessionController.setPin] —
+/// Shown once, right after a successful username+password login for a
+/// user with no PIN saved yet. Asks for the 4-digit PIN twice (entry +
+/// confirmation) before saving it via [PinAuthRepository.setPin] —
 /// that PIN is what [PinLoginScreen] checks against on every later
-/// login on this device.
+/// login by THIS user (any device — PIN is per-user, not per-device,
+/// as of Tahap A/A2; see PinAuthRepository's doc comment).
 class SetPinScreen extends ConsumerStatefulWidget {
   const SetPinScreen({super.key});
 
@@ -71,8 +73,11 @@ class _SetPinScreenState extends ConsumerState<SetPinScreen> {
       return;
     }
 
+    final userId = ref.read(appSessionProvider).userId;
+    if (userId == null) return; // Shouldn't happen — this screen is only reached post-login.
+
     setState(() => _isSaving = true);
-    await ref.read(appSessionProvider.notifier).setPin(_currentDigits);
+    await ref.read(pinAuthRepositoryProvider).setPin(userId, _currentDigits);
     if (!mounted) return;
 
     Navigator.of(context).pushAndRemoveUntil(
