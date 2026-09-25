@@ -6,6 +6,7 @@ import '../../../core/theme/app_colors.dart';
 import '../../../core/widgets/app_pin_keypad.dart';
 import '../../dashboard/presentation/dashboard_screen.dart';
 import '../data/pin_auth_repository.dart';
+import 'pin_auth_controller.dart';
 import '../domain/pin_auth_state.dart';
 
 enum _SetPinStage { enter, confirm }

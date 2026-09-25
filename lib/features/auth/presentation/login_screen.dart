@@ -6,6 +6,7 @@ import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_spacing.dart';
 import '../data/auth_repository.dart';
 import '../data/pin_auth_repository.dart';
+import 'pin_auth_controller.dart';
 import 'set_pin_screen.dart';
 import 'pin_login_screen.dart';
 

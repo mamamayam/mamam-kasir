@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/session/app_session_provider.dart';
 import '../../../core/theme/app_colors.dart';
 import '../data/pin_auth_repository.dart';
+import 'pin_auth_controller.dart';
 import 'login_screen.dart';
 import 'pin_login_screen.dart';
 import 'set_pin_screen.dart';

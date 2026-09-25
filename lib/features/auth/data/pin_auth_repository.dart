@@ -2,7 +2,7 @@ import '../../../core/data/app_database.dart';
 import '../../../core/data/password_hasher.dart';
 import '../../../core/session/app_session.dart';
 import '../../../core/utils/app_clock.dart';
-import 'pin_user_identity.dart';
+import '../domain/pin_user_identity.dart';
 
 /// Result of a PIN verification attempt.
 enum PinVerifyResult {

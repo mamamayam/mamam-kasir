@@ -1,0 +1,48 @@
+diff --git a/lib/features/auth/presentation/change_pin_screen.dart b/lib/features/auth/presentation/change_pin_screen.dart
+index 881f3f5..80e85ce 100644
+--- a/lib/features/auth/presentation/change_pin_screen.dart
++++ b/lib/features/auth/presentation/change_pin_screen.dart
+@@ -5,6 +5,7 @@ import '../../../core/session/app_session_provider.dart';
+ import '../../../core/theme/app_colors.dart';
+ import '../../../core/widgets/app_pin_keypad.dart';
+ import '../data/pin_auth_repository.dart';
++import 'pin_auth_controller.dart';
+ import '../domain/pin_auth_state.dart';
+ 
+ enum _ChangePinStage { currentPin, newPin, confirmNewPin }
+diff --git a/lib/features/auth/presentation/login_screen.dart b/lib/features/auth/presentation/login_screen.dart
+index 61f0899..0c0cce2 100644
+--- a/lib/features/auth/presentation/login_screen.dart
++++ b/lib/features/auth/presentation/login_screen.dart
+@@ -6,6 +6,7 @@ import '../../../core/theme/app_colors.dart';
+ import '../../../core/theme/app_spacing.dart';
+ import '../data/auth_repository.dart';
+ import '../data/pin_auth_repository.dart';
++import 'pin_auth_controller.dart';
+ import 'set_pin_screen.dart';
+ import 'pin_login_screen.dart';
+ 
+diff --git a/lib/features/auth/presentation/set_pin_screen.dart b/lib/features/auth/presentation/set_pin_screen.dart
+index 3970381..70f3030 100644
+--- a/lib/features/auth/presentation/set_pin_screen.dart
++++ b/lib/features/auth/presentation/set_pin_screen.dart
+@@ -6,6 +6,7 @@ import '../../../core/theme/app_colors.dart';
+ import '../../../core/widgets/app_pin_keypad.dart';
+ import '../../dashboard/presentation/dashboard_screen.dart';
+ import '../data/pin_auth_repository.dart';
++import 'pin_auth_controller.dart';
+ import '../domain/pin_auth_state.dart';
+ 
+ enum _SetPinStage { enter, confirm }
+diff --git a/lib/features/auth/presentation/splash_screen.dart b/lib/features/auth/presentation/splash_screen.dart
+index 3acc4ed..5d99393 100644
+--- a/lib/features/auth/presentation/splash_screen.dart
++++ b/lib/features/auth/presentation/splash_screen.dart
+@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ import '../../../core/session/app_session_provider.dart';
+ import '../../../core/theme/app_colors.dart';
+ import '../data/pin_auth_repository.dart';
++import 'pin_auth_controller.dart';
+ import 'login_screen.dart';
+ import 'pin_login_screen.dart';
+ import 'set_pin_screen.dart';
