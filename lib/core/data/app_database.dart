@@ -3,6 +3,10 @@ import 'package:path_provider/path_provider.dart';
 import 'package:sqflite_sqlcipher/sqflite.dart';
 import 'package:uuid/uuid.dart';
 
+import '../permissions/permission_defaults.dart';
+import '../permissions/permission_key.dart';
+import '../permissions/permission_mode.dart';
+import '../session/app_session.dart';
 import 'password_hasher.dart';
 
 /// App-wide encrypted local database.
@@ -97,7 +101,17 @@ class AppDatabase {
   // previously-saved `staff` session value still reads safely after
   // this upgrade (it required no migration at all, since `staff` remains
   // a valid enum name).
-  static const _dbVersion = 10;
+  // v11: seeds the `permissions` table (A4 — see [[mamam-kasir-flutter]]
+  // notes) with the deny/direct/approval rows PermissionService's
+  // hardcoded `_defaults` table already encodes. Additive-only, same
+  // pattern as v10: `if (oldVersion < 11)` in _onUpgrade just inserts
+  // rows, touches nothing else. Until this seed exists (v10 devices,
+  // devices that haven't upgraded yet), PermissionService falls back to
+  // its own `_defaults` table, so app behavior is identical whether or
+  // not this migration has run — this migration exists so an Owner-
+  // facing permission-editing screen (not built yet) will have real DB
+  // rows to edit, not so behavior changes today.
+  static const _dbVersion = 11;
 
   // TODO(security-foundation): replace with a key generated once and
   // stored via flutter_secure_storage, per AGENTS.md.
@@ -469,6 +483,7 @@ class AppDatabase {
 
     await _seedDemoData(db);
     await _seedAuthData(db);
+    await _seedPermissionsData(db);
   }
 
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
@@ -480,6 +495,9 @@ class AppDatabase {
     if (oldVersion < 10) {
       await _createAuthTables(db);
       await _seedAuthData(db);
+    }
+    if (oldVersion < 11) {
+      await _seedPermissionsData(db);
     }
     // Future migrations get added here as further `if (oldVersion < N)`
     // blocks, each additive-only like the one above.
@@ -676,6 +694,38 @@ class AppDatabase {
         'role_id': roleId,
         'created_at': now,
       });
+    }
+  }
+
+  /// Seeds the `permissions` table (A4 — see [[mamam-kasir-flutter]]
+  /// notes) from [defaultPermissions] (permission_defaults.dart), the
+  /// same table PermissionService falls back to at runtime when a row
+  /// is missing. Idempotent the same way _seedAuthData is: guards on
+  /// the table already having rows before inserting anything.
+  Future<void> _seedPermissionsData(Database db) async {
+    final existing = await db.query('permissions', limit: 1);
+    if (existing.isNotEmpty) return;
+
+    final roleRows = await db.query('roles');
+    final roleIdByName = {for (final row in roleRows) row['name'] as String: row['id'] as String};
+
+    final now = DateTime.now().toIso8601String();
+    const uuid = Uuid();
+
+    for (final keyEntry in defaultPermissions.entries) {
+      for (final roleEntry in keyEntry.value.entries) {
+        final roleId = roleIdByName[roleEntry.key.name];
+        if (roleId == null) continue; // Role not seeded (shouldn't happen) — skip rather than crash.
+
+        await db.insert('permissions', {
+          'id': uuid.v4(),
+          'role_id': roleId,
+          'permission_key': keyEntry.key.name,
+          'mode': roleEntry.value.name,
+          'created_at': now,
+          'updated_at': now,
+        });
+      }
     }
   }
 

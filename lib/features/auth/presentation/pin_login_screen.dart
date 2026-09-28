@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/session/app_lifecycle_guard.dart' show isLockScreenShowing;
 import '../../../core/session/app_session_provider.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_spacing.dart';
@@ -35,6 +36,21 @@ class PinLoginScreen extends ConsumerStatefulWidget {
 class _PinLoginScreenState extends ConsumerState<PinLoginScreen> {
   Future<PinUserIdentity?>? _identityFuture;
   String? _loadedForUserId;
+
+  @override
+  void initState() {
+    super.initState();
+    // See app_lifecycle_guard.dart's isLockScreenShowing doc comment —
+    // lets AppLifecycleGuard avoid pushing a duplicate lock screen on
+    // top of this one.
+    isLockScreenShowing = true;
+  }
+
+  @override
+  void dispose() {
+    isLockScreenShowing = false;
+    super.dispose();
+  }
 
   void _goToLogin() {
     Navigator.of(context).pushAndRemoveUntil(

@@ -2,8 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/navigation/app_nav.dart';
-import '../../../core/session/app_session.dart';
-import '../../../core/session/app_session_provider.dart';
+import '../../../core/permissions/permission_key.dart';
+import '../../../core/permissions/permission_mode.dart';
+import '../../../core/permissions/permission_providers.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_spacing.dart';
 import '../../hrd/application/hrd_provider.dart';
@@ -48,18 +49,28 @@ class MenuBottomSheetContent extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final pendingApprovals = ref.watch(hrdControllerProvider.select((s) => s.pendingApprovals.length));
-    final role = ref.watch(appSessionProvider.select((s) => s.role));
-    // Manager is temporarily treated as Owner-equivalent here (Tahap A
-    // decision) until A4's granular PermissionService replaces this
-    // role-based check with a real per-tile permission lookup.
-    final isOwner = role != AppRole.staff;
+
+    // A4: replaces the old hard `role == AppRole.owner` /
+    // `role != AppRole.staff` check with a real PermissionService
+    // lookup (see [[mamam-kasir-flutter]] A4 notes) — one key
+    // (viewOwnerMenu) gates both the 9-tile grid and the Approval card,
+    // since they were always shown/hidden together. In principle this
+    // introduces an async gap (the old check was synchronous) where
+    // canViewOwnerMenu briefly reads false while the DB query resolves;
+    // in practice dashboard_provider.dart prefetches and caches this
+    // same permission the moment the dashboard loads, before the sheet
+    // can ever be opened, so this fallback is a defensive default
+    // rather than something that visibly flickers in the normal flow.
+    final permissionAsync = ref.watch(currentRolePermissionProvider(PermissionKey.viewOwnerMenu));
+    final canViewOwnerMenu = permissionAsync.valueOrNull == PermissionMode.direct;
 
     // For this pass the 9-tile grid is Owner-only — Staff's access is
     // limited to Kasir/Riwayat (dashboard quick actions, not this sheet)
     // plus the "Staff" card below. See [[mamam-kasir-flutter]] notes:
     // per-tile custom permissions are a future Owner-facing feature, not
-    // built yet, so this is a hard role check rather than a granular one.
-    final items = isOwner
+    // built yet, so this is a single-key permission check rather than a
+    // granular one.
+    final items = canViewOwnerMenu
         ? buildMenuGridItems(
             context: context,
             onDismissSheet: () => Navigator.of(context).pop(),
@@ -118,10 +129,11 @@ class MenuBottomSheetContent extends ConsumerWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    if (isOwner) ...[
-                      // Owner: Notifikasi + Approval side by side, "Staff"
-                      // full-width below — unchanged from before, only the
-                      // bottom card's label changed.
+                    if (canViewOwnerMenu) ...[
+                      // Owner/Manager: Notifikasi + Approval side by
+                      // side, "Staff" full-width below — unchanged from
+                      // before, only the check driving this branch
+                      // changed.
                       Row(
                         children: [
                           notifikasiCard,
@@ -137,8 +149,9 @@ class MenuBottomSheetContent extends ConsumerWidget {
                       const SizedBox(height: AppSpacing.md),
                       Row(children: [staffCard]),
                     ] else ...[
-                      // Staff: no Approval access — "Staff" takes
-                      // Approval's old slot, both equal-width side by side.
+                      // Staff (or still resolving): no Approval access —
+                      // "Staff" takes Approval's old slot, both
+                      // equal-width side by side.
                       Row(
                         children: [
                           notifikasiCard,
@@ -151,7 +164,7 @@ class MenuBottomSheetContent extends ConsumerWidget {
                       const SizedBox(height: AppSpacing.xl),
                       Divider(color: AppColors.border, height: 1),
                       const SizedBox(height: AppSpacing.xl),
-                      // 3x3 grid — Owner only, see isOwner check above.
+                      // 3x3 grid — gated by canViewOwnerMenu above.
                       GridView.count(
                         crossAxisCount: 3,
                         shrinkWrap: true,

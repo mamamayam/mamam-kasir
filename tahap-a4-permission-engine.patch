@@ -1,0 +1,692 @@
+diff --git a/lib/core/data/app_database.dart b/lib/core/data/app_database.dart
+index 634d464..4b22cfe 100644
+--- a/lib/core/data/app_database.dart
++++ b/lib/core/data/app_database.dart
+@@ -3,6 +3,10 @@ import 'package:path_provider/path_provider.dart';
+ import 'package:sqflite_sqlcipher/sqflite.dart';
+ import 'package:uuid/uuid.dart';
+ 
++import '../permissions/permission_defaults.dart';
++import '../permissions/permission_key.dart';
++import '../permissions/permission_mode.dart';
++import '../session/app_session.dart';
+ import 'password_hasher.dart';
+ 
+ /// App-wide encrypted local database.
+@@ -97,7 +101,17 @@ class AppDatabase {
+   // previously-saved `staff` session value still reads safely after
+   // this upgrade (it required no migration at all, since `staff` remains
+   // a valid enum name).
+-  static const _dbVersion = 10;
++  // v11: seeds the `permissions` table (A4 — see [[mamam-kasir-flutter]]
++  // notes) with the deny/direct/approval rows PermissionService's
++  // hardcoded `_defaults` table already encodes. Additive-only, same
++  // pattern as v10: `if (oldVersion < 11)` in _onUpgrade just inserts
++  // rows, touches nothing else. Until this seed exists (v10 devices,
++  // devices that haven't upgraded yet), PermissionService falls back to
++  // its own `_defaults` table, so app behavior is identical whether or
++  // not this migration has run — this migration exists so an Owner-
++  // facing permission-editing screen (not built yet) will have real DB
++  // rows to edit, not so behavior changes today.
++  static const _dbVersion = 11;
+ 
+   // TODO(security-foundation): replace with a key generated once and
+   // stored via flutter_secure_storage, per AGENTS.md.
+@@ -469,6 +483,7 @@ class AppDatabase {
+ 
+     await _seedDemoData(db);
+     await _seedAuthData(db);
++    await _seedPermissionsData(db);
+   }
+ 
+   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+@@ -481,6 +496,9 @@ class AppDatabase {
+       await _createAuthTables(db);
+       await _seedAuthData(db);
+     }
++    if (oldVersion < 11) {
++      await _seedPermissionsData(db);
++    }
+     // Future migrations get added here as further `if (oldVersion < N)`
+     // blocks, each additive-only like the one above.
+   }
+@@ -679,6 +697,38 @@ class AppDatabase {
+     }
+   }
+ 
++  /// Seeds the `permissions` table (A4 — see [[mamam-kasir-flutter]]
++  /// notes) from [defaultPermissions] (permission_defaults.dart), the
++  /// same table PermissionService falls back to at runtime when a row
++  /// is missing. Idempotent the same way _seedAuthData is: guards on
++  /// the table already having rows before inserting anything.
++  Future<void> _seedPermissionsData(Database db) async {
++    final existing = await db.query('permissions', limit: 1);
++    if (existing.isNotEmpty) return;
++
++    final roleRows = await db.query('roles');
++    final roleIdByName = {for (final row in roleRows) row['name'] as String: row['id'] as String};
++
++    final now = DateTime.now().toIso8601String();
++    const uuid = Uuid();
++
++    for (final keyEntry in defaultPermissions.entries) {
++      for (final roleEntry in keyEntry.value.entries) {
++        final roleId = roleIdByName[roleEntry.key.name];
++        if (roleId == null) continue; // Role not seeded (shouldn't happen) — skip rather than crash.
++
++        await db.insert('permissions', {
++          'id': uuid.v4(),
++          'role_id': roleId,
++          'permission_key': keyEntry.key.name,
++          'mode': roleEntry.value.name,
++          'created_at': now,
++          'updated_at': now,
++        });
++      }
++    }
++  }
++
+   /// Seeds initial rows on first run.
+   ///
+   /// Menu/category/variant data below is Agung's actual menu — real,
+diff --git a/lib/features/dashboard/application/dashboard_provider.dart b/lib/features/dashboard/application/dashboard_provider.dart
+index e371498..81dbed4 100644
+--- a/lib/features/dashboard/application/dashboard_provider.dart
++++ b/lib/features/dashboard/application/dashboard_provider.dart
+@@ -1,5 +1,7 @@
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
++import '../../../core/permissions/permission_key.dart';
++import '../../../core/permissions/permission_providers.dart';
+ import '../../../core/session/app_session.dart';
+ import '../../../core/session/app_session_provider.dart';
+ import '../domain/dashboard_models.dart';
+@@ -67,6 +69,17 @@ final dashboardProvider = StateNotifierProvider.autoDispose<DashboardController,
+     controller.setUser(_toSessionUser(next));
+   }, fireImmediately: true);
+ 
++  // A4: prefetch (not just watch) the permission the swipe-up menu
++  // needs, right when the dashboard first loads for this session —
++  // by the time the user actually swipes up, currentRolePermissionProvider
++  // is already resolved and cached (it's not .autoDispose — see its
++  // doc comment), so menu_bottom_sheet.dart's canViewOwnerMenu never
++  // has to show its one-frame "still resolving" fallback in practice.
++  // ref.read(...future) here (not ref.watch) is deliberate: this
++  // provider doesn't need to rebuild when the permission resolves,
++  // it just needs to trigger the resolution early.
++  ref.read(currentRolePermissionProvider(PermissionKey.viewOwnerMenu).future);
++
+   return controller;
+ });
+ 
+diff --git a/lib/features/menu_shell/presentation/menu_bottom_sheet.dart b/lib/features/menu_shell/presentation/menu_bottom_sheet.dart
+index db5d9df..11f7543 100644
+--- a/lib/features/menu_shell/presentation/menu_bottom_sheet.dart
++++ b/lib/features/menu_shell/presentation/menu_bottom_sheet.dart
+@@ -2,8 +2,9 @@ import 'package:flutter/material.dart';
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
+ import '../../../core/navigation/app_nav.dart';
+-import '../../../core/session/app_session.dart';
+-import '../../../core/session/app_session_provider.dart';
++import '../../../core/permissions/permission_key.dart';
++import '../../../core/permissions/permission_mode.dart';
++import '../../../core/permissions/permission_providers.dart';
+ import '../../../core/theme/app_colors.dart';
+ import '../../../core/theme/app_spacing.dart';
+ import '../../hrd/application/hrd_provider.dart';
+@@ -48,18 +49,28 @@ class MenuBottomSheetContent extends ConsumerWidget {
+   @override
+   Widget build(BuildContext context, WidgetRef ref) {
+     final pendingApprovals = ref.watch(hrdControllerProvider.select((s) => s.pendingApprovals.length));
+-    final role = ref.watch(appSessionProvider.select((s) => s.role));
+-    // Manager is temporarily treated as Owner-equivalent here (Tahap A
+-    // decision) until A4's granular PermissionService replaces this
+-    // role-based check with a real per-tile permission lookup.
+-    final isOwner = role != AppRole.staff;
++
++    // A4: replaces the old hard `role == AppRole.owner` /
++    // `role != AppRole.staff` check with a real PermissionService
++    // lookup (see [[mamam-kasir-flutter]] A4 notes) — one key
++    // (viewOwnerMenu) gates both the 9-tile grid and the Approval card,
++    // since they were always shown/hidden together. In principle this
++    // introduces an async gap (the old check was synchronous) where
++    // canViewOwnerMenu briefly reads false while the DB query resolves;
++    // in practice dashboard_provider.dart prefetches and caches this
++    // same permission the moment the dashboard loads, before the sheet
++    // can ever be opened, so this fallback is a defensive default
++    // rather than something that visibly flickers in the normal flow.
++    final permissionAsync = ref.watch(currentRolePermissionProvider(PermissionKey.viewOwnerMenu));
++    final canViewOwnerMenu = permissionAsync.valueOrNull == PermissionMode.direct;
+ 
+     // For this pass the 9-tile grid is Owner-only — Staff's access is
+     // limited to Kasir/Riwayat (dashboard quick actions, not this sheet)
+     // plus the "Staff" card below. See [[mamam-kasir-flutter]] notes:
+     // per-tile custom permissions are a future Owner-facing feature, not
+-    // built yet, so this is a hard role check rather than a granular one.
+-    final items = isOwner
++    // built yet, so this is a single-key permission check rather than a
++    // granular one.
++    final items = canViewOwnerMenu
+         ? buildMenuGridItems(
+             context: context,
+             onDismissSheet: () => Navigator.of(context).pop(),
+@@ -118,10 +129,11 @@ class MenuBottomSheetContent extends ConsumerWidget {
+                 child: Column(
+                   crossAxisAlignment: CrossAxisAlignment.start,
+                   children: [
+-                    if (isOwner) ...[
+-                      // Owner: Notifikasi + Approval side by side, "Staff"
+-                      // full-width below — unchanged from before, only the
+-                      // bottom card's label changed.
++                    if (canViewOwnerMenu) ...[
++                      // Owner/Manager: Notifikasi + Approval side by
++                      // side, "Staff" full-width below — unchanged from
++                      // before, only the check driving this branch
++                      // changed.
+                       Row(
+                         children: [
+                           notifikasiCard,
+@@ -137,8 +149,9 @@ class MenuBottomSheetContent extends ConsumerWidget {
+                       const SizedBox(height: AppSpacing.md),
+                       Row(children: [staffCard]),
+                     ] else ...[
+-                      // Staff: no Approval access — "Staff" takes
+-                      // Approval's old slot, both equal-width side by side.
++                      // Staff (or still resolving): no Approval access —
++                      // "Staff" takes Approval's old slot, both
++                      // equal-width side by side.
+                       Row(
+                         children: [
+                           notifikasiCard,
+@@ -151,7 +164,7 @@ class MenuBottomSheetContent extends ConsumerWidget {
+                       const SizedBox(height: AppSpacing.xl),
+                       Divider(color: AppColors.border, height: 1),
+                       const SizedBox(height: AppSpacing.xl),
+-                      // 3x3 grid — Owner only, see isOwner check above.
++                      // 3x3 grid — gated by canViewOwnerMenu above.
+                       GridView.count(
+                         crossAxisCount: 3,
+                         shrinkWrap: true,
+diff --git a/lib/core/permissions/permission_key.dart b/lib/core/permissions/permission_key.dart
+new file mode 100644
+index 0000000..64de2bb
+--- /dev/null
++++ b/lib/core/permissions/permission_key.dart
+@@ -0,0 +1,56 @@
++/// Every permission-gated action in the app. Per the task brief's
++/// explicit instruction: a key exists here ONLY for an action the PRD
++/// states an explicit deny/direct/approval mode for — never invented
++/// ahead of a feature actually needing one. See
++/// [[mamam-kasir-flutter]]'s A4 notes for the PRD line each key traces
++/// back to.
++///
++/// [viewOwnerMenu] is the one key with a real UI hookup right now
++/// (menu_bottom_sheet.dart's 9-tile grid + Approval card) — it's not
++/// literally named in the PRD's per-module mode language the way the
++/// others are, but the PRD's "### Access" section is explicit that
++/// Owner "manages roles/permissions" and that Manager's data access is
++/// branch-scoped (implying Staff's is narrower still), which is what
++/// this key encodes as a single gate. The rest exist in the enum now
++/// (per PRD sections that DO state modes explicitly) but have no UI
++/// caller yet — see each key's doc comment for its PRD line, and
++/// [[mamam-kasir-flutter]]'s A4 notes for why hooking them into their
++/// still-placeholder modules is deferred rather than done now.
++enum PermissionKey {
++  /// Whether the 9-tile grid + Approval card in the swipe-up menu are
++  /// visible at all. PRD "### Access": "Owner manages roles/
++  /// permissions... Branch-scoped operational data for Manager."
++  viewOwnerMenu,
++
++  /// Creating a new expense entry. PRD Expenses: "Cashier/Manager/Owner
++  /// entry" — all three roles can create one directly.
++  enterExpense,
++
++  /// Editing an existing expense entry. PRD Expenses: "Cashier edits
++  /// require approval; Manager direct + Owner notification; Owner
++  /// unrestricted."
++  editExpense,
++
++  /// Correcting shift/Dompet numbers after the shift has already been
++  /// closed. PRD Shift: "Manager/Owner can correct after close with
++  /// audit; Manager changes notify Owner." Staff/Cashier is not
++  /// mentioned as being able to do this at all.
++  correctShiftAfterClose,
++
++  /// Editing an existing customer's data. PRD Customer: "Edit Owner/
++  /// Manager or Cashier by permission" — resolved (see
++  /// [[mamam-kasir-flutter]] A4 notes) as direct for all three roles,
++  /// same as Owner/Manager.
++  editCustomer,
++
++  /// Editing a transaction that has already been paid. PRD Edit/
++  /// cancel/restore: "Manager edits paid transaction directly; Owner
++  /// unrestricted." Staff/Cashier is not mentioned as being able to do
++  /// this at all.
++  editPaidTransaction,
++
++  /// Restoring a transaction after it was canceled. PRD Edit/cancel/
++  /// restore: "Restore requires Manager/Owner approval" — approval for
++  /// BOTH Manager and Owner, not direct for either.
++  restoreTransaction,
++}
+diff --git a/lib/core/permissions/permission_mode.dart b/lib/core/permissions/permission_mode.dart
+new file mode 100644
+index 0000000..3b40549
+--- /dev/null
++++ b/lib/core/permissions/permission_mode.dart
+@@ -0,0 +1,17 @@
++/// The 3-mode permission model from the PRD's "### Access" section
++/// ("Permission modes: deny/direct/approval") and AGENTS.md. Every
++/// (role, [PermissionKey]) pair resolves to exactly one of these.
++enum PermissionMode {
++  /// The action is not available at all for this role.
++  deny,
++
++  /// The action is available and executes immediately, no approval
++  /// step.
++  direct,
++
++  /// The action requires approval (from a Manager/Owner, depending on
++  /// the specific action) before it takes effect. A2/A3's already-built
++  /// PIN/session model doesn't yet include an approval queue — building
++  /// that is separate work, out of scope for the engine itself.
++  approval,
++}
+diff --git a/lib/core/permissions/permission_defaults.dart b/lib/core/permissions/permission_defaults.dart
+new file mode 100644
+index 0000000..0627355
+--- /dev/null
++++ b/lib/core/permissions/permission_defaults.dart
+@@ -0,0 +1,56 @@
++import '../session/app_session.dart';
++import 'permission_key.dart';
++import 'permission_mode.dart';
++
++/// Hardcoded (role, key) -> mode table mirroring the PRD's explicit
++/// mode language — see each [PermissionKey] value's doc comment for the
++/// exact PRD line each row traces back to.
++///
++/// Used by TWO independent things, which is why this table lives in its
++/// own file rather than inside [PermissionService] or AppDatabase:
++/// - [PermissionService.resolve] falls back to this table when the
++///   `permissions` DB table has no row for a (role, key) pair.
++/// - AppDatabase's v11 migration seeds the `permissions` table's actual
++///   rows FROM this table, so the seed data and the runtime fallback
++///   can never drift out of sync with each other.
++///
++/// Importing this file from AppDatabase does not create a circular
++/// import (this file doesn't import AppDatabase), unlike importing
++/// PermissionService itself would.
++const Map<PermissionKey, Map<AppRole, PermissionMode>> defaultPermissions = {
++  PermissionKey.viewOwnerMenu: {
++    AppRole.owner: PermissionMode.direct,
++    AppRole.manager: PermissionMode.direct,
++    AppRole.staff: PermissionMode.deny,
++  },
++  PermissionKey.enterExpense: {
++    AppRole.owner: PermissionMode.direct,
++    AppRole.manager: PermissionMode.direct,
++    AppRole.staff: PermissionMode.direct,
++  },
++  PermissionKey.editExpense: {
++    AppRole.owner: PermissionMode.direct,
++    AppRole.manager: PermissionMode.direct,
++    AppRole.staff: PermissionMode.approval,
++  },
++  PermissionKey.correctShiftAfterClose: {
++    AppRole.owner: PermissionMode.direct,
++    AppRole.manager: PermissionMode.direct,
++    AppRole.staff: PermissionMode.deny,
++  },
++  PermissionKey.editCustomer: {
++    AppRole.owner: PermissionMode.direct,
++    AppRole.manager: PermissionMode.direct,
++    AppRole.staff: PermissionMode.direct,
++  },
++  PermissionKey.editPaidTransaction: {
++    AppRole.owner: PermissionMode.direct,
++    AppRole.manager: PermissionMode.direct,
++    AppRole.staff: PermissionMode.deny,
++  },
++  PermissionKey.restoreTransaction: {
++    AppRole.owner: PermissionMode.approval,
++    AppRole.manager: PermissionMode.approval,
++    AppRole.staff: PermissionMode.deny,
++  },
++};
+diff --git a/lib/core/permissions/permission_service.dart b/lib/core/permissions/permission_service.dart
+new file mode 100644
+index 0000000..be20734
+--- /dev/null
++++ b/lib/core/permissions/permission_service.dart
+@@ -0,0 +1,67 @@
++import '../data/app_database.dart';
++import '../session/app_session.dart';
++import 'permission_defaults.dart';
++import 'permission_key.dart';
++import 'permission_mode.dart';
++
++/// Resolves what a role may do for a given [PermissionKey], per the
++/// PRD's deny/direct/approval model. This is the single place that
++/// question is answered — callers (widgets, future use-cases) call
++/// [PermissionService.resolve] or [PermissionService.isAllowed] instead
++/// of checking `role == AppRole.owner` themselves, per the task brief's
++/// "dipanggil dari use case/service, bukan hanya if (isOwner) di
++/// widget."
++///
++/// Reads from the `permissions` table (role_id, permission_key, mode —
++/// see AppDatabase's v10 migration) so "perubahan permission berlaku
++/// langsung" (changes apply immediately, no separate cache to
++/// invalidate) — every [resolve] call is a fresh query, not a value
++/// computed once and held onto.
++///
++/// [defaultPermissions] (permission_defaults.dart) is the fallback used
++/// when the `permissions` table has no row for a given (role, key) pair.
++/// A v11 migration seeds the table from that same source, but a device
++/// that hasn't upgraded yet (or a (role, key) pair added after that
++/// migration ran) still gets correct behavior from the fallback — see
++/// permission_defaults.dart's doc comment for why the two never drift
++/// apart.
++class PermissionService {
++  /// Resolves the [PermissionMode] for [role] + [key]. A null [role]
++  /// (no session) always resolves to [PermissionMode.deny] — there is
++  /// no "logged out but still direct" case.
++  Future<PermissionMode> resolve(AppRole? role, PermissionKey key) async {
++    if (role == null) return PermissionMode.deny;
++
++    final db = await AppDatabase.instance.database;
++    final rows = await db.rawQuery(
++      '''
++      SELECT permissions.mode
++      FROM permissions
++      JOIN roles ON roles.id = permissions.role_id
++      WHERE roles.name = ? AND permissions.permission_key = ?
++      LIMIT 1
++      ''',
++      [role.name, key.name],
++    );
++
++    if (rows.isNotEmpty) {
++      final modeName = rows.first['mode'] as String;
++      final mode = PermissionMode.values.where((m) => m.name == modeName).firstOrNull;
++      if (mode != null) return mode;
++      // Unrecognized mode string in the DB (shouldn't happen from this
++      // app's own writes) — fail closed to the hardcoded default rather
++      // than silently granting access on bad data.
++    }
++
++    return defaultPermissions[key]?[role] ?? PermissionMode.deny;
++  }
++
++  /// Convenience for the common case of "can this role do this at all
++  /// right now" — true only for [PermissionMode.direct]. Callers that
++  /// need to distinguish `approval` (e.g. to route into an approval
++  /// flow instead of just failing) should call [resolve] directly
++  /// rather than this method.
++  Future<bool> isAllowed(AppRole? role, PermissionKey key) async {
++    return await resolve(role, key) == PermissionMode.direct;
++  }
++}
+diff --git a/lib/core/permissions/permission_providers.dart b/lib/core/permissions/permission_providers.dart
+new file mode 100644
+index 0000000..d9abe7c
+--- /dev/null
++++ b/lib/core/permissions/permission_providers.dart
+@@ -0,0 +1,28 @@
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../session/app_session_provider.dart';
++import 'permission_key.dart';
++import 'permission_mode.dart';
++import 'permission_service.dart';
++
++final permissionServiceProvider = Provider<PermissionService>((ref) => PermissionService());
++
++/// Resolves [key]'s [PermissionMode] for whoever is currently logged in
++/// (from [appSessionProvider]), re-resolving on every session change so
++/// a role change takes effect immediately — no stale cache (per the
++/// task brief's "perubahan permission berlaku langsung").
++///
++/// Deliberately NOT `.autoDispose`: once resolved for a given role, the
++/// result stays cached (Riverpod only re-runs this when the watched
++/// `role` actually changes) so reopening the same sheet repeatedly
++/// doesn't re-query the DB and re-flicker every time — see
++/// menu_bottom_sheet.dart's canViewOwnerMenu comment for why the first
++/// resolution (right after login) can still show one transient frame
++/// before the DB answers.
++///
++/// `.family` because different call sites need different keys; each
++/// resolves independently.
++final currentRolePermissionProvider = FutureProvider.family<PermissionMode, PermissionKey>((ref, key) async {
++  final role = ref.watch(appSessionProvider.select((s) => s.role));
++  return ref.watch(permissionServiceProvider).resolve(role, key);
++});
+diff --git a/test/permission_defaults_test.dart b/test/permission_defaults_test.dart
+new file mode 100644
+index 0000000..923225e
+--- /dev/null
++++ b/test/permission_defaults_test.dart
+@@ -0,0 +1,68 @@
++// Tests for defaultPermissions (lib/core/permissions/permission_defaults.dart).
++// Pure Dart, no DB — runs with plain `flutter test`.
++import 'package:flutter_test/flutter_test.dart';
++import 'package:mamam_kasir/core/permissions/permission_defaults.dart';
++import 'package:mamam_kasir/core/permissions/permission_key.dart';
++import 'package:mamam_kasir/core/permissions/permission_mode.dart';
++import 'package:mamam_kasir/core/session/app_session.dart';
++
++void main() {
++  group('defaultPermissions matches the PRD mode table', () {
++    test('every PermissionKey has an entry for all 3 roles', () {
++      for (final key in PermissionKey.values) {
++        final rolesForKey = defaultPermissions[key];
++        expect(rolesForKey, isNotNull, reason: '$key has no entry in defaultPermissions');
++        expect(rolesForKey!.keys.toSet(), AppRole.values.toSet(), reason: '$key is missing a role');
++      }
++    });
++
++    test('viewOwnerMenu: Owner+Manager direct, Staff deny', () {
++      final modes = defaultPermissions[PermissionKey.viewOwnerMenu]!;
++      expect(modes[AppRole.owner], PermissionMode.direct);
++      expect(modes[AppRole.manager], PermissionMode.direct);
++      expect(modes[AppRole.staff], PermissionMode.deny);
++    });
++
++    test('enterExpense: all 3 roles direct (PRD: "Cashier/Manager/Owner entry")', () {
++      final modes = defaultPermissions[PermissionKey.enterExpense]!;
++      expect(modes[AppRole.owner], PermissionMode.direct);
++      expect(modes[AppRole.manager], PermissionMode.direct);
++      expect(modes[AppRole.staff], PermissionMode.direct);
++    });
++
++    test('editExpense: Owner+Manager direct, Staff approval (PRD: Cashier edits require approval)', () {
++      final modes = defaultPermissions[PermissionKey.editExpense]!;
++      expect(modes[AppRole.owner], PermissionMode.direct);
++      expect(modes[AppRole.manager], PermissionMode.direct);
++      expect(modes[AppRole.staff], PermissionMode.approval);
++    });
++
++    test('correctShiftAfterClose: Owner+Manager direct, Staff deny (not mentioned in PRD)', () {
++      final modes = defaultPermissions[PermissionKey.correctShiftAfterClose]!;
++      expect(modes[AppRole.owner], PermissionMode.direct);
++      expect(modes[AppRole.manager], PermissionMode.direct);
++      expect(modes[AppRole.staff], PermissionMode.deny);
++    });
++
++    test('editCustomer: all 3 roles direct (resolved ambiguity — see [[mamam-kasir-flutter]] notes)', () {
++      final modes = defaultPermissions[PermissionKey.editCustomer]!;
++      expect(modes[AppRole.owner], PermissionMode.direct);
++      expect(modes[AppRole.manager], PermissionMode.direct);
++      expect(modes[AppRole.staff], PermissionMode.direct);
++    });
++
++    test('editPaidTransaction: Owner+Manager direct, Staff deny (PRD: Manager edits directly, Owner unrestricted, Staff not mentioned)', () {
++      final modes = defaultPermissions[PermissionKey.editPaidTransaction]!;
++      expect(modes[AppRole.owner], PermissionMode.direct);
++      expect(modes[AppRole.manager], PermissionMode.direct);
++      expect(modes[AppRole.staff], PermissionMode.deny);
++    });
++
++    test('restoreTransaction: Owner+Manager BOTH approval, Staff deny (PRD: "Restore requires Manager/Owner approval")', () {
++      final modes = defaultPermissions[PermissionKey.restoreTransaction]!;
++      expect(modes[AppRole.owner], PermissionMode.approval);
++      expect(modes[AppRole.manager], PermissionMode.approval);
++      expect(modes[AppRole.staff], PermissionMode.deny);
++    });
++  });
++}
+diff --git a/test/permission_service_test.dart b/test/permission_service_test.dart
+new file mode 100644
+index 0000000..aa11213
+--- /dev/null
++++ b/test/permission_service_test.dart
+@@ -0,0 +1,148 @@
++// Tests for PermissionService (lib/core/permissions/permission_service.dart)
++// and the v11 permissions-seed migration in app_database.dart.
++//
++// Same environment limitation as app_database_auth_test.dart/
++// pin_auth_repository_test.dart: needs a real device/emulator, not plain
++// `flutter test`, because sqflite_sqlcipher has no FFI/desktop test
++// mode. See app_database_auth_test.dart's header for the full
++// explanation — not repeated here.
++import 'dart:io';
++
++import 'package:flutter_test/flutter_test.dart';
++import 'package:mamam_kasir/core/data/app_database.dart';
++import 'package:mamam_kasir/core/permissions/permission_defaults.dart';
++import 'package:mamam_kasir/core/permissions/permission_key.dart';
++import 'package:mamam_kasir/core/permissions/permission_mode.dart';
++import 'package:mamam_kasir/core/permissions/permission_service.dart';
++import 'package:mamam_kasir/core/session/app_session.dart';
++import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
++import 'package:plugin_platform_interface/plugin_platform_interface.dart';
++
++class _FakePathProvider extends PlatformInterface implements PathProviderPlatform {
++  static final Object _token = Object();
++  final String tempDirPath;
++  _FakePathProvider.withPath(this.tempDirPath) : super(token: _token);
++
++  @override
++  Future<String?> getApplicationDocumentsPath() async => tempDirPath;
++}
++
++void main() {
++  TestWidgetsFlutterBinding.ensureInitialized();
++
++  late Directory tempDir;
++
++  setUp(() async {
++    tempDir = await Directory.systemTemp.createTemp('mamam_kasir_permission_test_');
++    PathProviderPlatform.instance = _FakePathProvider.withPath(tempDir.path);
++  });
++
++  tearDown(() async {
++    if (await tempDir.exists()) {
++      await tempDir.delete(recursive: true);
++    }
++  });
++
++  group('v11 migration seeds the permissions table', () {
++    test('permissions table has one row per (key, role) pair in defaultPermissions', () async {
++      final db = await AppDatabase.instance.database;
++      final rows = await db.query('permissions');
++
++      final expectedCount = PermissionKey.values.length * AppRole.values.length;
++      expect(rows.length, expectedCount);
++    });
++
++    test('seeded rows match defaultPermissions exactly', () async {
++      final db = await AppDatabase.instance.database;
++
++      for (final key in PermissionKey.values) {
++        for (final role in AppRole.values) {
++          final rows = await db.rawQuery(
++            '''
++            SELECT permissions.mode
++            FROM permissions
++            JOIN roles ON roles.id = permissions.role_id
++            WHERE roles.name = ? AND permissions.permission_key = ?
++            ''',
++            [role.name, key.name],
++          );
++          expect(rows.length, 1, reason: 'expected exactly one row for ($key, $role)');
++          expect(rows.first['mode'], defaultPermissions[key]![role]!.name);
++        }
++      }
++    });
++
++    test('seeding is idempotent — table is not double-seeded on a second open', () async {
++      final dbFirst = await AppDatabase.instance.database;
++      final firstCount = (await dbFirst.query('permissions')).length;
++
++      // AppDatabase.instance.database returns the same already-open
++      // connection on a second call within the same process, so this
++      // mainly re-confirms the guard in _seedPermissionsData rather
++      // than exercising a true re-open — a true "close and reopen the
++      // same file" idempotency check would need the same kind of
++      // multi-run device test noted as a gap in app_database_auth_test.dart.
++      final dbSecond = await AppDatabase.instance.database;
++      final secondCount = (await dbSecond.query('permissions')).length;
++
++      expect(secondCount, firstCount);
++    });
++  });
++
++  group('PermissionService.resolve', () {
++    test('null role always resolves to deny', () async {
++      final service = PermissionService();
++      final mode = await service.resolve(null, PermissionKey.viewOwnerMenu);
++      expect(mode, PermissionMode.deny);
++    });
++
++    test('resolves viewOwnerMenu correctly for all 3 roles from the seeded DB rows', () async {
++      final service = PermissionService();
++
++      expect(await service.resolve(AppRole.owner, PermissionKey.viewOwnerMenu), PermissionMode.direct);
++      expect(await service.resolve(AppRole.manager, PermissionKey.viewOwnerMenu), PermissionMode.direct);
++      expect(await service.resolve(AppRole.staff, PermissionKey.viewOwnerMenu), PermissionMode.deny);
++    });
++
++    test('resolves editExpense correctly (Staff gets approval, not deny or direct)', () async {
++      final service = PermissionService();
++      expect(await service.resolve(AppRole.staff, PermissionKey.editExpense), PermissionMode.approval);
++    });
++
++    test('resolves restoreTransaction correctly (Owner AND Manager both approval, not direct)', () async {
++      final service = PermissionService();
++      expect(await service.resolve(AppRole.owner, PermissionKey.restoreTransaction), PermissionMode.approval);
++      expect(await service.resolve(AppRole.manager, PermissionKey.restoreTransaction), PermissionMode.approval);
++    });
++
++    test('a DB row overrides the hardcoded default when they differ', () async {
++      final db = await AppDatabase.instance.database;
++      final service = PermissionService();
++
++      // Sanity-check the default first.
++      expect(await service.resolve(AppRole.staff, PermissionKey.viewOwnerMenu), PermissionMode.deny);
++
++      // Manually flip the DB row to `direct` for Staff — simulates a
++      // future Owner-facing permission-editing screen changing this.
++      final staffRole = (await db.query('roles', where: 'name = ?', whereArgs: ['staff'])).first;
++      await db.update(
++        'permissions',
++        {'mode': 'direct'},
++        where: 'role_id = ? AND permission_key = ?',
++        whereArgs: [staffRole['id'], PermissionKey.viewOwnerMenu.name],
++      );
++
++      // resolve() re-queries every call (no cache) — per "perubahan
++      // permission berlaku langsung" — so this should now be direct.
++      expect(await service.resolve(AppRole.staff, PermissionKey.viewOwnerMenu), PermissionMode.direct);
++    });
++
++    test('isAllowed is true only for direct, not approval or deny', () async {
++      final service = PermissionService();
++
++      expect(await service.isAllowed(AppRole.owner, PermissionKey.viewOwnerMenu), isTrue); // direct
++      expect(await service.isAllowed(AppRole.staff, PermissionKey.editExpense), isFalse); // approval
++      expect(await service.isAllowed(AppRole.staff, PermissionKey.viewOwnerMenu), isFalse); // deny
++    });
++  });
++}

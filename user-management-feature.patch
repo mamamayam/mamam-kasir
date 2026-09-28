@@ -1,0 +1,963 @@
+diff --git a/lib/features/pengaturan/presentation/pengaturan_screen.dart b/lib/features/pengaturan/presentation/pengaturan_screen.dart
+index 24c4857..c41f5d5 100644
+--- a/lib/features/pengaturan/presentation/pengaturan_screen.dart
++++ b/lib/features/pengaturan/presentation/pengaturan_screen.dart
+@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
+ import '../../../core/navigation/app_nav.dart';
++import '../../../core/session/app_session.dart';
+ import '../../../core/session/app_session_provider.dart';
+ import '../../../core/theme/app_colors.dart';
+ import '../../../core/theme/app_spacing.dart';
+@@ -9,6 +10,7 @@ import '../../../core/widgets/ios_page_header.dart';
+ import '../../../core/widgets/placeholder_screen.dart';
+ import '../../auth/presentation/change_pin_screen.dart';
+ import '../../auth/presentation/login_screen.dart';
++import '../../user_management/presentation/user_management_screen.dart';
+ import '../application/auto_print_provider.dart';
+ 
+ /// Pengaturan (Settings) screen, ported 1:1 from the approved HTML
+@@ -18,8 +20,12 @@ import '../application/auto_print_provider.dart';
+ ///
+ /// Rows fall into three buckets:
+ /// - Real and wired: Cetak Struk Otomatis (SharedPreferences), Keamanan
+-///   PIN (Tahap A/A2 — opens [ChangePinScreen]), Keluar Akun (clears the
+-///   session via [AppSessionController.logout] and returns to
++///   PIN (Tahap A/A2 — opens [ChangePinScreen]), Kelola Karyawan (new
++///   feature built on top of Tahap A — opens [UserManagementScreen] for
++///   login-account CRUD; Owner-only, so the row is hidden entirely for
++///   Manager/Staff the same way menu_bottom_sheet.dart hides its 9-tile
++///   grid for non-Owner — never shown-but-locked), Keluar Akun (clears
++///   the session via [AppSessionController.logout] and returns to
+ ///   [LoginScreen] — previously this only navigated to the PIN screen
+ ///   without actually clearing the session, which was harmless back
+ ///   when PIN was device-wide but became a real bug once PIN became
+@@ -30,15 +36,15 @@ import '../application/auto_print_provider.dart';
+ ///   local-first with no cloud sync built — shown as "Tidak aktif"
+ ///   rather than inventing a sync state), Printer Bluetooth (no
+ ///   Bluetooth library wired up yet — shown as "Tidak tersambung").
+-/// - Not yet built, routed to [PlaceholderScreen]: Kelola Karyawan (no
+-///   user-management UI exists — out of scope per the Tahap A task
+-///   brief), Backup & Restore (no such feature exists).
++/// - Not yet built, routed to [PlaceholderScreen]: Backup & Restore (no
++///   such feature exists).
+ class PengaturanScreen extends ConsumerWidget {
+   const PengaturanScreen({super.key});
+ 
+   @override
+   Widget build(BuildContext context, WidgetRef ref) {
+     final autoPrint = ref.watch(autoPrintReceiptProvider);
++    final isOwner = ref.watch(appSessionProvider.select((s) => s.role)) == AppRole.owner;
+ 
+     return Scaffold(
+       backgroundColor: AppColors.background,
+@@ -60,19 +66,12 @@ class PengaturanScreen extends ConsumerWidget {
+                         label: 'Keamanan PIN',
+                         onTap: () => AppNav.push(context, (_) => const ChangePinScreen()),
+                       ),
+-                      _SettingsRow(
+-                        icon: Icons.people_alt_outlined,
+-                        label: 'Kelola Karyawan',
+-                        onTap: () => AppNav.push(
+-                          context,
+-                          (_) => const PlaceholderScreen(
+-                            title: 'Kelola Karyawan',
+-                            icon: Icons.people_alt_outlined,
+-                            accentColor: AppColors.tileStaff,
+-                            description: 'Manajemen karyawan & role akan segera hadir.',
+-                          ),
++                      if (isOwner)
++                        _SettingsRow(
++                          icon: Icons.people_alt_outlined,
++                          label: 'Kelola Karyawan',
++                          onTap: () => AppNav.push(context, (_) => const UserManagementScreen()),
+                         ),
+-                      ),
+                       _SettingsRow(
+                         icon: Icons.sync_rounded,
+                         label: 'Status Sinkronisasi',
+diff --git a/lib/features/user_management/domain/managed_user.dart b/lib/features/user_management/domain/managed_user.dart
+new file mode 100644
+index 0000000..c70610d
+--- /dev/null
++++ b/lib/features/user_management/domain/managed_user.dart
+@@ -0,0 +1,29 @@
++import '../../../core/session/app_session.dart';
++
++/// A login account as shown/edited on the "Kelola Karyawan" (user
++/// management) screen. Deliberately excludes password_hash/
++/// password_salt/pin_hash/pin_salt/failed_pin_attempts/locked_at — same
++/// principle as [PinUserIdentity] (lib/features/auth/domain/
++/// pin_user_identity.dart): this model is what UI code is allowed to
++/// hold, never a raw `users` row.
++class ManagedUser {
++  final String id;
++  final String username;
++  final String displayName;
++  final AppRole role;
++  final bool isActive;
++
++  const ManagedUser({
++    required this.id,
++    required this.username,
++    required this.displayName,
++    required this.role,
++    required this.isActive,
++  });
++
++  String get roleLabel => switch (role) {
++        AppRole.owner => 'Owner',
++        AppRole.manager => 'Manager',
++        AppRole.staff => 'Staff',
++      };
++}
+diff --git a/lib/features/user_management/data/user_management_repository.dart b/lib/features/user_management/data/user_management_repository.dart
+new file mode 100644
+index 0000000..aafbec5
+--- /dev/null
++++ b/lib/features/user_management/data/user_management_repository.dart
+@@ -0,0 +1,261 @@
++import 'package:uuid/uuid.dart';
++
++import '../../../core/data/app_database.dart';
++import '../../../core/data/password_hasher.dart';
++import '../../../core/session/app_session.dart';
++import '../domain/managed_user.dart';
++
++const _uuid = Uuid();
++
++/// Thrown when an operation would result in more than one active Owner
++/// account. Caught by the UI layer to show a specific error message
++/// rather than a generic failure.
++class MultipleOwnersException implements Exception {
++  const MultipleOwnersException();
++}
++
++/// Thrown when an operation would deactivate the sole active Owner
++/// account, leaving nothing able to reach Owner-only features
++/// (including this very screen).
++class CannotDeactivateOwnerException implements Exception {
++  const CannotDeactivateOwnerException();
++}
++
++/// Thrown when a chosen username is already taken by another active
++/// account.
++class UsernameTakenException implements Exception {
++  const UsernameTakenException();
++}
++
++/// CRUD for login accounts (`users`/`user_roles`/`roles`), backing the
++/// "Kelola Karyawan" (user management) screen. This is a NEW feature
++/// built on top of Tahap A's foundation (see [[mamam-kasir-flutter]]
++/// notes) — not one of the lettered A1-A5 steps, but depends entirely on
++/// their schema (users/roles/user_roles tables from A1, PasswordHasher
++/// from A1/A2).
++///
++/// Enforces "hanya 1 Owner" as a real runtime check (via [hasOwner]),
++/// closing the gap A1 deliberately left as seed-construction-only (see
++/// A1's `_seedAuthData` doc comment in app_database.dart) — this
++/// repository is the first place that gap needed closing for real,
++/// since it's the first place a second Owner could actually be created.
++///
++/// Deletion is soft-delete only (`is_active = 0`) — a deactivated
++/// user's row, and anything elsewhere in the app that references their
++/// `user_id` (audit trails, transaction `created_by`, etc., once those
++/// exist), stays intact. There is no hard-delete path here at all.
++class UserManagementRepository {
++  Future<List<ManagedUser>> listUsers({bool includeInactive = true}) async {
++    final db = await AppDatabase.instance.database;
++    final rows = await db.rawQuery('''
++      SELECT users.id, users.username, users.display_name, users.is_active, roles.name AS role_name
++      FROM users
++      JOIN user_roles ON user_roles.user_id = users.id
++      JOIN roles ON roles.id = user_roles.role_id
++      ${includeInactive ? '' : 'WHERE users.is_active = 1'}
++      ORDER BY users.created_at ASC
++    ''');
++
++    return rows
++        .map((row) {
++          final role = AppRole.values.where((r) => r.name == row['role_name']).firstOrNull;
++          if (role == null) return null; // Unknown role name — skip rather than crash the list.
++          return ManagedUser(
++            id: row['id'] as String,
++            username: row['username'] as String,
++            displayName: row['display_name'] as String,
++            role: role,
++            isActive: (row['is_active'] as int) == 1,
++          );
++        })
++        .whereType<ManagedUser>()
++        .toList();
++  }
++
++  /// Whether an active Owner account currently exists. [excludingUserId]
++  /// lets an edit-in-progress check "would this still be true if I
++  /// exclude the user I'm currently editing" — otherwise editing the
++  /// existing Owner's own row (without changing their role) would
++  /// always incorrectly report "an Owner already exists" and block the
++  /// edit.
++  Future<bool> hasOwner({String? excludingUserId}) async {
++    final db = await AppDatabase.instance.database;
++    final rows = await db.rawQuery(
++      '''
++      SELECT COUNT(*) as cnt
++      FROM user_roles
++      JOIN roles ON roles.id = user_roles.role_id
++      JOIN users ON users.id = user_roles.user_id
++      WHERE roles.name = 'owner' AND users.is_active = 1
++      ${excludingUserId != null ? 'AND users.id != ?' : ''}
++      ''',
++      excludingUserId != null ? [excludingUserId] : [],
++    );
++    return (rows.first['cnt'] as int) > 0;
++  }
++
++  Future<bool> _isUsernameTaken(String username, {String? excludingUserId}) async {
++    final db = await AppDatabase.instance.database;
++    final rows = await db.query(
++      'users',
++      where: excludingUserId != null ? 'username = ? COLLATE NOCASE AND id != ?' : 'username = ? COLLATE NOCASE',
++      whereArgs: excludingUserId != null ? [username.trim(), excludingUserId] : [username.trim()],
++      limit: 1,
++    );
++    return rows.isNotEmpty;
++  }
++
++  /// Creates a new login account. Throws [MultipleOwnersException] if
++  /// [role] is Owner and an active Owner already exists, or
++  /// [UsernameTakenException] if [username] is already in use — check
++  /// both BEFORE showing a confirmation/saving indicator in the UI where
++  /// possible, but this method re-checks regardless so it's safe to call
++  /// on its own.
++  Future<String> createUser({
++    required String username,
++    required String password,
++    required String displayName,
++    required AppRole role,
++  }) async {
++    if (await _isUsernameTaken(username)) throw const UsernameTakenException();
++    if (role == AppRole.owner && await hasOwner()) throw const MultipleOwnersException();
++
++    final db = await AppDatabase.instance.database;
++    final now = DateTime.now().toIso8601String();
++    final userId = _uuid.v4();
++    final salt = PasswordHasher.generateSalt();
++
++    await db.insert('users', {
++      'id': userId,
++      'username': username.trim(),
++      'display_name': displayName.trim(),
++      'password_hash': PasswordHasher.hash(password, salt),
++      'password_salt': salt,
++      'pin_hash': null,
++      'pin_salt': null,
++      'failed_pin_attempts': 0,
++      'locked_at': null,
++      'last_pin_at': null,
++      'is_active': 1,
++      'created_at': now,
++      'updated_at': now,
++    });
++
++    final roleRow = await db.query('roles', where: 'name = ?', whereArgs: [role.name], limit: 1);
++    if (roleRow.isEmpty) {
++      throw StateError('Role "${role.name}" not found in roles table — this should never happen for a built-in AppRole value.');
++    }
++
++    await db.insert('user_roles', {
++      'id': _uuid.v4(),
++      'user_id': userId,
++      'role_id': roleRow.first['id'],
++      'created_at': now,
++    });
++
++    return userId;
++  }
++
++  /// Updates an existing account's username/displayName/role, and
++  /// optionally its password (leave [newPassword] null to keep the
++  /// current one — this method never requires re-entering a password
++  /// just to change a username or role). Same [MultipleOwnersException]/
++  /// [UsernameTakenException] guards as [createUser], with the "editing
++  /// myself" exclusion described on [hasOwner].
++  ///
++  /// Deliberately does NOT touch the target user's PIN, lockout state,
++  /// or `last_pin_at` — those are [PinAuthRepository]'s territory, kept
++  /// separate here the same way [AuthRepository]/[PinAuthRepository]
++  /// already keep password and PIN concerns apart from each other.
++  Future<void> updateUser({
++    required String userId,
++    required String username,
++    required String displayName,
++    required AppRole role,
++    String? newPassword,
++  }) async {
++    if (await _isUsernameTaken(username, excludingUserId: userId)) throw const UsernameTakenException();
++    if (role == AppRole.owner && await hasOwner(excludingUserId: userId)) throw const MultipleOwnersException();
++
++    final db = await AppDatabase.instance.database;
++    final now = DateTime.now().toIso8601String();
++
++    final values = <String, Object?>{
++      'username': username.trim(),
++      'display_name': displayName.trim(),
++      'updated_at': now,
++    };
++    if (newPassword != null && newPassword.isNotEmpty) {
++      final salt = PasswordHasher.generateSalt();
++      values['password_hash'] = PasswordHasher.hash(newPassword, salt);
++      values['password_salt'] = salt;
++    }
++
++    await db.update('users', values, where: 'id = ?', whereArgs: [userId]);
++
++    final roleRow = await db.query('roles', where: 'name = ?', whereArgs: [role.name], limit: 1);
++    if (roleRow.isEmpty) {
++      throw StateError('Role "${role.name}" not found in roles table — this should never happen for a built-in AppRole value.');
++    }
++    // One role per user for this pass (see AppRole's doc comment) —
++    // replace rather than add, so a role change never leaves a stale
++    // second row behind.
++    await db.delete('user_roles', where: 'user_id = ?', whereArgs: [userId]);
++    await db.insert('user_roles', {
++      'id': _uuid.v4(),
++      'user_id': userId,
++      'role_id': roleRow.first['id'],
++      'created_at': now,
++    });
++  }
++
++  /// Soft-deletes (deactivates) an account — see this class's doc
++  /// comment on why there is no hard-delete. A deactivated user cannot
++  /// log in ([AuthRepository.verifyCredentials] filters on
++  /// `is_active = 1`) but their row and history remain.
++  ///
++  /// Throws [CannotDeactivateOwnerException] if [userId] is the Owner —
++  /// deactivating the sole Owner would leave nobody able to reach any
++  /// Owner-only feature, including this very screen, so it's blocked
++  /// entirely rather than just discouraged.
++  Future<void> deactivateUser(String userId) async {
++    final db = await AppDatabase.instance.database;
++
++    final roleRows = await db.rawQuery(
++      '''
++      SELECT roles.name AS role_name
++      FROM user_roles
++      JOIN roles ON roles.id = user_roles.role_id
++      WHERE user_roles.user_id = ?
++      LIMIT 1
++      ''',
++      [userId],
++    );
++    if (roleRows.isNotEmpty && roleRows.first['role_name'] == AppRole.owner.name) {
++      throw const CannotDeactivateOwnerException();
++    }
++
++    await db.update(
++      'users',
++      {'is_active': 0, 'updated_at': DateTime.now().toIso8601String()},
++      where: 'id = ?',
++      whereArgs: [userId],
++    );
++  }
++
++  /// Reactivates a previously soft-deleted account. Re-checks the
++  /// single-Owner rule too — reactivating an old Owner account while a
++  /// different Owner is currently active must be blocked the same as
++  /// creating a second one would be.
++  Future<void> reactivateUser(String userId, {required AppRole role}) async {
++    if (role == AppRole.owner && await hasOwner(excludingUserId: userId)) throw const MultipleOwnersException();
++
++    final db = await AppDatabase.instance.database;
++    await db.update(
++      'users',
++      {'is_active': 1, 'updated_at': DateTime.now().toIso8601String()},
++      where: 'id = ?',
++      whereArgs: [userId],
++    );
++  }
++}
+diff --git a/lib/features/user_management/application/user_management_provider.dart b/lib/features/user_management/application/user_management_provider.dart
+new file mode 100644
+index 0000000..496eb41
+--- /dev/null
++++ b/lib/features/user_management/application/user_management_provider.dart
+@@ -0,0 +1,126 @@
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../../../core/session/app_session.dart';
++import '../data/user_management_repository.dart';
++import '../domain/managed_user.dart';
++
++final userManagementRepositoryProvider = Provider<UserManagementRepository>((ref) => UserManagementRepository());
++
++class UserManagementState {
++  final List<ManagedUser> users;
++  final bool isLoading;
++  final String? errorMessage;
++
++  const UserManagementState({
++    this.users = const [],
++    this.isLoading = true,
++    this.errorMessage,
++  });
++
++  UserManagementState copyWith({
++    List<ManagedUser>? users,
++    bool? isLoading,
++    String? errorMessage,
++    bool clearError = false,
++  }) {
++    return UserManagementState(
++      users: users ?? this.users,
++      isLoading: isLoading ?? this.isLoading,
++      errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
++    );
++  }
++}
++
++final userManagementProvider = StateNotifierProvider.autoDispose<UserManagementController, UserManagementState>((ref) {
++  return UserManagementController(ref.watch(userManagementRepositoryProvider));
++});
++
++class UserManagementController extends StateNotifier<UserManagementState> {
++  final UserManagementRepository _repository;
++
++  UserManagementController(this._repository) : super(const UserManagementState()) {
++    load();
++  }
++
++  Future<void> load() async {
++    state = state.copyWith(isLoading: true, clearError: true);
++    try {
++      final users = await _repository.listUsers();
++      state = state.copyWith(users: users, isLoading: false);
++    } catch (e) {
++      state = state.copyWith(isLoading: false, errorMessage: 'Gagal memuat daftar akun: $e');
++    }
++  }
++
++  /// Returns null on success, or a user-facing error message on failure
++  /// — the caller (the form modal) shows this inline rather than this
++  /// controller owning a SnackBar/dialog itself.
++  Future<String?> createUser({
++    required String username,
++    required String password,
++    required String displayName,
++    required AppRole role,
++  }) async {
++    try {
++      await _repository.createUser(username: username, password: password, displayName: displayName, role: role);
++      await load();
++      return null;
++    } on UsernameTakenException {
++      return 'Username sudah dipakai akun lain';
++    } on MultipleOwnersException {
++      return 'Sudah ada akun Owner — hanya boleh 1 Owner';
++    } catch (e) {
++      return 'Gagal membuat akun: $e';
++    }
++  }
++
++  Future<String?> updateUser({
++    required String userId,
++    required String username,
++    required String displayName,
++    required AppRole role,
++    String? newPassword,
++  }) async {
++    try {
++      await _repository.updateUser(
++        userId: userId,
++        username: username,
++        displayName: displayName,
++        role: role,
++        newPassword: newPassword,
++      );
++      await load();
++      return null;
++    } on UsernameTakenException {
++      return 'Username sudah dipakai akun lain';
++    } on MultipleOwnersException {
++      return 'Sudah ada akun Owner — hanya boleh 1 Owner';
++    } catch (e) {
++      return 'Gagal menyimpan perubahan: $e';
++    }
++  }
++
++  Future<String?> deactivateUser(String userId) async {
++    try {
++      await _repository.deactivateUser(userId);
++      await load();
++      return null;
++    } on CannotDeactivateOwnerException {
++      return 'Akun Owner tidak bisa dinonaktifkan';
++    } catch (e) {
++      return 'Gagal menonaktifkan akun: $e';
++    }
++  }
++
++  Future<String?> reactivateUser(String userId, {required AppRole role}) async {
++    try {
++      await _repository.reactivateUser(userId, role: role);
++      await load();
++      return null;
++    } on MultipleOwnersException {
++      return 'Sudah ada akun Owner — hanya boleh 1 Owner';
++    } catch (e) {
++      return 'Gagal mengaktifkan akun: $e';
++    }
++  }
++}
+diff --git a/lib/features/user_management/presentation/user_management_screen.dart b/lib/features/user_management/presentation/user_management_screen.dart
+new file mode 100644
+index 0000000..7a01416
+--- /dev/null
++++ b/lib/features/user_management/presentation/user_management_screen.dart
+@@ -0,0 +1,184 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../../../core/navigation/app_nav.dart';
++import '../../../core/theme/app_colors.dart';
++import '../../../core/theme/app_spacing.dart';
++import '../../../core/widgets/app_card_shell.dart';
++import '../../../core/widgets/app_empty_state.dart';
++import '../../../core/widgets/app_status_badge.dart';
++import '../../../core/widgets/ios_page_header.dart';
++import '../application/user_management_provider.dart';
++import '../domain/managed_user.dart';
++import 'widgets/user_form_modal.dart';
++
++/// "Kelola Karyawan" — manages login accounts (users/roles), not HRD
++/// employee records (see [[mamam-kasir-flutter]] notes on keeping those
++/// two concepts separate). Owner-only: reached from menu_grid_items.dart
++/// only when the logged-in role is Owner (see that file's guard).
++///
++/// List+add-form structure follows [MenuManagementScreen] (the reference
++/// pattern per component-standards-prompt.md) — IosPageHeader with a
++/// trailing add button, RefreshIndicator, AppCardShell rows,
++/// AppNav.showModal for the add/edit form.
++class UserManagementScreen extends ConsumerWidget {
++  const UserManagementScreen({super.key});
++
++  void _openForm(BuildContext context, {ManagedUser? existingUser}) {
++    AppNav.showModal(
++      context,
++      builder: (_) => UserFormModal(existingUser: existingUser),
++    );
++  }
++
++  Future<void> _confirmDeactivate(BuildContext context, WidgetRef ref, ManagedUser user) async {
++    final confirmed = await showDialog<bool>(
++      context: context,
++      builder: (dialogContext) => AlertDialog(
++        title: const Text('Nonaktifkan Akun?'),
++        content: Text('${user.displayName} (${user.username}) tidak akan bisa login lagi. Riwayat aktivitasnya tetap tersimpan.'),
++        actions: [
++          TextButton(onPressed: () => Navigator.of(dialogContext).pop(false), child: const Text('Batal')),
++          TextButton(
++            onPressed: () => Navigator.of(dialogContext).pop(true),
++            child: const Text('Nonaktifkan', style: TextStyle(color: AppColors.danger)),
++          ),
++        ],
++      ),
++    );
++    if (confirmed != true || !context.mounted) return;
++
++    final error = await ref.read(userManagementProvider.notifier).deactivateUser(user.id);
++    if (!context.mounted) return;
++    if (error != null) {
++      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error)));
++    }
++  }
++
++  Future<void> _reactivate(BuildContext context, WidgetRef ref, ManagedUser user) async {
++    final error = await ref.read(userManagementProvider.notifier).reactivateUser(user.id, role: user.role);
++    if (!context.mounted) return;
++    if (error != null) {
++      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error)));
++    }
++  }
++
++  @override
++  Widget build(BuildContext context, WidgetRef ref) {
++    final state = ref.watch(userManagementProvider);
++
++    return Scaffold(
++      backgroundColor: AppColors.background,
++      body: SafeArea(
++        child: Column(
++          children: [
++            IosPageHeader(
++              title: const Text('Kelola Karyawan'),
++              trailingIcon: Icons.add_rounded,
++              onTrailingTap: () => _openForm(context),
++            ),
++            Expanded(
++              child: RefreshIndicator(
++                onRefresh: () => ref.read(userManagementProvider.notifier).load(),
++                child: state.isLoading
++                    ? const Center(child: CircularProgressIndicator())
++                    : state.users.isEmpty
++                        ? ListView(
++                            padding: const EdgeInsets.only(top: 80),
++                            children: const [
++                              AppEmptyState(
++                                icon: Icons.people_alt_outlined,
++                                title: 'Belum ada akun',
++                                subtitle: 'Tambah akun untuk Manager atau Staff',
++                              ),
++                            ],
++                          )
++                        : ListView.separated(
++                            padding: const EdgeInsets.all(AppSpacing.lg),
++                            itemCount: state.users.length,
++                            separatorBuilder: (_, __) => const SizedBox(height: AppSpacing.sm),
++                            itemBuilder: (context, i) {
++                              final user = state.users[i];
++                              return _UserRow(
++                                user: user,
++                                onTap: () => _openForm(context, existingUser: user),
++                                onDeactivate: () => _confirmDeactivate(context, ref, user),
++                                onReactivate: () => _reactivate(context, ref, user),
++                              );
++                            },
++                          ),
++              ),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++class _UserRow extends StatelessWidget {
++  final ManagedUser user;
++  final VoidCallback onTap;
++  final VoidCallback onDeactivate;
++  final VoidCallback onReactivate;
++
++  const _UserRow({
++    required this.user,
++    required this.onTap,
++    required this.onDeactivate,
++    required this.onReactivate,
++  });
++
++  static const _roleColors = {
++    AppRole.owner: AppColors.brand,
++    AppRole.manager: AppColors.info,
++    AppRole.staff: AppColors.textSecondary,
++  };
++
++  @override
++  Widget build(BuildContext context) {
++    return AppCardShell(
++      onTap: onTap,
++      backgroundColor: user.isActive ? null : AppColors.background,
++      child: Row(
++        children: [
++          Expanded(
++            child: Column(
++              crossAxisAlignment: CrossAxisAlignment.start,
++              children: [
++                Row(
++                  children: [
++                    Text(
++                      user.displayName,
++                      style: TextStyle(
++                        fontSize: 15,
++                        fontWeight: FontWeight.w700,
++                        color: user.isActive ? AppColors.textPrimary : AppColors.textMuted,
++                      ),
++                    ),
++                    const SizedBox(width: AppSpacing.sm),
++                    AppStatusBadge(user.roleLabel, _roleColors[user.role]!),
++                    if (!user.isActive) ...[
++                      const SizedBox(width: AppSpacing.xs),
++                      const AppStatusBadge('Nonaktif', AppColors.textMuted),
++                    ],
++                  ],
++                ),
++                const SizedBox(height: 2),
++                Text('@${user.username}', style: const TextStyle(fontSize: 13, color: AppColors.textMuted)),
++              ],
++            ),
++          ),
++          IconButton(
++            icon: Icon(
++              user.isActive ? Icons.person_off_outlined : Icons.person_add_alt_1_outlined,
++              size: 20,
++              color: user.isActive ? AppColors.danger : AppColors.info,
++            ),
++            onPressed: user.isActive ? onDeactivate : onReactivate,
++          ),
++        ],
++      ),
++    );
++  }
++}
+diff --git a/lib/features/user_management/presentation/widgets/user_form_modal.dart b/lib/features/user_management/presentation/widgets/user_form_modal.dart
+new file mode 100644
+index 0000000..cace41e
+--- /dev/null
++++ b/lib/features/user_management/presentation/widgets/user_form_modal.dart
+@@ -0,0 +1,254 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../../../../core/session/app_session.dart';
++import '../../../../core/theme/app_colors.dart';
++import '../../../../core/theme/app_spacing.dart';
++import '../../../../core/widgets/app_button.dart';
++import '../../../../core/widgets/app_sheet_header.dart';
++import '../../../../core/widgets/app_text_field.dart';
++import '../../application/user_management_provider.dart';
++import '../../domain/managed_user.dart';
++
++/// Add/edit form for a login account, shown as a swipe-up modal via
++/// [AppNav.showModal] — same pattern as [AddMenuItemModal] (the
++/// reference list+add-form screen per component-standards-prompt.md).
++///
++/// Pass [existingUser] to edit that account; omit it (or pass null) to
++/// create a new one. Password is REQUIRED when creating, OPTIONAL when
++/// editing (leaving it blank keeps the current password — see
++/// [UserManagementRepository.updateUser]'s doc comment).
++class UserFormModal extends ConsumerStatefulWidget {
++  final ManagedUser? existingUser;
++
++  const UserFormModal({super.key, this.existingUser});
++
++  bool get isEditing => existingUser != null;
++
++  @override
++  ConsumerState<UserFormModal> createState() => _UserFormModalState();
++}
++
++class _UserFormModalState extends ConsumerState<UserFormModal> {
++  late final TextEditingController _usernameController;
++  late final TextEditingController _displayNameController;
++  late final TextEditingController _passwordController;
++  late AppRole _selectedRole;
++  bool _obscurePassword = true;
++  bool _isSaving = false;
++  String? _errorText;
++
++  @override
++  void initState() {
++    super.initState();
++    final existing = widget.existingUser;
++    _usernameController = TextEditingController(text: existing?.username ?? '');
++    _displayNameController = TextEditingController(text: existing?.displayName ?? '');
++    _passwordController = TextEditingController();
++    _selectedRole = existing?.role ?? AppRole.staff;
++  }
++
++  @override
++  void dispose() {
++    _usernameController.dispose();
++    _displayNameController.dispose();
++    _passwordController.dispose();
++    super.dispose();
++  }
++
++  Future<void> _submit() async {
++    final username = _usernameController.text.trim();
++    final displayName = _displayNameController.text.trim();
++    final password = _passwordController.text;
++
++    if (username.isEmpty || displayName.isEmpty) {
++      setState(() => _errorText = 'Username dan nama wajib diisi');
++      return;
++    }
++    if (!widget.isEditing && password.isEmpty) {
++      setState(() => _errorText = 'Password wajib diisi untuk akun baru');
++      return;
++    }
++    if (password.isNotEmpty && password.length < 4) {
++      setState(() => _errorText = 'Password minimal 4 karakter');
++      return;
++    }
++
++    setState(() {
++      _isSaving = true;
++      _errorText = null;
++    });
++
++    final controller = ref.read(userManagementProvider.notifier);
++    final String? error;
++    if (widget.isEditing) {
++      error = await controller.updateUser(
++        userId: widget.existingUser!.id,
++        username: username,
++        displayName: displayName,
++        role: _selectedRole,
++        newPassword: password.isEmpty ? null : password,
++      );
++    } else {
++      error = await controller.createUser(
++        username: username,
++        password: password,
++        displayName: displayName,
++        role: _selectedRole,
++      );
++    }
++
++    if (!mounted) return;
++
++    if (error != null) {
++      setState(() {
++        _isSaving = false;
++        _errorText = error;
++      });
++      return;
++    }
++
++    Navigator.of(context).pop();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    return SafeArea(
++      top: false,
++      child: Container(
++        decoration: const BoxDecoration(
++          color: AppColors.surface,
++          borderRadius: BorderRadius.vertical(top: Radius.circular(32)),
++        ),
++        constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.9),
++        child: Column(
++          mainAxisSize: MainAxisSize.min,
++          children: [
++            AppSheetHeader(title: widget.isEditing ? 'Edit Akun' : 'Tambah Akun'),
++            Flexible(
++              child: SingleChildScrollView(
++                padding: const EdgeInsets.fromLTRB(AppSpacing.xl, 0, AppSpacing.xl, AppSpacing.xl),
++                child: Column(
++                  crossAxisAlignment: CrossAxisAlignment.start,
++                  children: [
++                    AppTextField.form(
++                      controller: _usernameController,
++                      label: 'Username',
++                      hintText: 'contoh: budi',
++                      enabled: !_isSaving,
++                    ),
++                    const SizedBox(height: AppSpacing.md),
++                    AppTextField.form(
++                      controller: _displayNameController,
++                      label: 'Nama Tampilan',
++                      hintText: 'contoh: Budi Santoso',
++                      enabled: !_isSaving,
++                    ),
++                    const SizedBox(height: AppSpacing.md),
++                    Text(
++                      widget.isEditing ? 'Password Baru (kosongkan jika tidak diubah)' : 'Password',
++                      style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: AppColors.textSecondary),
++                    ),
++                    const SizedBox(height: 6),
++                    // AppTextField has no obscureText support (checked
++                    // its source — form/search variants only), so this
++                    // one field uses a plain TextField instead, styled
++                    // to match. Same approach login_screen.dart's
++                    // password field already uses.
++                    TextField(
++                      controller: _passwordController,
++                      obscureText: _obscurePassword,
++                      enabled: !_isSaving,
++                      decoration: InputDecoration(
++                        hintText: widget.isEditing ? 'Biarkan kosong jika tidak ganti' : 'Minimal 4 karakter',
++                        hintStyle: const TextStyle(color: AppColors.textMuted, fontWeight: FontWeight.w500),
++                        filled: true,
++                        fillColor: AppColors.background,
++                        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
++                        border: OutlineInputBorder(
++                          borderRadius: BorderRadius.circular(AppRadius.md),
++                          borderSide: const BorderSide(color: AppColors.border),
++                        ),
++                        enabledBorder: OutlineInputBorder(
++                          borderRadius: BorderRadius.circular(AppRadius.md),
++                          borderSide: const BorderSide(color: AppColors.border),
++                        ),
++                        focusedBorder: OutlineInputBorder(
++                          borderRadius: BorderRadius.circular(AppRadius.md),
++                          borderSide: const BorderSide(color: AppColors.brand, width: 1.5),
++                        ),
++                        suffixIcon: IconButton(
++                          icon: Icon(
++                            _obscurePassword ? Icons.visibility_off_rounded : Icons.visibility_rounded,
++                            size: 20,
++                            color: AppColors.textMuted,
++                          ),
++                          onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
++                        ),
++                      ),
++                    ),
++                    const SizedBox(height: AppSpacing.md),
++                    const Text('Role', style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: AppColors.textSecondary)),
++                    const SizedBox(height: 6),
++                    _RoleSelector(
++                      selected: _selectedRole,
++                      onSelected: _isSaving ? null : (role) => setState(() => _selectedRole = role),
++                    ),
++                    if (_errorText != null) ...[
++                      const SizedBox(height: AppSpacing.md),
++                      Text(_errorText!, style: const TextStyle(fontSize: 13, color: AppColors.danger, fontWeight: FontWeight.w600)),
++                    ],
++                    const SizedBox(height: AppSpacing.xl),
++                    AppButton.primary(
++                      label: widget.isEditing ? 'Simpan Perubahan' : 'Tambah Akun',
++                      onPressed: _isSaving ? null : _submit,
++                      isLoading: _isSaving,
++                    ),
++                  ],
++                ),
++              ),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++class _RoleSelector extends StatelessWidget {
++  final AppRole selected;
++  final ValueChanged<AppRole>? onSelected;
++
++  const _RoleSelector({required this.selected, required this.onSelected});
++
++  static const _roleLabels = {
++    AppRole.owner: 'Owner',
++    AppRole.manager: 'Manager',
++    AppRole.staff: 'Staff',
++  };
++
++  @override
++  Widget build(BuildContext context) {
++    return Wrap(
++      spacing: AppSpacing.sm,
++      runSpacing: AppSpacing.sm,
++      children: AppRole.values.map((role) {
++        final isSelected = role == selected;
++        return ChoiceChip(
++          label: Text(_roleLabels[role]!),
++          selected: isSelected,
++          onSelected: onSelected == null ? null : (_) => onSelected!(role),
++          selectedColor: AppColors.brand,
++          labelStyle: TextStyle(
++            fontSize: 13,
++            fontWeight: FontWeight.w700,
++            color: isSelected ? Colors.white : AppColors.textPrimary,
++          ),
++          backgroundColor: AppColors.background,
++          side: BorderSide(color: isSelected ? AppColors.brand : AppColors.border),
++          showCheckmark: false,
++        );
++      }).toList(),
++    );
++  }
++}

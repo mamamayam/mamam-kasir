@@ -4,7 +4,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/session/app_session_provider.dart';
 import '../../../core/theme/app_colors.dart';
 import '../data/pin_auth_repository.dart';
-import 'pin_auth_controller.dart';
 import 'login_screen.dart';
 import 'pin_login_screen.dart';
 import 'set_pin_screen.dart';
@@ -28,28 +27,39 @@ class _SplashScreenState extends ConsumerState<SplashScreen> {
   }
 
   Future<void> _navigateNext() async {
-    // The 3-day PIN-expiry -> forced password re-login rule
-    // (PinAuthRepository.requiresPasswordReentry) and true auto-lock are
-    // A3's job to wire in here — for this pass, routing is just: no
-    // saved session -> Login (username+password); saved session but no
-    // PIN yet for that user -> Set PIN; saved session + PIN already set
-    // for that user -> PIN lock screen. "Second-device logout"
-    // enforcement (AGENTS.md's "1 user = 1 active device") is Tahap E,
-    // out of scope here per the task brief.
+    // Auto-lock (30 min backgrounded/screen-off) is handled separately
+    // by AppLifecycleGuard, which reacts to resume events directly
+    // rather than routing through here — this method only covers the
+    // cold-start path (app was fully closed/killed, not just
+    // backgrounded). The 3-day PIN-expiry -> forced password re-login
+    // rule applies on cold start too, via requiresPasswordReentry below.
+    // "Second-device logout" enforcement (AGENTS.md's "1 user = 1 active
+    // device") is Tahap E, out of scope here per the task brief.
     final splashDelay = Future.delayed(const Duration(milliseconds: 900));
 
     final sessionController = ref.read(appSessionProvider.notifier);
     await sessionController.restore();
     final session = ref.read(appSessionProvider);
-    final hasPinSet = session.isLoggedIn
-        ? await ref.read(pinAuthRepositoryProvider).hasPinSet(session.userId!)
-        : false;
+
+    bool hasPinSet = false;
+    bool requiresPassword = false;
+    if (session.isLoggedIn) {
+      final pinRepo = ref.read(pinAuthRepositoryProvider);
+      hasPinSet = await pinRepo.hasPinSet(session.userId!);
+      if (hasPinSet) {
+        requiresPassword = await pinRepo.requiresPasswordReentry(session.userId!);
+      }
+    }
 
     await splashDelay;
     if (!mounted) return;
 
     final Widget destination;
-    if (!session.isLoggedIn) {
+    if (!session.isLoggedIn || requiresPassword) {
+      // requiresPassword routes here too even though a session exists —
+      // AGENTS.md's 3-day rule forces a full username+password login,
+      // not just re-showing the PIN screen. The session itself (and the
+      // PIN, once re-entered) is left untouched; only the route changes.
       destination = const LoginScreen();
     } else if (!hasPinSet) {
       destination = const SetPinScreen();

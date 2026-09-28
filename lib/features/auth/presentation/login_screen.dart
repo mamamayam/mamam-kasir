@@ -1,12 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/session/app_lifecycle_guard.dart' show isLockScreenShowing;
 import '../../../core/session/app_session_provider.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_spacing.dart';
 import '../data/auth_repository.dart';
 import '../data/pin_auth_repository.dart';
-import 'pin_auth_controller.dart';
 import 'set_pin_screen.dart';
 import 'pin_login_screen.dart';
 
@@ -35,7 +35,17 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   String? _errorText;
 
   @override
+  void initState() {
+    super.initState();
+    // See app_lifecycle_guard.dart's isLockScreenShowing doc comment —
+    // LoginScreen counts as a lock screen too (the 3-day password-
+    // reentry rule routes here, not just PinLoginScreen).
+    isLockScreenShowing = true;
+  }
+
+  @override
   void dispose() {
+    isLockScreenShowing = false;
     _usernameController.dispose();
     _passwordController.dispose();
     super.dispose();

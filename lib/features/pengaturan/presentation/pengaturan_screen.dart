@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/navigation/app_nav.dart';
+import '../../../core/session/app_session.dart';
 import '../../../core/session/app_session_provider.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_spacing.dart';
@@ -9,6 +10,7 @@ import '../../../core/widgets/ios_page_header.dart';
 import '../../../core/widgets/placeholder_screen.dart';
 import '../../auth/presentation/change_pin_screen.dart';
 import '../../auth/presentation/login_screen.dart';
+import '../../user_management/presentation/user_management_screen.dart';
 import '../application/auto_print_provider.dart';
 
 /// Pengaturan (Settings) screen, ported 1:1 from the approved HTML
@@ -18,8 +20,12 @@ import '../application/auto_print_provider.dart';
 ///
 /// Rows fall into three buckets:
 /// - Real and wired: Cetak Struk Otomatis (SharedPreferences), Keamanan
-///   PIN (Tahap A/A2 — opens [ChangePinScreen]), Keluar Akun (clears the
-///   session via [AppSessionController.logout] and returns to
+///   PIN (Tahap A/A2 — opens [ChangePinScreen]), Kelola Karyawan (new
+///   feature built on top of Tahap A — opens [UserManagementScreen] for
+///   login-account CRUD; Owner-only, so the row is hidden entirely for
+///   Manager/Staff the same way menu_bottom_sheet.dart hides its 9-tile
+///   grid for non-Owner — never shown-but-locked), Keluar Akun (clears
+///   the session via [AppSessionController.logout] and returns to
 ///   [LoginScreen] — previously this only navigated to the PIN screen
 ///   without actually clearing the session, which was harmless back
 ///   when PIN was device-wide but became a real bug once PIN became
@@ -30,15 +36,15 @@ import '../application/auto_print_provider.dart';
 ///   local-first with no cloud sync built — shown as "Tidak aktif"
 ///   rather than inventing a sync state), Printer Bluetooth (no
 ///   Bluetooth library wired up yet — shown as "Tidak tersambung").
-/// - Not yet built, routed to [PlaceholderScreen]: Kelola Karyawan (no
-///   user-management UI exists — out of scope per the Tahap A task
-///   brief), Backup & Restore (no such feature exists).
+/// - Not yet built, routed to [PlaceholderScreen]: Backup & Restore (no
+///   such feature exists).
 class PengaturanScreen extends ConsumerWidget {
   const PengaturanScreen({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final autoPrint = ref.watch(autoPrintReceiptProvider);
+    final isOwner = ref.watch(appSessionProvider.select((s) => s.role)) == AppRole.owner;
 
     return Scaffold(
       backgroundColor: AppColors.background,
@@ -60,19 +66,12 @@ class PengaturanScreen extends ConsumerWidget {
                         label: 'Keamanan PIN',
                         onTap: () => AppNav.push(context, (_) => const ChangePinScreen()),
                       ),
-                      _SettingsRow(
-                        icon: Icons.people_alt_outlined,
-                        label: 'Kelola Karyawan',
-                        onTap: () => AppNav.push(
-                          context,
-                          (_) => const PlaceholderScreen(
-                            title: 'Kelola Karyawan',
-                            icon: Icons.people_alt_outlined,
-                            accentColor: AppColors.tileStaff,
-                            description: 'Manajemen karyawan & role akan segera hadir.',
-                          ),
+                      if (isOwner)
+                        _SettingsRow(
+                          icon: Icons.people_alt_outlined,
+                          label: 'Kelola Karyawan',
+                          onTap: () => AppNav.push(context, (_) => const UserManagementScreen()),
                         ),
-                      ),
                       _SettingsRow(
                         icon: Icons.sync_rounded,
                         label: 'Status Sinkronisasi',

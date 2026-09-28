@@ -1,5 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/permissions/permission_key.dart';
+import '../../../core/permissions/permission_providers.dart';
 import '../../../core/session/app_session.dart';
 import '../../../core/session/app_session_provider.dart';
 import '../domain/dashboard_models.dart';
@@ -66,6 +68,17 @@ final dashboardProvider = StateNotifierProvider.autoDispose<DashboardController,
   ref.listen<AppSession>(appSessionProvider, (previous, next) {
     controller.setUser(_toSessionUser(next));
   }, fireImmediately: true);
+
+  // A4: prefetch (not just watch) the permission the swipe-up menu
+  // needs, right when the dashboard first loads for this session —
+  // by the time the user actually swipes up, currentRolePermissionProvider
+  // is already resolved and cached (it's not .autoDispose — see its
+  // doc comment), so menu_bottom_sheet.dart's canViewOwnerMenu never
+  // has to show its one-frame "still resolving" fallback in practice.
+  // ref.read(...future) here (not ref.watch) is deliberate: this
+  // provider doesn't need to rebuild when the permission resolves,
+  // it just needs to trigger the resolution early.
+  ref.read(currentRolePermissionProvider(PermissionKey.viewOwnerMenu).future);
 
   return controller;
 });
