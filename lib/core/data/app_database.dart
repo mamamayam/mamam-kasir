@@ -111,7 +111,15 @@ class AppDatabase {
   // not this migration has run — this migration exists so an Owner-
   // facing permission-editing screen (not built yet) will have real DB
   // rows to edit, not so behavior changes today.
-  static const _dbVersion = 11;
+  // v12: adds the `audit_logs` table (A5 — see [[mamam-kasir-flutter]]
+  // notes). Append-only by convention at the repository layer
+  // (AuditRepository has no update/delete method at all) — this
+  // migration only CREATEs the table, same additive-only pattern as
+  // v10/v11. Scoped to exactly the 7 event types the task brief listed
+  // (login/logout/PIN wrong/lock/PIN changed/permission changed/
+  // auto-lock) — see AuditEventType's doc comment. Transaction/Dompet
+  // audit trails are Tahap B, not part of this table's job yet.
+  static const _dbVersion = 12;
 
   // TODO(security-foundation): replace with a key generated once and
   // stored via flutter_secure_storage, per AGENTS.md.
@@ -480,6 +488,7 @@ class AppDatabase {
     ''');
 
     await _createAuthTables(db);
+    await _createAuditTable(db);
 
     await _seedDemoData(db);
     await _seedAuthData(db);
@@ -499,8 +508,39 @@ class AppDatabase {
     if (oldVersion < 11) {
       await _seedPermissionsData(db);
     }
+    if (oldVersion < 12) {
+      await _createAuditTable(db);
+    }
     // Future migrations get added here as further `if (oldVersion < N)`
     // blocks, each additive-only like the one above.
+  }
+
+  /// Creates the `audit_logs` table (A5). Called from both _onCreate
+  /// (fresh install) and _onUpgrade (existing device crossing the v12
+  /// boundary), same single-definition reasoning as _createAuthTables.
+  ///
+  /// `actor_user_id` is nullable with a real FK to `users` — nullable
+  /// because some events may not cleanly resolve to a known actor (see
+  /// AuditLogEntry's doc comment), FK because a soft-deleted user's row
+  /// still exists (UserManagementRepository only ever sets
+  /// is_active=0, never hard-deletes), so the reference stays valid
+  /// forever. `event_type` stores AuditEventType.name as free text
+  /// rather than a CHECK constraint or FK, matching how `permissions.
+  /// permission_key` treats PermissionKey — adding a new event type
+  /// later shouldn't need a schema migration just to allow a new
+  /// string value. `metadata` is optional free-form context.
+  Future<void> _createAuditTable(Database db) async {
+    await db.execute('''
+      CREATE TABLE audit_logs (
+        id TEXT PRIMARY KEY,
+        actor_user_id TEXT,
+        event_type TEXT NOT NULL,
+        metadata TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (actor_user_id) REFERENCES users (id)
+      )
+    ''');
+    await db.execute('CREATE INDEX idx_audit_logs_created_at ON audit_logs (created_at DESC)');
   }
 
   /// Creates the users/roles/permissions/user_roles/user_branch_access

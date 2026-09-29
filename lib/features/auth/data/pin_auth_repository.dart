@@ -1,3 +1,5 @@
+import '../../../core/audit/audit_event_type.dart';
+import '../../../core/audit/audit_repository.dart';
 import '../../../core/data/app_database.dart';
 import '../../../core/data/password_hasher.dart';
 import '../../../core/session/app_session.dart';
@@ -52,8 +54,11 @@ enum PinVerifyResult {
 /// completely independent rows, counters, and lock states.
 class PinAuthRepository {
   final AppClock _clock;
+  final AuditRepository _audit;
 
-  PinAuthRepository({AppClock clock = AppClock.system}) : _clock = clock;
+  PinAuthRepository({AppClock clock = AppClock.system, AuditRepository? audit})
+      : _clock = clock,
+        _audit = audit ?? AuditRepository();
 
   static const int maxAttempts = 5;
   static const int pinLength = 4;
@@ -126,6 +131,12 @@ class PinAuthRepository {
       where: 'id = ?',
       whereArgs: [userId],
     );
+
+    // Recorded here (not in changePin) because changePin delegates to
+    // this method — logging here covers BOTH the first-time "buat PIN
+    // baru" flow and later "Ganti PIN" with a single call site, and
+    // can never double-log the same change.
+    await _audit.record(eventType: AuditEventType.pinChanged, actorUserId: userId);
   }
 
   /// Verifies [pin] for [userId], updating the persistent lockout
@@ -174,6 +185,19 @@ class PinAuthRepository {
       where: 'id = ?',
       whereArgs: [userId],
     );
+
+    // Only THIS path is a genuine wrong-PIN attempt by a real user with
+    // a PIN set. The other two `incorrect` returns above (user row not
+    // found, or user has no PIN set yet) and the alreadyLocked return
+    // are deliberately NOT audited as pinIncorrect — see
+    // AuditEventType.pinIncorrect's doc comment. A lock caused by this
+    // attempt is logged as its own event alongside (not instead of)
+    // the wrong-PIN event, since the same attempt is both.
+    await _audit.record(eventType: AuditEventType.pinIncorrect, actorUserId: userId);
+    if (nowLocked) {
+      await _audit.record(eventType: AuditEventType.pinLocked, actorUserId: userId);
+    }
+
     return nowLocked ? PinVerifyResult.justLocked : PinVerifyResult.incorrect;
   }
 

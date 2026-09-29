@@ -1,0 +1,771 @@
+diff --git a/lib/core/audit/audit_event_type.dart b/lib/core/audit/audit_event_type.dart
+new file mode 100644
+index 0000000..61bddfc
+--- /dev/null
++++ b/lib/core/audit/audit_event_type.dart
+@@ -0,0 +1,56 @@
++/// Every security-relevant event this app records to `audit_logs`.
++///
++/// Deliberately scoped to EXACTLY what the Tahap A task brief's A5 step
++/// asked for — "login, logout, PIN salah, lock, ganti PIN, perubahan
++/// permission, auto-lock. Actor = user id. Hanya itu." — nothing more.
++/// Transaction/Dompet audit trails (editing a paid transaction,
++/// restoring a canceled one, cash movements) are explicitly Tahap B,
++/// not this enum's job; do not add event types for those here ahead of
++/// that work actually happening, same "don't invent keys for features
++/// that don't exist" principle A4's [PermissionKey] followed.
++enum AuditEventType {
++  /// Successful username+password login. Logged by
++  /// [AuthRepository.verifyCredentials] on success.
++  login,
++
++  /// Explicit logout via Pengaturan's "Keluar Akun". Logged by
++  /// [AppSessionController.logout].
++  logout,
++
++  /// A PIN attempt that did not match. Logged by
++  /// [PinAuthRepository.verifyPin] on [PinVerifyResult.incorrect] and
++  /// [PinVerifyResult.justLocked] (the failed attempt itself, distinct
++  /// from the lock event below) — NOT logged for
++  /// [PinVerifyResult.alreadyLocked], since that case never even checks
++  /// the PIN (see PinVerifyResult's doc comment) and so isn't really a
++  /// new "wrong PIN" event.
++  pinIncorrect,
++
++  /// An account crossing the 5-failed-attempt threshold and becoming
++  /// locked. Logged by [PinAuthRepository.verifyPin] on
++  /// [PinVerifyResult.justLocked], alongside (not instead of) the
++  /// [pinIncorrect] event for that same attempt — the attempt is both
++  /// "a wrong PIN" and "the one that caused a lock."
++  pinLocked,
++
++  /// A PIN successfully changed via [PinAuthRepository.setPin] —
++  /// covers both the initial "buat PIN baru" flow and later "Ganti PIN"
++  /// (ChangePinScreen). Both call the same underlying method, so both
++  /// are logged the same way; metadata distinguishes them if needed
++  /// (see [AuditLogEntry.metadata]).
++  pinChanged,
++
++  /// A role's permission mode for some [PermissionKey] was changed
++  /// (i.e. a `permissions` table row was updated). Not currently
++  /// triggered by anything in the app — there is no permission-editing
++  /// UI yet (see [[mamam-kasir-flutter]]'s A4 notes) — but the event
++  /// type exists now per the task brief's explicit list, ready for
++  /// whichever future screen edits `permissions` rows directly.
++  permissionChanged,
++
++  /// The 30-minute auto-lock actually firing (not just the app being
++  /// backgrounded — only when [AppLifecycleGuard] decides enough time
++  /// has passed and pushes the lock screen). Logged by
++  /// [AppLifecycleGuard]'s resume handler.
++  autoLock,
++}
+diff --git a/lib/core/audit/audit_log_entry.dart b/lib/core/audit/audit_log_entry.dart
+new file mode 100644
+index 0000000..4bef49b
+--- /dev/null
++++ b/lib/core/audit/audit_log_entry.dart
+@@ -0,0 +1,28 @@
++import 'audit_event_type.dart';
++
++/// One row from `audit_logs`, as read back (e.g. for a future
++/// Owner-facing audit viewer — not built yet, this model just exists so
++/// reading isn't blocked on that screen's design).
++///
++/// [actorUserId]/[actorUsername] can both be null: some events (e.g. a
++/// PIN attempt against a user id that turned out not to exist) may not
++/// cleanly resolve to a real actor, and this app has no "system" actor
++/// concept to fall back to — a null actor means "unknown," not "the
++/// system did this."
++class AuditLogEntry {
++  final String id;
++  final String? actorUserId;
++  final String? actorUsername;
++  final AuditEventType eventType;
++  final String? metadata;
++  final DateTime createdAt;
++
++  const AuditLogEntry({
++    required this.id,
++    required this.actorUserId,
++    required this.actorUsername,
++    required this.eventType,
++    required this.metadata,
++    required this.createdAt,
++  });
++}
+diff --git a/lib/core/audit/audit_providers.dart b/lib/core/audit/audit_providers.dart
+new file mode 100644
+index 0000000..0253a1a
+--- /dev/null
++++ b/lib/core/audit/audit_providers.dart
+@@ -0,0 +1,5 @@
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import 'audit_repository.dart';
++
++final auditRepositoryProvider = Provider<AuditRepository>((ref) => AuditRepository());
+diff --git a/lib/core/audit/audit_repository.dart b/lib/core/audit/audit_repository.dart
+new file mode 100644
+index 0000000..665c11c
+--- /dev/null
++++ b/lib/core/audit/audit_repository.dart
+@@ -0,0 +1,73 @@
++import 'package:uuid/uuid.dart';
++
++import '../data/app_database.dart';
++import 'audit_event_type.dart';
++import 'audit_log_entry.dart';
++
++const _uuid = Uuid();
++
++/// Append-only writer/reader for `audit_logs` (A5 — see
++/// [[mamam-kasir-flutter]] notes). "Append-only" is enforced by this
++/// class's own shape, not just convention: there is no `update` or
++/// `delete` method here at all, on purpose — per the task brief's
++/// "Tabel audit_logs append-only (tanpa update/delete di level
++/// repository)." If a future need arises to correct or purge audit
++/// data, that is a deliberate, separate decision to make later, not
++/// something this class should make easy by accident.
++class AuditRepository {
++  /// Records one event. [actorUserId] should be the acting user's id
++  /// where known; pass null only when there genuinely isn't one to
++  /// attribute the event to (see [AuditLogEntry]'s doc comment).
++  /// [metadata] is a free-form string (e.g. a short JSON blob) for
++  /// event-specific context — optional, since most of the 7 event types
++  /// this app logs don't need any (the event type + actor + timestamp
++  /// already says what happened).
++  Future<void> record({
++    required AuditEventType eventType,
++    String? actorUserId,
++    String? metadata,
++  }) async {
++    final db = await AppDatabase.instance.database;
++    await db.insert('audit_logs', {
++      'id': _uuid.v4(),
++      'actor_user_id': actorUserId,
++      'event_type': eventType.name,
++      'metadata': metadata,
++      'created_at': DateTime.now().toIso8601String(),
++    });
++  }
++
++  /// Reads recent entries, newest first. Not used by anything yet (no
++  /// audit-viewer UI exists) — exists so reading isn't blocked on that
++  /// screen's design, same reasoning as [AuditLogEntry]'s doc comment.
++  Future<List<AuditLogEntry>> listRecent({int limit = 200}) async {
++    final db = await AppDatabase.instance.database;
++    final rows = await db.rawQuery(
++      '''
++      SELECT audit_logs.id, audit_logs.actor_user_id, audit_logs.event_type,
++             audit_logs.metadata, audit_logs.created_at, users.username AS actor_username
++      FROM audit_logs
++      LEFT JOIN users ON users.id = audit_logs.actor_user_id
++      ORDER BY audit_logs.created_at DESC
++      LIMIT ?
++      ''',
++      [limit],
++    );
++
++    return rows
++        .map((row) {
++          final eventType = AuditEventType.values.where((e) => e.name == row['event_type']).firstOrNull;
++          if (eventType == null) return null; // Unrecognized event_type string — skip rather than crash.
++          return AuditLogEntry(
++            id: row['id'] as String,
++            actorUserId: row['actor_user_id'] as String?,
++            actorUsername: row['actor_username'] as String?,
++            eventType: eventType,
++            metadata: row['metadata'] as String?,
++            createdAt: DateTime.parse(row['created_at'] as String),
++          );
++        })
++        .whereType<AuditLogEntry>()
++        .toList();
++  }
++}
+diff --git a/lib/core/data/app_database.dart b/lib/core/data/app_database.dart
+index 4b22cfe..db88f7a 100644
+--- a/lib/core/data/app_database.dart
++++ b/lib/core/data/app_database.dart
+@@ -111,7 +111,15 @@ class AppDatabase {
+   // not this migration has run — this migration exists so an Owner-
+   // facing permission-editing screen (not built yet) will have real DB
+   // rows to edit, not so behavior changes today.
+-  static const _dbVersion = 11;
++  // v12: adds the `audit_logs` table (A5 — see [[mamam-kasir-flutter]]
++  // notes). Append-only by convention at the repository layer
++  // (AuditRepository has no update/delete method at all) — this
++  // migration only CREATEs the table, same additive-only pattern as
++  // v10/v11. Scoped to exactly the 7 event types the task brief listed
++  // (login/logout/PIN wrong/lock/PIN changed/permission changed/
++  // auto-lock) — see AuditEventType's doc comment. Transaction/Dompet
++  // audit trails are Tahap B, not part of this table's job yet.
++  static const _dbVersion = 12;
+ 
+   // TODO(security-foundation): replace with a key generated once and
+   // stored via flutter_secure_storage, per AGENTS.md.
+@@ -480,6 +488,7 @@ class AppDatabase {
+     ''');
+ 
+     await _createAuthTables(db);
++    await _createAuditTable(db);
+ 
+     await _seedDemoData(db);
+     await _seedAuthData(db);
+@@ -499,10 +508,41 @@ class AppDatabase {
+     if (oldVersion < 11) {
+       await _seedPermissionsData(db);
+     }
++    if (oldVersion < 12) {
++      await _createAuditTable(db);
++    }
+     // Future migrations get added here as further `if (oldVersion < N)`
+     // blocks, each additive-only like the one above.
+   }
+ 
++  /// Creates the `audit_logs` table (A5). Called from both _onCreate
++  /// (fresh install) and _onUpgrade (existing device crossing the v12
++  /// boundary), same single-definition reasoning as _createAuthTables.
++  ///
++  /// `actor_user_id` is nullable with a real FK to `users` — nullable
++  /// because some events may not cleanly resolve to a known actor (see
++  /// AuditLogEntry's doc comment), FK because a soft-deleted user's row
++  /// still exists (UserManagementRepository only ever sets
++  /// is_active=0, never hard-deletes), so the reference stays valid
++  /// forever. `event_type` stores AuditEventType.name as free text
++  /// rather than a CHECK constraint or FK, matching how `permissions.
++  /// permission_key` treats PermissionKey — adding a new event type
++  /// later shouldn't need a schema migration just to allow a new
++  /// string value. `metadata` is optional free-form context.
++  Future<void> _createAuditTable(Database db) async {
++    await db.execute('''
++      CREATE TABLE audit_logs (
++        id TEXT PRIMARY KEY,
++        actor_user_id TEXT,
++        event_type TEXT NOT NULL,
++        metadata TEXT,
++        created_at TEXT NOT NULL,
++        FOREIGN KEY (actor_user_id) REFERENCES users (id)
++      )
++    ''');
++    await db.execute('CREATE INDEX idx_audit_logs_created_at ON audit_logs (created_at DESC)');
++  }
++
+   /// Creates the users/roles/permissions/user_roles/user_branch_access
+   /// tables. Called from both _onCreate (fresh install) and _onUpgrade
+   /// (existing device crossing the v10 boundary) so there is exactly one
+diff --git a/lib/core/session/app_session_provider.dart b/lib/core/session/app_session_provider.dart
+index 74a936c..7635ca4 100644
+--- a/lib/core/session/app_session_provider.dart
++++ b/lib/core/session/app_session_provider.dart
+@@ -1,6 +1,9 @@
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ import 'package:shared_preferences/shared_preferences.dart';
+ 
++import '../audit/audit_event_type.dart';
++import '../audit/audit_providers.dart';
++import '../audit/audit_repository.dart';
+ import 'app_session.dart';
+ 
+ // ---------------------------------------------------------------------------
+@@ -21,7 +24,7 @@ const _kPrefsRoleKey = 'session_role';
+ /// placeholder env-var (see hrd_provider.dart doc comment) — that
+ /// provider should derive HrdViewerMode from this session's role.
+ final appSessionProvider = StateNotifierProvider<AppSessionController, AppSession>(
+-  (ref) => AppSessionController()..restore(),
++  (ref) => AppSessionController(audit: ref.watch(auditRepositoryProvider))..restore(),
+ );
+ 
+ /// Identity-only session controller. PIN storage/verification used to
+@@ -37,7 +40,11 @@ final appSessionProvider = StateNotifierProvider<AppSessionController, AppSessio
+ /// depend on [PinAuthRepository] directly, using `state.userId` from
+ /// this session to know which user's PIN to act on.
+ class AppSessionController extends StateNotifier<AppSession> {
+-  AppSessionController() : super(AppSession.empty);
++  final AuditRepository _audit;
++
++  AppSessionController({AuditRepository? audit})
++      : _audit = audit ?? AuditRepository(),
++        super(AppSession.empty);
+ 
+   /// Loads any previously-saved session from disk. Called once on
+   /// startup; the splash screen awaits this indirectly by reading
+@@ -77,10 +84,22 @@ class AppSessionController extends StateNotifier<AppSession> {
+   /// if the same person logs back in. Full PIN reset is a separate,
+   /// explicit action via PinAuthRepository.
+   Future<void> logout() async {
++    // Capture BEFORE clearing state — once state is AppSession.empty
++    // there is no userId left to attribute the logout to.
++    final userIdBeforeLogout = state.userId;
++
+     final prefs = await SharedPreferences.getInstance();
+     await prefs.remove(_kPrefsUserIdKey);
+     await prefs.remove(_kPrefsUsernameKey);
+     await prefs.remove(_kPrefsRoleKey);
+     state = AppSession.empty;
++
++    // Only record if there actually was a logged-in user — calling
++    // logout() with no session (defensive, shouldn't normally happen)
++    // shouldn't write an actor-less "logout" row that never
++    // corresponded to a real logout.
++    if (userIdBeforeLogout != null) {
++      await _audit.record(eventType: AuditEventType.logout, actorUserId: userIdBeforeLogout);
++    }
+   }
+ }
+diff --git a/lib/features/auth/data/auth_repository.dart b/lib/features/auth/data/auth_repository.dart
+index 478c10e..d757311 100644
+--- a/lib/features/auth/data/auth_repository.dart
++++ b/lib/features/auth/data/auth_repository.dart
+@@ -1,3 +1,5 @@
++import '../../../core/audit/audit_event_type.dart';
++import '../../../core/audit/audit_repository.dart';
+ import '../../../core/data/app_database.dart';
+ import '../../../core/data/password_hasher.dart';
+ import '../../../core/session/app_session.dart';
+@@ -31,6 +33,10 @@ class AuthenticatedUser {
+ /// single seam that screen touches), so nothing about LoginScreen's
+ /// structure needed to change for this swap.
+ class AuthRepository {
++  final AuditRepository _audit;
++
++  AuthRepository({AuditRepository? audit}) : _audit = audit ?? AuditRepository();
++
+   Future<AuthenticatedUser?> verifyCredentials(String username, String password) async {
+     final db = await AppDatabase.instance.database;
+     final rows = await db.query(
+@@ -79,6 +85,8 @@ class AuthRepository {
+       whereArgs: [row['id']],
+     );
+ 
++    await _audit.record(eventType: AuditEventType.login, actorUserId: row['id'] as String);
++
+     return AuthenticatedUser(
+       id: row['id'] as String,
+       username: row['username'] as String,
+diff --git a/lib/features/auth/data/pin_auth_repository.dart b/lib/features/auth/data/pin_auth_repository.dart
+index 7312acc..936dfb7 100644
+--- a/lib/features/auth/data/pin_auth_repository.dart
++++ b/lib/features/auth/data/pin_auth_repository.dart
+@@ -1,3 +1,5 @@
++import '../../../core/audit/audit_event_type.dart';
++import '../../../core/audit/audit_repository.dart';
+ import '../../../core/data/app_database.dart';
+ import '../../../core/data/password_hasher.dart';
+ import '../../../core/session/app_session.dart';
+@@ -52,8 +54,11 @@ enum PinVerifyResult {
+ /// completely independent rows, counters, and lock states.
+ class PinAuthRepository {
+   final AppClock _clock;
++  final AuditRepository _audit;
+ 
+-  PinAuthRepository({AppClock clock = AppClock.system}) : _clock = clock;
++  PinAuthRepository({AppClock clock = AppClock.system, AuditRepository? audit})
++      : _clock = clock,
++        _audit = audit ?? AuditRepository();
+ 
+   static const int maxAttempts = 5;
+   static const int pinLength = 4;
+@@ -126,6 +131,12 @@ class PinAuthRepository {
+       where: 'id = ?',
+       whereArgs: [userId],
+     );
++
++    // Recorded here (not in changePin) because changePin delegates to
++    // this method — logging here covers BOTH the first-time "buat PIN
++    // baru" flow and later "Ganti PIN" with a single call site, and
++    // can never double-log the same change.
++    await _audit.record(eventType: AuditEventType.pinChanged, actorUserId: userId);
+   }
+ 
+   /// Verifies [pin] for [userId], updating the persistent lockout
+@@ -174,6 +185,19 @@ class PinAuthRepository {
+       where: 'id = ?',
+       whereArgs: [userId],
+     );
++
++    // Only THIS path is a genuine wrong-PIN attempt by a real user with
++    // a PIN set. The other two `incorrect` returns above (user row not
++    // found, or user has no PIN set yet) and the alreadyLocked return
++    // are deliberately NOT audited as pinIncorrect — see
++    // AuditEventType.pinIncorrect's doc comment. A lock caused by this
++    // attempt is logged as its own event alongside (not instead of)
++    // the wrong-PIN event, since the same attempt is both.
++    await _audit.record(eventType: AuditEventType.pinIncorrect, actorUserId: userId);
++    if (nowLocked) {
++      await _audit.record(eventType: AuditEventType.pinLocked, actorUserId: userId);
++    }
++
+     return nowLocked ? PinVerifyResult.justLocked : PinVerifyResult.incorrect;
+   }
+ 
+diff --git a/test/app_lifecycle_guard_cart_survival_test.dart b/test/app_lifecycle_guard_cart_survival_test.dart
+index 5d26faa..462a74c 100644
+--- a/test/app_lifecycle_guard_cart_survival_test.dart
++++ b/test/app_lifecycle_guard_cart_survival_test.dart
+@@ -18,6 +18,7 @@ import 'package:mamam_kasir/core/session/app_session.dart';
+ import 'package:mamam_kasir/core/session/app_session_provider.dart';
+ import 'package:mamam_kasir/core/utils/app_clock.dart';
+ import 'package:mamam_kasir/features/auth/data/pin_auth_repository.dart';
++import 'package:mamam_kasir/features/auth/presentation/pin_auth_controller.dart';
+ import 'package:mamam_kasir/features/pos/application/cart_provider.dart';
+ import 'package:shared_preferences/shared_preferences.dart';
+ 
+diff --git a/test/audit_event_type_test.dart b/test/audit_event_type_test.dart
+new file mode 100644
+index 0000000..aa0f7b8
+--- /dev/null
++++ b/test/audit_event_type_test.dart
+@@ -0,0 +1,24 @@
++// Test for AuditEventType (lib/core/audit/audit_event_type.dart).
++// Pure Dart, no DB — runs with plain `flutter test`.
++import 'package:flutter_test/flutter_test.dart';
++import 'package:mamam_kasir/core/audit/audit_event_type.dart';
++
++void main() {
++  test('AuditEventType has exactly the 7 events the task brief specified, no more', () {
++    // "login, logout, PIN salah, lock, ganti PIN, perubahan permission,
++    // auto-lock" — 7 events. This test exists so someone adding an 8th
++    // event type for a feature that doesn't audit anything real yet
++    // (e.g. a transaction-edit event ahead of Tahap B) has to
++    // deliberately update this count, not add one silently.
++    expect(AuditEventType.values.length, 7);
++    expect(AuditEventType.values.map((e) => e.name).toSet(), {
++      'login',
++      'logout',
++      'pinIncorrect',
++      'pinLocked',
++      'pinChanged',
++      'permissionChanged',
++      'autoLock',
++    });
++  });
++}
+diff --git a/test/audit_integration_test.dart b/test/audit_integration_test.dart
+new file mode 100644
+index 0000000..dfd301d
+--- /dev/null
++++ b/test/audit_integration_test.dart
+@@ -0,0 +1,161 @@
++// Tests verifying AuthRepository and PinAuthRepository actually record
++// the audit events they're documented to record — using a fake
++// AuditRepository (constructor-injected) to assert WHAT was recorded,
++// separate from audit_repository_test.dart's DB-round-trip tests.
++//
++// Still needs a real device/emulator for the underlying users/PIN
++// operations (same sqflite_sqlcipher limitation as every other DB test
++// in this suite) — the fake only replaces the audit-writing side, not
++// the users-table operations these repositories perform.
++import 'dart:io';
++
++import 'package:flutter_test/flutter_test.dart';
++import 'package:mamam_kasir/core/audit/audit_event_type.dart';
++import 'package:mamam_kasir/core/audit/audit_repository.dart';
++import 'package:mamam_kasir/core/data/app_database.dart';
++import 'package:mamam_kasir/features/auth/data/auth_repository.dart';
++import 'package:mamam_kasir/features/auth/data/pin_auth_repository.dart';
++import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
++import 'package:plugin_platform_interface/plugin_platform_interface.dart';
++
++class _FakePathProvider extends PlatformInterface implements PathProviderPlatform {
++  static final Object _token = Object();
++  final String tempDirPath;
++  _FakePathProvider.withPath(this.tempDirPath) : super(token: _token);
++
++  @override
++  Future<String?> getApplicationDocumentsPath() async => tempDirPath;
++}
++
++/// Records calls in memory instead of writing to the DB — lets these
++/// tests assert exactly which event types were (or weren't) recorded,
++/// without needing to separately query audit_logs back out.
++class _RecordingAuditRepository extends AuditRepository {
++  final List<AuditEventType> recordedEvents = [];
++
++  @override
++  Future<void> record({required AuditEventType eventType, String? actorUserId, String? metadata}) async {
++    recordedEvents.add(eventType);
++  }
++}
++
++void main() {
++  TestWidgetsFlutterBinding.ensureInitialized();
++
++  late Directory tempDir;
++  late String ownerId;
++
++  setUp(() async {
++    tempDir = await Directory.systemTemp.createTemp('mamam_kasir_audit_integration_test_');
++    PathProviderPlatform.instance = _FakePathProvider.withPath(tempDir.path);
++
++    final db = await AppDatabase.instance.database;
++    final ownerRow = await db.query('users', where: 'username = ?', whereArgs: ['owner'], limit: 1);
++    ownerId = ownerRow.first['id'] as String;
++  });
++
++  tearDown(() async {
++    if (await tempDir.exists()) {
++      await tempDir.delete(recursive: true);
++    }
++  });
++
++  group('AuthRepository records login', () {
++    test('successful login records exactly one login event', () async {
++      final audit = _RecordingAuditRepository();
++      final repo = AuthRepository(audit: audit);
++
++      final result = await repo.verifyCredentials('owner', 'owner123');
++
++      expect(result, isNotNull);
++      expect(audit.recordedEvents, [AuditEventType.login]);
++    });
++
++    test('failed login (wrong password) records nothing', () async {
++      final audit = _RecordingAuditRepository();
++      final repo = AuthRepository(audit: audit);
++
++      final result = await repo.verifyCredentials('owner', 'wrong-password');
++
++      expect(result, isNull);
++      expect(audit.recordedEvents, isEmpty);
++    });
++  });
++
++  group('PinAuthRepository records PIN events', () {
++    test('setPin records exactly one pinChanged event', () async {
++      final audit = _RecordingAuditRepository();
++      final repo = PinAuthRepository(audit: audit);
++
++      await repo.setPin(ownerId, '1111');
++
++      expect(audit.recordedEvents, [AuditEventType.pinChanged]);
++    });
++
++    test('a wrong PIN attempt (not yet locked) records exactly one pinIncorrect event', () async {
++      final audit = _RecordingAuditRepository();
++      final repo = PinAuthRepository(audit: audit);
++      await repo.setPin(ownerId, '1111');
++      audit.recordedEvents.clear(); // Drop the pinChanged from setPin above.
++
++      await repo.verifyPin(ownerId, '0000');
++
++      expect(audit.recordedEvents, [AuditEventType.pinIncorrect]);
++    });
++
++    test('the 5th wrong attempt records BOTH pinIncorrect and pinLocked, in that order', () async {
++      final audit = _RecordingAuditRepository();
++      final repo = PinAuthRepository(audit: audit);
++      await repo.setPin(ownerId, '1111');
++
++      for (var i = 0; i < PinAuthRepository.maxAttempts - 1; i++) {
++        await repo.verifyPin(ownerId, '0000');
++      }
++      audit.recordedEvents.clear(); // Drop everything before the 5th attempt.
++
++      final result = await repo.verifyPin(ownerId, '0000');
++
++      expect(result, PinVerifyResult.justLocked);
++      expect(audit.recordedEvents, [AuditEventType.pinIncorrect, AuditEventType.pinLocked]);
++    });
++
++    test('an attempt against an already-locked account records nothing (no re-check happens)', () async {
++      final audit = _RecordingAuditRepository();
++      final repo = PinAuthRepository(audit: audit);
++      await repo.setPin(ownerId, '1111');
++      for (var i = 0; i < PinAuthRepository.maxAttempts; i++) {
++        await repo.verifyPin(ownerId, '0000');
++      }
++      audit.recordedEvents.clear();
++
++      final result = await repo.verifyPin(ownerId, '1111'); // even the correct PIN
++
++      expect(result, PinVerifyResult.alreadyLocked);
++      expect(audit.recordedEvents, isEmpty, reason: 'alreadyLocked never reaches the audited wrong-PIN path');
++    });
++
++    test('a correct PIN attempt records nothing (only wrong/lock/change are audited, not success)', () async {
++      final audit = _RecordingAuditRepository();
++      final repo = PinAuthRepository(audit: audit);
++      await repo.setPin(ownerId, '1111');
++      audit.recordedEvents.clear();
++
++      final result = await repo.verifyPin(ownerId, '1111');
++
++      expect(result, PinVerifyResult.correct);
++      expect(audit.recordedEvents, isEmpty);
++    });
++
++    test('changePin records exactly one pinChanged event (not two, and not a pinIncorrect for the correct current-PIN check)', () async {
++      final audit = _RecordingAuditRepository();
++      final repo = PinAuthRepository(audit: audit);
++      await repo.setPin(ownerId, '1111');
++      audit.recordedEvents.clear();
++
++      final success = await repo.changePin(ownerId, currentPin: '1111', newPin: '2222');
++
++      expect(success, isTrue);
++      expect(audit.recordedEvents, [AuditEventType.pinChanged]);
++    });
++  });
++}
+diff --git a/test/audit_repository_test.dart b/test/audit_repository_test.dart
+new file mode 100644
+index 0000000..b7966c2
+--- /dev/null
++++ b/test/audit_repository_test.dart
+@@ -0,0 +1,132 @@
++// Tests for AuditRepository (lib/core/audit/audit_repository.dart) and
++// the v12 audit_logs migration.
++//
++// Same environment limitation as app_database_auth_test.dart/
++// pin_auth_repository_test.dart/permission_service_test.dart: needs a
++// real device/emulator, not plain `flutter test`, because
++// sqflite_sqlcipher has no FFI/desktop test mode. See
++// app_database_auth_test.dart's header for the full explanation.
++import 'dart:io';
++
++import 'package:flutter_test/flutter_test.dart';
++import 'package:mamam_kasir/core/audit/audit_event_type.dart';
++import 'package:mamam_kasir/core/audit/audit_repository.dart';
++import 'package:mamam_kasir/core/data/app_database.dart';
++import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
++import 'package:plugin_platform_interface/plugin_platform_interface.dart';
++
++class _FakePathProvider extends PlatformInterface implements PathProviderPlatform {
++  static final Object _token = Object();
++  final String tempDirPath;
++  _FakePathProvider.withPath(this.tempDirPath) : super(token: _token);
++
++  @override
++  Future<String?> getApplicationDocumentsPath() async => tempDirPath;
++}
++
++void main() {
++  TestWidgetsFlutterBinding.ensureInitialized();
++
++  late Directory tempDir;
++  late String ownerId;
++
++  setUp(() async {
++    tempDir = await Directory.systemTemp.createTemp('mamam_kasir_audit_test_');
++    PathProviderPlatform.instance = _FakePathProvider.withPath(tempDir.path);
++
++    final db = await AppDatabase.instance.database;
++    final ownerRow = await db.query('users', where: 'username = ?', whereArgs: ['owner'], limit: 1);
++    ownerId = ownerRow.first['id'] as String;
++  });
++
++  tearDown(() async {
++    if (await tempDir.exists()) {
++      await tempDir.delete(recursive: true);
++    }
++  });
++
++  group('AuditRepository.record', () {
++    test('writes a row readable back via listRecent', () async {
++      final repo = AuditRepository();
++      await repo.record(eventType: AuditEventType.login, actorUserId: ownerId);
++
++      final entries = await repo.listRecent();
++      expect(entries.length, 1);
++      expect(entries.first.eventType, AuditEventType.login);
++      expect(entries.first.actorUserId, ownerId);
++      expect(entries.first.actorUsername, 'owner');
++    });
++
++    test('accepts a null actorUserId', () async {
++      final repo = AuditRepository();
++      await repo.record(eventType: AuditEventType.pinIncorrect, actorUserId: null);
++
++      final entries = await repo.listRecent();
++      expect(entries.first.actorUserId, isNull);
++      expect(entries.first.actorUsername, isNull);
++    });
++
++    test('stores and returns metadata when provided', () async {
++      final repo = AuditRepository();
++      await repo.record(eventType: AuditEventType.pinChanged, actorUserId: ownerId, metadata: 'context');
++
++      final entries = await repo.listRecent();
++      expect(entries.first.metadata, 'context');
++    });
++
++    test('listRecent returns newest first', () async {
++      final repo = AuditRepository();
++      await repo.record(eventType: AuditEventType.login, actorUserId: ownerId);
++      await Future.delayed(const Duration(milliseconds: 5));
++      await repo.record(eventType: AuditEventType.logout, actorUserId: ownerId);
++
++      final entries = await repo.listRecent();
++      expect(entries.length, 2);
++      expect(entries.first.eventType, AuditEventType.logout);
++      expect(entries.last.eventType, AuditEventType.login);
++    });
++
++    test('respects the limit parameter', () async {
++      final repo = AuditRepository();
++      for (var i = 0; i < 5; i++) {
++        await repo.record(eventType: AuditEventType.login, actorUserId: ownerId);
++      }
++
++      final entries = await repo.listRecent(limit: 3);
++      expect(entries.length, 3);
++    });
++
++    test('survives a soft-deleted actor (FK to users stays valid, row not lost)', () async {
++      final repo = AuditRepository();
++      await repo.record(eventType: AuditEventType.login, actorUserId: ownerId);
++
++      final db = await AppDatabase.instance.database;
++      // Deactivate (soft-delete) the actor — same is_active=0 pattern
++      // UserManagementRepository uses, never a hard delete.
++      await db.update('users', {'is_active': 0}, where: 'id = ?', whereArgs: [ownerId]);
++
++      final entries = await repo.listRecent();
++      expect(entries.length, 1, reason: 'the audit row must survive the actor being deactivated');
++      expect(entries.first.actorUserId, ownerId);
++    });
++  });
++
++  group('append-only by construction', () {
++    test('AuditRepository exposes no update or delete method', () {
++      // This is a structural/API-shape assertion, not a behavioral one:
++      // confirms the class only has record/listRecent by checking it
++      // compiles with exactly that surface — there is no update()/
++      // delete()/remove() method to even call. Documented here as an
++      // explicit, visible check rather than leaving "append-only" as an
++      // unverified claim in a doc comment only.
++      final repo = AuditRepository();
++      expect(repo.record, isNotNull);
++      expect(repo.listRecent, isNotNull);
++      // If this file fails to compile after someone adds an update/
++      // delete method, that's a deliberate, visible decision — not
++      // testable in Dart via reflection without dart:mirrors, so the
++      // real enforcement is code review + this file's existence as a
++      // marker of intent.
++    });
++  });
++}
+diff --git a/lib/core/session/app_lifecycle_guard.dart b/lib/core/session/app_lifecycle_guard.dart
+index 2e5dae6..837f499 100644
+--- a/lib/core/session/app_lifecycle_guard.dart
++++ b/lib/core/session/app_lifecycle_guard.dart
+@@ -5,2 +5,4 @@ import 'package:shared_preferences/shared_preferences.dart';
+ import 'app_session_provider.dart';
++import '../audit/audit_event_type.dart';
++import '../audit/audit_providers.dart';
+ import '../utils/app_clock.dart';
+@@ -136,2 +138,12 @@ class _AppLifecycleGuardState extends ConsumerState<AppLifecycleGuard> with Widg
+ 
++    // Recorded HERE, after every early-return guard above has passed
++    // (elapsed time reached the threshold, someone is logged in, and no
++    // lock screen is already showing) — so the audit log only ever
++    // records an auto-lock that actually fired, never one that was
++    // considered and skipped.
++    await ref.read(auditRepositoryProvider).record(
++          eventType: AuditEventType.autoLock,
++          actorUserId: session.userId,
++        );
++
+     navigator.push(

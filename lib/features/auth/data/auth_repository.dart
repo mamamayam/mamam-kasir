@@ -1,3 +1,5 @@
+import '../../../core/audit/audit_event_type.dart';
+import '../../../core/audit/audit_repository.dart';
 import '../../../core/data/app_database.dart';
 import '../../../core/data/password_hasher.dart';
 import '../../../core/session/app_session.dart';
@@ -31,6 +33,10 @@ class AuthenticatedUser {
 /// single seam that screen touches), so nothing about LoginScreen's
 /// structure needed to change for this swap.
 class AuthRepository {
+  final AuditRepository _audit;
+
+  AuthRepository({AuditRepository? audit}) : _audit = audit ?? AuditRepository();
+
   Future<AuthenticatedUser?> verifyCredentials(String username, String password) async {
     final db = await AppDatabase.instance.database;
     final rows = await db.query(
@@ -78,6 +84,8 @@ class AuthRepository {
       where: 'id = ?',
       whereArgs: [row['id']],
     );
+
+    await _audit.record(eventType: AuditEventType.login, actorUserId: row['id'] as String);
 
     return AuthenticatedUser(
       id: row['id'] as String,

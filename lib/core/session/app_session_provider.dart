@@ -1,6 +1,9 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../audit/audit_event_type.dart';
+import '../audit/audit_providers.dart';
+import '../audit/audit_repository.dart';
 import 'app_session.dart';
 
 // ---------------------------------------------------------------------------
@@ -21,7 +24,7 @@ const _kPrefsRoleKey = 'session_role';
 /// placeholder env-var (see hrd_provider.dart doc comment) — that
 /// provider should derive HrdViewerMode from this session's role.
 final appSessionProvider = StateNotifierProvider<AppSessionController, AppSession>(
-  (ref) => AppSessionController()..restore(),
+  (ref) => AppSessionController(audit: ref.watch(auditRepositoryProvider))..restore(),
 );
 
 /// Identity-only session controller. PIN storage/verification used to
@@ -37,7 +40,11 @@ final appSessionProvider = StateNotifierProvider<AppSessionController, AppSessio
 /// depend on [PinAuthRepository] directly, using `state.userId` from
 /// this session to know which user's PIN to act on.
 class AppSessionController extends StateNotifier<AppSession> {
-  AppSessionController() : super(AppSession.empty);
+  final AuditRepository _audit;
+
+  AppSessionController({AuditRepository? audit})
+      : _audit = audit ?? AuditRepository(),
+        super(AppSession.empty);
 
   /// Loads any previously-saved session from disk. Called once on
   /// startup; the splash screen awaits this indirectly by reading
@@ -77,10 +84,22 @@ class AppSessionController extends StateNotifier<AppSession> {
   /// if the same person logs back in. Full PIN reset is a separate,
   /// explicit action via PinAuthRepository.
   Future<void> logout() async {
+    // Capture BEFORE clearing state — once state is AppSession.empty
+    // there is no userId left to attribute the logout to.
+    final userIdBeforeLogout = state.userId;
+
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_kPrefsUserIdKey);
     await prefs.remove(_kPrefsUsernameKey);
     await prefs.remove(_kPrefsRoleKey);
     state = AppSession.empty;
+
+    // Only record if there actually was a logged-in user — calling
+    // logout() with no session (defensive, shouldn't normally happen)
+    // shouldn't write an actor-less "logout" row that never
+    // corresponded to a real logout.
+    if (userIdBeforeLogout != null) {
+      await _audit.record(eventType: AuditEventType.logout, actorUserId: userIdBeforeLogout);
+    }
   }
 }

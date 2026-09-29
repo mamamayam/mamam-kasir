@@ -18,6 +18,7 @@ import 'package:mamam_kasir/core/session/app_session.dart';
 import 'package:mamam_kasir/core/session/app_session_provider.dart';
 import 'package:mamam_kasir/core/utils/app_clock.dart';
 import 'package:mamam_kasir/features/auth/data/pin_auth_repository.dart';
+import 'package:mamam_kasir/features/auth/presentation/pin_auth_controller.dart';
 import 'package:mamam_kasir/features/pos/application/cart_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 

@@ -3,8 +3,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app_session_provider.dart';
+import '../audit/audit_event_type.dart';
+import '../audit/audit_providers.dart';
 import '../utils/app_clock.dart';
 import '../../features/auth/data/pin_auth_repository.dart';
+import '../../features/auth/presentation/pin_auth_controller.dart';
 import '../../features/auth/presentation/login_screen.dart';
 import '../../features/auth/presentation/pin_login_screen.dart';
 
@@ -133,6 +136,16 @@ class _AppLifecycleGuardState extends ConsumerState<AppLifecycleGuard> with Widg
     if (isLockScreenShowing) return;
 
     final requiresPassword = await ref.read(pinAuthRepositoryProvider).requiresPasswordReentry(session.userId!);
+
+    // Recorded HERE, after every early-return guard above has passed
+    // (elapsed time reached the threshold, someone is logged in, and no
+    // lock screen is already showing) — so the audit log only ever
+    // records an auto-lock that actually fired, never one that was
+    // considered and skipped.
+    await ref.read(auditRepositoryProvider).record(
+          eventType: AuditEventType.autoLock,
+          actorUserId: session.userId,
+        );
 
     navigator.push(
       MaterialPageRoute(
