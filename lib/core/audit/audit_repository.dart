@@ -1,3 +1,5 @@
+import 'dart:developer' as developer;
+
 import 'package:uuid/uuid.dart';
 
 import '../data/app_database.dart';
@@ -22,7 +24,39 @@ class AuditRepository {
   /// event-specific context — optional, since most of the 7 event types
   /// this app logs don't need any (the event type + actor + timestamp
   /// already says what happened).
+  ///
+  /// NEVER throws. A failed audit write must not block the thing being
+  /// audited (login, PIN entry, logout, auto-lock) — the user decided
+  /// the log is secondary to the action: if writing the log breaks, the
+  /// log problem gets fixed on its own, the login is not held hostage
+  /// to it. Failures are reported to the debug console (developer.log)
+  /// and the event is simply not recorded. This is the ONE place that
+  /// swallows the error, so every caller (AuthRepository,
+  /// PinAuthRepository, AppSessionController, AppLifecycleGuard) is
+  /// covered without each needing its own try/catch.
   Future<void> record({
+    required AuditEventType eventType,
+    String? actorUserId,
+    String? metadata,
+  }) async {
+    try {
+      await insertEntry(eventType: eventType, actorUserId: actorUserId, metadata: metadata);
+    } catch (error, stackTrace) {
+      developer.log(
+        'Gagal menulis audit log (${eventType.name}) — aksi yang dicatat tetap dilanjutkan.',
+        name: 'audit',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  /// The raw database write behind [record]. May throw. Public only so
+  /// a test can override it to simulate a failing write (see
+  /// audit_repository_failure_test.dart) — app code should call
+  /// [record], never this directly, or the never-throws guarantee above
+  /// is bypassed.
+  Future<void> insertEntry({
     required AuditEventType eventType,
     String? actorUserId,
     String? metadata,
@@ -37,9 +71,8 @@ class AuditRepository {
     });
   }
 
-  /// Reads recent entries, newest first. Not used by anything yet (no
-  /// audit-viewer UI exists) — exists so reading isn't blocked on that
-  /// screen's design, same reasoning as [AuditLogEntry]'s doc comment.
+  /// Reads recent entries, newest first. Backs the Owner-only
+  /// "Log Aktivitas" screen (lib/features/audit_log/).
   Future<List<AuditLogEntry>> listRecent({int limit = 200}) async {
     final db = await AppDatabase.instance.database;
     final rows = await db.rawQuery(

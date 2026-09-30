@@ -1,0 +1,418 @@
+diff --git a/lib/core/audit/audit_repository.dart b/lib/core/audit/audit_repository.dart
+index 665c11c..de15beb 100644
+--- a/lib/core/audit/audit_repository.dart
++++ b/lib/core/audit/audit_repository.dart
+@@ -1,3 +1,5 @@
++import 'dart:developer' as developer;
++
+ import 'package:uuid/uuid.dart';
+ 
+ import '../data/app_database.dart';
+@@ -22,10 +24,42 @@ class AuditRepository {
+   /// event-specific context — optional, since most of the 7 event types
+   /// this app logs don't need any (the event type + actor + timestamp
+   /// already says what happened).
++  ///
++  /// NEVER throws. A failed audit write must not block the thing being
++  /// audited (login, PIN entry, logout, auto-lock) — the user decided
++  /// the log is secondary to the action: if writing the log breaks, the
++  /// log problem gets fixed on its own, the login is not held hostage
++  /// to it. Failures are reported to the debug console (developer.log)
++  /// and the event is simply not recorded. This is the ONE place that
++  /// swallows the error, so every caller (AuthRepository,
++  /// PinAuthRepository, AppSessionController, AppLifecycleGuard) is
++  /// covered without each needing its own try/catch.
+   Future<void> record({
+     required AuditEventType eventType,
+     String? actorUserId,
+     String? metadata,
++  }) async {
++    try {
++      await insertEntry(eventType: eventType, actorUserId: actorUserId, metadata: metadata);
++    } catch (error, stackTrace) {
++      developer.log(
++        'Gagal menulis audit log (${eventType.name}) — aksi yang dicatat tetap dilanjutkan.',
++        name: 'audit',
++        error: error,
++        stackTrace: stackTrace,
++      );
++    }
++  }
++
++  /// The raw database write behind [record]. May throw. Public only so
++  /// a test can override it to simulate a failing write (see
++  /// audit_repository_failure_test.dart) — app code should call
++  /// [record], never this directly, or the never-throws guarantee above
++  /// is bypassed.
++  Future<void> insertEntry({
++    required AuditEventType eventType,
++    String? actorUserId,
++    String? metadata,
+   }) async {
+     final db = await AppDatabase.instance.database;
+     await db.insert('audit_logs', {
+@@ -37,9 +71,8 @@ class AuditRepository {
+     });
+   }
+ 
+-  /// Reads recent entries, newest first. Not used by anything yet (no
+-  /// audit-viewer UI exists) — exists so reading isn't blocked on that
+-  /// screen's design, same reasoning as [AuditLogEntry]'s doc comment.
++  /// Reads recent entries, newest first. Backs the Owner-only
++  /// "Log Aktivitas" screen (lib/features/audit_log/).
+   Future<List<AuditLogEntry>> listRecent({int limit = 200}) async {
+     final db = await AppDatabase.instance.database;
+     final rows = await db.rawQuery(
+diff --git a/lib/features/audit_log/application/audit_log_provider.dart b/lib/features/audit_log/application/audit_log_provider.dart
+new file mode 100644
+index 0000000..8c857ef
+--- /dev/null
++++ b/lib/features/audit_log/application/audit_log_provider.dart
+@@ -0,0 +1,15 @@
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../../../core/audit/audit_log_entry.dart';
++import '../../../core/audit/audit_providers.dart';
++
++/// How many entries the "Log Aktivitas" screen loads. Exposed so the
++/// screen can tell the user when the list was cut off at this limit.
++const kAuditLogPageSize = 200;
++
++/// Newest-first audit entries for the Owner-only log screen.
++/// `.autoDispose` so reopening the screen always reads fresh data —
++/// pull-to-refresh on the screen uses `ref.invalidate` on this.
++final auditLogEntriesProvider = FutureProvider.autoDispose<List<AuditLogEntry>>((ref) {
++  return ref.watch(auditRepositoryProvider).listRecent(limit: kAuditLogPageSize);
++});
+diff --git a/lib/features/audit_log/presentation/audit_log_screen.dart b/lib/features/audit_log/presentation/audit_log_screen.dart
+new file mode 100644
+index 0000000..7821ccb
+--- /dev/null
++++ b/lib/features/audit_log/presentation/audit_log_screen.dart
+@@ -0,0 +1,194 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++import 'package:intl/intl.dart';
++
++import '../../../core/audit/audit_event_type.dart';
++import '../../../core/audit/audit_log_entry.dart';
++import '../../../core/session/app_session.dart';
++import '../../../core/session/app_session_provider.dart';
++import '../../../core/theme/app_colors.dart';
++import '../../../core/theme/app_spacing.dart';
++import '../../../core/widgets/app_card_shell.dart';
++import '../../../core/widgets/app_empty_state.dart';
++import '../../../core/widgets/ios_page_header.dart';
++import '../application/audit_log_provider.dart';
++
++/// "Log Aktivitas" — read-only list of the security events recorded to
++/// `audit_logs` (login, logout, wrong PIN, lock, PIN change, auto-lock;
++/// see [AuditEventType]). Owner-only: the Pengaturan row is hidden for
++/// everyone else, AND this screen checks the role itself, so it doesn't
++/// rely on the hidden row alone (an audit trail is more sensitive than
++/// most screens).
++///
++/// Deliberately minimal — newest first, no filters, no search, no
++/// export. Just enough to answer "who did what, when". Add filtering
++/// later only if the plain list turns out to be too much to scan.
++class AuditLogScreen extends ConsumerWidget {
++  const AuditLogScreen({super.key});
++
++  @override
++  Widget build(BuildContext context, WidgetRef ref) {
++    final isOwner = ref.watch(appSessionProvider.select((s) => s.role)) == AppRole.owner;
++
++    return Scaffold(
++      backgroundColor: AppColors.background,
++      body: SafeArea(
++        child: Column(
++          children: [
++            const IosPageHeader(title: Text('Log Aktivitas')),
++            Expanded(
++              child: isOwner
++                  ? const _AuditLogBody()
++                  : const Center(
++                      child: AppEmptyState(
++                        icon: Icons.lock_outline_rounded,
++                        title: 'Hanya untuk Owner',
++                      ),
++                    ),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++class _AuditLogBody extends ConsumerWidget {
++  const _AuditLogBody();
++
++  @override
++  Widget build(BuildContext context, WidgetRef ref) {
++    final entriesAsync = ref.watch(auditLogEntriesProvider);
++
++    return RefreshIndicator(
++      onRefresh: () async {
++        ref.invalidate(auditLogEntriesProvider);
++        await ref.read(auditLogEntriesProvider.future);
++      },
++      child: entriesAsync.when(
++        loading: () => const Center(child: CircularProgressIndicator()),
++        error: (error, _) => ListView(
++          padding: const EdgeInsets.all(AppSpacing.xl),
++          children: [
++            const SizedBox(height: 60),
++            const AppEmptyState(
++              icon: Icons.error_outline_rounded,
++              title: 'Gagal memuat log',
++              subtitle: 'Tarik ke bawah untuk coba lagi',
++            ),
++          ],
++        ),
++        data: (entries) {
++          if (entries.isEmpty) {
++            return ListView(
++              padding: const EdgeInsets.only(top: 80),
++              children: const [
++                AppEmptyState(
++                  icon: Icons.history_rounded,
++                  title: 'Belum ada aktivitas tercatat',
++                  subtitle: 'Login, salah PIN, dan kunci otomatis akan muncul di sini',
++                ),
++              ],
++            );
++          }
++
++          final wasCutOff = entries.length >= kAuditLogPageSize;
++          return ListView.separated(
++            padding: const EdgeInsets.all(AppSpacing.lg),
++            itemCount: entries.length + (wasCutOff ? 1 : 0),
++            separatorBuilder: (_, __) => const SizedBox(height: AppSpacing.sm),
++            itemBuilder: (context, i) {
++              if (i == entries.length) {
++                return const Padding(
++                  padding: EdgeInsets.symmetric(vertical: AppSpacing.md),
++                  child: Text(
++                    'Menampilkan $kAuditLogPageSize catatan terbaru',
++                    textAlign: TextAlign.center,
++                    style: TextStyle(fontSize: 12, color: AppColors.textMuted),
++                  ),
++                );
++              }
++              return _AuditLogRow(entry: entries[i]);
++            },
++          );
++        },
++      ),
++    );
++  }
++}
++
++class _AuditLogRow extends StatelessWidget {
++  final AuditLogEntry entry;
++
++  const _AuditLogRow({required this.entry});
++
++  // Switch expressions with no default: adding a value to
++  // AuditEventType without giving it a label/icon/color here is a
++  // compile error, not a silently-blank row.
++  String get _label => switch (entry.eventType) {
++        AuditEventType.login => 'Login',
++        AuditEventType.logout => 'Logout',
++        AuditEventType.pinIncorrect => 'PIN salah',
++        AuditEventType.pinLocked => 'Akun terkunci',
++        AuditEventType.pinChanged => 'PIN diganti',
++        AuditEventType.permissionChanged => 'Permission diubah',
++        AuditEventType.autoLock => 'Terkunci otomatis',
++      };
++
++  IconData get _icon => switch (entry.eventType) {
++        AuditEventType.login => Icons.login_rounded,
++        AuditEventType.logout => Icons.logout_rounded,
++        AuditEventType.pinIncorrect => Icons.error_outline_rounded,
++        AuditEventType.pinLocked => Icons.lock_rounded,
++        AuditEventType.pinChanged => Icons.pin_rounded,
++        AuditEventType.permissionChanged => Icons.admin_panel_settings_outlined,
++        AuditEventType.autoLock => Icons.timer_outlined,
++      };
++
++  Color get _color => switch (entry.eventType) {
++        AuditEventType.login => AppColors.info,
++        AuditEventType.logout => AppColors.textSecondary,
++        AuditEventType.pinIncorrect => AppColors.danger,
++        AuditEventType.pinLocked => AppColors.danger,
++        AuditEventType.pinChanged => AppColors.brand,
++        AuditEventType.permissionChanged => AppColors.brand,
++        AuditEventType.autoLock => AppColors.textSecondary,
++      };
++
++  @override
++  Widget build(BuildContext context) {
++    final actor = entry.actorUsername != null ? '@${entry.actorUsername}' : 'Tidak diketahui';
++    final time = DateFormat('d MMM yyyy, HH:mm', 'id_ID').format(entry.createdAt);
++
++    return AppCardShell(
++      child: Row(
++        children: [
++          Container(
++            width: 36,
++            height: 36,
++            decoration: BoxDecoration(shape: BoxShape.circle, color: _color.withValues(alpha: 0.12)),
++            child: Icon(_icon, size: 18, color: _color),
++          ),
++          const SizedBox(width: AppSpacing.md),
++          Expanded(
++            child: Column(
++              crossAxisAlignment: CrossAxisAlignment.start,
++              children: [
++                Text(
++                  _label,
++                  style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: AppColors.textPrimary),
++                ),
++                const SizedBox(height: 2),
++                Text('$actor · $time', style: const TextStyle(fontSize: 13, color: AppColors.textMuted)),
++                if (entry.metadata != null) ...[
++                  const SizedBox(height: 2),
++                  Text(entry.metadata!, style: const TextStyle(fontSize: 12, color: AppColors.textMuted)),
++                ],
++              ],
++            ),
++          ),
++        ],
++      ),
++    );
++  }
++}
+diff --git a/lib/features/pengaturan/presentation/pengaturan_screen.dart b/lib/features/pengaturan/presentation/pengaturan_screen.dart
+index c41f5d5..5fd79a0 100644
+--- a/lib/features/pengaturan/presentation/pengaturan_screen.dart
++++ b/lib/features/pengaturan/presentation/pengaturan_screen.dart
+@@ -9,6 +9,7 @@ import '../../../core/theme/app_spacing.dart';
+ import '../../../core/widgets/ios_page_header.dart';
+ import '../../../core/widgets/placeholder_screen.dart';
+ import '../../auth/presentation/change_pin_screen.dart';
++import '../../audit_log/presentation/audit_log_screen.dart';
+ import '../../auth/presentation/login_screen.dart';
+ import '../../user_management/presentation/user_management_screen.dart';
+ import '../application/auto_print_provider.dart';
+@@ -24,7 +25,8 @@ import '../application/auto_print_provider.dart';
+ ///   feature built on top of Tahap A — opens [UserManagementScreen] for
+ ///   login-account CRUD; Owner-only, so the row is hidden entirely for
+ ///   Manager/Staff the same way menu_bottom_sheet.dart hides its 9-tile
+-///   grid for non-Owner — never shown-but-locked), Keluar Akun (clears
++///   grid for non-Owner — never shown-but-locked), Log Aktivitas (Owner-only
++///   read-only list of audit_logs — opens [AuditLogScreen]), Keluar Akun (clears
+ ///   the session via [AppSessionController.logout] and returns to
+ ///   [LoginScreen] — previously this only navigated to the PIN screen
+ ///   without actually clearing the session, which was harmless back
+@@ -66,12 +68,18 @@ class PengaturanScreen extends ConsumerWidget {
+                         label: 'Keamanan PIN',
+                         onTap: () => AppNav.push(context, (_) => const ChangePinScreen()),
+                       ),
+-                      if (isOwner)
++                      if (isOwner) ...[
+                         _SettingsRow(
+                           icon: Icons.people_alt_outlined,
+                           label: 'Kelola Karyawan',
+                           onTap: () => AppNav.push(context, (_) => const UserManagementScreen()),
+                         ),
++                        _SettingsRow(
++                          icon: Icons.history_rounded,
++                          label: 'Log Aktivitas',
++                          onTap: () => AppNav.push(context, (_) => const AuditLogScreen()),
++                        ),
++                      ],
+                       _SettingsRow(
+                         icon: Icons.sync_rounded,
+                         label: 'Status Sinkronisasi',
+diff --git a/test/audit_repository_failure_test.dart b/test/audit_repository_failure_test.dart
+new file mode 100644
+index 0000000..a6d1e2d
+--- /dev/null
++++ b/test/audit_repository_failure_test.dart
+@@ -0,0 +1,69 @@
++// Tests that a failing audit write never blocks the action being audited.
++//
++// Pure Dart, no database: the raw write (insertEntry) is overridden, so
++// this runs with plain `flutter test` — unlike audit_repository_test.dart
++// which round-trips through the real encrypted DB.
++import 'package:flutter_test/flutter_test.dart';
++import 'package:mamam_kasir/core/audit/audit_event_type.dart';
++import 'package:mamam_kasir/core/audit/audit_repository.dart';
++
++class _AlwaysFailingAuditRepository extends AuditRepository {
++  int attempts = 0;
++
++  @override
++  Future<void> insertEntry({
++    required AuditEventType eventType,
++    String? actorUserId,
++    String? metadata,
++  }) async {
++    attempts++;
++    throw StateError('simulated: audit_logs table is broken');
++  }
++}
++
++class _CapturingAuditRepository extends AuditRepository {
++  final List<({AuditEventType type, String? actor, String? metadata})> written = [];
++
++  @override
++  Future<void> insertEntry({
++    required AuditEventType eventType,
++    String? actorUserId,
++    String? metadata,
++  }) async {
++    written.add((type: eventType, actor: actorUserId, metadata: metadata));
++  }
++}
++
++void main() {
++  group('AuditRepository.record never blocks the audited action', () {
++    test('a failing write does not throw out of record()', () async {
++      final repo = _AlwaysFailingAuditRepository();
++
++      // If record() rethrew, this await would fail the test.
++      await repo.record(eventType: AuditEventType.login, actorUserId: 'user-1');
++
++      expect(repo.attempts, 1, reason: 'the write was attempted exactly once, then the failure was swallowed');
++    });
++
++    test('every event type is covered by the same never-throws guarantee', () async {
++      final repo = _AlwaysFailingAuditRepository();
++
++      for (final type in AuditEventType.values) {
++        await repo.record(eventType: type, actorUserId: 'user-1');
++      }
++
++      expect(repo.attempts, AuditEventType.values.length);
++    });
++
++    test('a successful write passes the event, actor and metadata straight through', () async {
++      final repo = _CapturingAuditRepository();
++
++      await repo.record(eventType: AuditEventType.pinChanged, actorUserId: 'user-1', metadata: 'ctx');
++
++      expect(repo.written.length, 1);
++      expect(repo.written.first.type, AuditEventType.pinChanged);
++      expect(repo.written.first.actor, 'user-1');
++      expect(repo.written.first.metadata, 'ctx');
++    });
++  });
++}
+diff --git a/test/audit_repository_test.dart b/test/audit_repository_test.dart
+index b7966c2..08158c0 100644
+--- a/test/audit_repository_test.dart
++++ b/test/audit_repository_test.dart
+@@ -114,7 +114,9 @@ void main() {
+   group('append-only by construction', () {
+     test('AuditRepository exposes no update or delete method', () {
+       // This is a structural/API-shape assertion, not a behavioral one:
+-      // confirms the class only has record/listRecent by checking it
++      // confirms the class has no update()/delete() (its surface is
++      // record/listRecent, plus insertEntry — the raw write behind
++      // record, public only so tests can override it) by checking it
+       // compiles with exactly that surface — there is no update()/
+       // delete()/remove() method to even call. Documented here as an
+       // explicit, visible check rather than leaving "append-only" as an

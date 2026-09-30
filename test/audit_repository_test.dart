@@ -114,7 +114,9 @@ void main() {
   group('append-only by construction', () {
     test('AuditRepository exposes no update or delete method', () {
       // This is a structural/API-shape assertion, not a behavioral one:
-      // confirms the class only has record/listRecent by checking it
+      // confirms the class has no update()/delete() (its surface is
+      // record/listRecent, plus insertEntry — the raw write behind
+      // record, public only so tests can override it) by checking it
       // compiles with exactly that surface — there is no update()/
       // delete()/remove() method to even call. Documented here as an
       // explicit, visible check rather than leaving "append-only" as an
