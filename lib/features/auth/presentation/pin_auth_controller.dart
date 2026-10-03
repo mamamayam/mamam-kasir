@@ -38,19 +38,26 @@ class PinAuthController extends StateNotifier<PinAuthState> {
   }
 
   void addDigit(String digit) {
-    if (state.isLocked) return;
+    // Ignore input while locked, while a check is in flight, or once
+    // already verified — otherwise a 5th tap during the async check
+    // could start a second verification for the same entry.
+    if (state.isLocked || state.isVerifying || state.isVerified) return;
     if (state.enteredDigits.length >= PinAuthState.pinLength) return;
 
     final next = state.enteredDigits + digit;
-    state = state.copyWith(enteredDigits: next, isError: false);
+    final isComplete = next.length == PinAuthState.pinLength;
+    // isVerifying goes true in the SAME state update that fills the 4th
+    // digit, so there is never a moment where "4 digits, no error, not
+    // locked" is visible without also saying "still checking".
+    state = state.copyWith(enteredDigits: next, isError: false, isVerifying: isComplete);
 
-    if (next.length == PinAuthState.pinLength) {
+    if (isComplete) {
       _verify(next);
     }
   }
 
   void backspace() {
-    if (state.isLocked) return;
+    if (state.isLocked || state.isVerifying || state.isVerified) return;
     if (state.enteredDigits.isEmpty) return;
     state = state.copyWith(
       enteredDigits: state.enteredDigits.substring(0, state.enteredDigits.length - 1),
@@ -59,14 +66,30 @@ class PinAuthController extends StateNotifier<PinAuthState> {
   }
 
   Future<void> _verify(String pin) async {
-    final result = await _repository.verifyPin(_userId, pin);
+    final PinVerifyResult result;
+    try {
+      result = await _repository.verifyPin(_userId, pin);
+    } catch (_) {
+      // The check itself failed (e.g. database error). That is NOT a
+      // successful PIN — fail closed: show it as a rejected attempt and
+      // let the user try again. Never fall through to "verified".
+      if (!mounted) return;
+      state = state.copyWith(enteredDigits: '', isError: true, isVerifying: false);
+      return;
+    }
     if (!mounted) return;
 
     switch (result) {
       case PinVerifyResult.correct:
-        state = state.copyWith(isError: false, failedAttempts: 0);
+        // The ONLY place isVerified becomes true.
+        state = state.copyWith(isError: false, isVerifying: false, isVerified: true, failedAttempts: 0);
       case PinVerifyResult.incorrect:
-        state = state.copyWith(enteredDigits: '', isError: true, failedAttempts: state.failedAttempts + 1);
+        state = state.copyWith(
+          enteredDigits: '',
+          isError: true,
+          isVerifying: false,
+          failedAttempts: state.failedAttempts + 1,
+        );
       case PinVerifyResult.justLocked:
       case PinVerifyResult.alreadyLocked:
         // Both end in the same visible state — the PIN screen doesn't
@@ -75,7 +98,7 @@ class PinAuthController extends StateNotifier<PinAuthState> {
         // alreadyLocked: attempts against an already-locked account are
         // rejected without even checking the PIN, so there is nothing
         // more specific to tell the user in that case anyway).
-        state = state.copyWith(enteredDigits: '', isError: true, isLocked: true);
+        state = state.copyWith(enteredDigits: '', isError: true, isVerifying: false, isLocked: true);
     }
   }
 

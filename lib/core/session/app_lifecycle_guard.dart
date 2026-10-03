@@ -6,7 +6,6 @@ import 'app_session_provider.dart';
 import '../audit/audit_event_type.dart';
 import '../audit/audit_providers.dart';
 import '../utils/app_clock.dart';
-import '../../features/auth/data/pin_auth_repository.dart';
 import '../../features/auth/presentation/pin_auth_controller.dart';
 import '../../features/auth/presentation/login_screen.dart';
 import '../../features/auth/presentation/pin_login_screen.dart';

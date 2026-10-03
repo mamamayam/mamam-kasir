@@ -59,6 +59,15 @@ class _PinLoginScreenState extends ConsumerState<PinLoginScreen> {
     );
   }
 
+  /// "Lupa PIN?" — password login that ends in a brand-new PIN instead
+  /// of asking for the old one (see LoginScreen.resetPinAfterLogin).
+  void _goToForgotPin() {
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const LoginScreen(resetPinAfterLogin: true)),
+      (route) => false,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final userId = ref.watch(appSessionProvider.select((s) => s.userId));
@@ -101,7 +110,11 @@ class _PinLoginScreenState extends ConsumerState<PinLoginScreen> {
           return const Scaffold(backgroundColor: AppColors.background, body: SizedBox.shrink());
         }
 
-        return _PinEntryView(identity: identity, onLoginOtherAccount: _goToLogin);
+        return _PinEntryView(
+          identity: identity,
+          onLoginOtherAccount: _goToLogin,
+          onForgotPin: _goToForgotPin,
+        );
       },
     );
   }
@@ -110,26 +123,24 @@ class _PinLoginScreenState extends ConsumerState<PinLoginScreen> {
 class _PinEntryView extends ConsumerWidget {
   final PinUserIdentity identity;
   final VoidCallback onLoginOtherAccount;
+  final VoidCallback onForgotPin;
 
-  const _PinEntryView({required this.identity, required this.onLoginOtherAccount});
+  const _PinEntryView({
+    required this.identity,
+    required this.onLoginOtherAccount,
+    required this.onForgotPin,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    // Listen (not just watch) for the exact moment PIN verification
-    // succeeds — addDigit's underlying _verify is now async (checks the
-    // real stored PIN via PinAuthRepository.verifyPin), so we can no
-    // longer just read state synchronously right after calling addDigit
-    // like the old shell-demo version did; that would race the async
-    // check and never see the success. A successful verify leaves
-    // enteredDigits at full length with no error/lock (only a failed
-    // verify clears enteredDigits back to '') — that combination is
-    // unambiguous, so we only navigate on the transition into it to
-    // avoid re-navigating on every rebuild.
+    // Navigate ONLY when the controller says the PIN was explicitly
+    // verified correct (isVerified). Do NOT infer success from the entered
+    // digits: "4 digits, no error, not locked" is also exactly the state
+    // for the instant between typing the 4th digit and the async check
+    // answering, which used to make ANY 4 digits look like a correct PIN.
     ref.listen<PinAuthState>(pinAuthControllerProvider(identity.userId), (previous, next) {
-      final succeeded = next.enteredDigits.length == PinAuthState.pinLength && !next.isError && !next.isLocked;
-      final justSucceeded = succeeded && previous?.enteredDigits != next.enteredDigits;
-
-      if (justSucceeded) {
+      final justVerified = next.isVerified && !(previous?.isVerified ?? false);
+      if (justVerified) {
         Navigator.of(context).pushReplacement(
           MaterialPageRoute(builder: (_) => const DashboardScreen()),
         );
@@ -163,7 +174,7 @@ class _PinEntryView extends ConsumerWidget {
               const SizedBox(height: 20),
               Text(
                 isLocked
-                    ? 'Akun terkunci — terlalu banyak percobaan salah. Login ulang dengan username dan password untuk membuka.'
+                    ? 'Akun terkunci — terlalu banyak percobaan salah. Ketuk "Lupa PIN?" untuk login dengan password dan membuat PIN baru.'
                     : state.isError
                         ? 'PIN salah, coba lagi'
                         : 'Masukkan 4 digit PIN kamu',
@@ -178,17 +189,31 @@ class _PinEntryView extends ConsumerWidget {
               AppPinDots(length: PinAuthState.pinLength, filledCount: state.enteredDigits.length, isError: state.isError),
               const Spacer(flex: 2),
               AppPinKeypad(
-                disabled: isLocked,
+                // Also off while the check is running / after success, so
+                // extra taps can't start a second verification.
+                disabled: isLocked || state.isVerifying || state.isVerified,
                 onDigit: (d) => ref.read(pinAuthControllerProvider(identity.userId).notifier).addDigit(d),
                 onBackspace: () => ref.read(pinAuthControllerProvider(identity.userId).notifier).backspace(),
               ),
               const SizedBox(height: 12),
-              TextButton(
-                onPressed: onLoginOtherAccount,
-                child: const Text(
-                  'Bukan kamu? Ganti akun',
-                  style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.w600, fontSize: 13),
-                ),
+              Wrap(
+                alignment: WrapAlignment.center,
+                children: [
+                  TextButton(
+                    onPressed: onForgotPin,
+                    child: const Text(
+                      'Lupa PIN?',
+                      style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.w600, fontSize: 13),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: onLoginOtherAccount,
+                    child: const Text(
+                      'Bukan kamu? Ganti akun',
+                      style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.w600, fontSize: 13),
+                    ),
+                  ),
+                ],
               ),
               const SizedBox(height: 16),
             ],

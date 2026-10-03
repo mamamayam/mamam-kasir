@@ -37,15 +37,31 @@ class AppSession {
   final String? username;
   final AppRole? role;
 
-  const AppSession({this.userId, this.username, this.role});
+  /// The branch this session is operating in (`branches.id`), or null if
+  /// the user currently has no accessible branch. Resolved by
+  /// AppSessionController at login/restore from [BranchAccessRepository]
+  /// — Owner: any active branch; Manager/Staff: only branches granted in
+  /// `user_branch_access`.
+  ///
+  /// Deliberately NOT part of [isLoggedIn]: an account with no branch
+  /// can still sign in (it just has nowhere to operate yet). What
+  /// operational writes should do with a null branch is a Tahap B
+  /// decision — do not assume non-null in code that needs one.
+  final String? branchId;
+
+  const AppSession({this.userId, this.username, this.role, this.branchId});
 
   bool get isLoggedIn => userId != null && username != null && role != null;
 
-  AppSession copyWith({String? userId, String? username, AppRole? role}) {
+  /// Note: passing null for a field keeps the current value (`??`), so
+  /// this cannot CLEAR [branchId]; to drop it, construct a new
+  /// [AppSession] directly (that is what the controller does).
+  AppSession copyWith({String? userId, String? username, AppRole? role, String? branchId}) {
     return AppSession(
       userId: userId ?? this.userId,
       username: username ?? this.username,
       role: role ?? this.role,
+      branchId: branchId ?? this.branchId,
     );
   }
 

@@ -18,10 +18,9 @@ import 'package:mamam_kasir/features/auth/data/pin_auth_repository.dart';
 import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 
-class _FakePathProvider extends PlatformInterface implements PathProviderPlatform {
-  static final Object _token = Object();
+class _FakePathProvider extends PathProviderPlatform with MockPlatformInterfaceMixin {
   final String tempDirPath;
-  _FakePathProvider.withPath(this.tempDirPath) : super(token: _token);
+  _FakePathProvider.withPath(this.tempDirPath);
 
   @override
   Future<String?> getApplicationDocumentsPath() async => tempDirPath;

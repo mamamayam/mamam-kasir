@@ -1,0 +1,725 @@
+diff --git a/lib/features/auth/domain/pin_auth_state.dart b/lib/features/auth/domain/pin_auth_state.dart
+index b05c755..c666cfb 100644
+--- a/lib/features/auth/domain/pin_auth_state.dart
++++ b/lib/features/auth/domain/pin_auth_state.dart
+@@ -8,11 +8,28 @@ class PinAuthState {
+   final bool isLocked;
+   final int failedAttempts;
+ 
++  /// True from the moment the last digit is entered until the PIN check
++  /// (an async DB lookup) has answered. The keypad must stay disabled
++  /// while this is true.
++  final bool isVerifying;
++
++  /// True ONLY after the PIN check has explicitly answered "correct".
++  /// This is the one and only signal the PIN screen may navigate on.
++  ///
++  /// It exists because success used to be INFERRED from "4 digits
++  /// entered, no error, not locked" — but that exact state also occurs
++  /// for the instant between typing the 4th digit and the check
++  /// answering, so every PIN looked like a success and any random 4
++  /// digits logged in. Never derive success from enteredDigits again.
++  final bool isVerified;
++
+   const PinAuthState({
+     this.enteredDigits = '',
+     this.isError = false,
+     this.isLocked = false,
+     this.failedAttempts = 0,
++    this.isVerifying = false,
++    this.isVerified = false,
+   });
+ 
+   static const int maxAttempts = 5;
+@@ -23,12 +40,16 @@ class PinAuthState {
+     bool? isError,
+     bool? isLocked,
+     int? failedAttempts,
++    bool? isVerifying,
++    bool? isVerified,
+   }) {
+     return PinAuthState(
+       enteredDigits: enteredDigits ?? this.enteredDigits,
+       isError: isError ?? this.isError,
+       isLocked: isLocked ?? this.isLocked,
+       failedAttempts: failedAttempts ?? this.failedAttempts,
++      isVerifying: isVerifying ?? this.isVerifying,
++      isVerified: isVerified ?? this.isVerified,
+     );
+   }
+ }
+diff --git a/lib/features/auth/presentation/change_pin_screen.dart b/lib/features/auth/presentation/change_pin_screen.dart
+index 80e85ce..8d8d919 100644
+--- a/lib/features/auth/presentation/change_pin_screen.dart
++++ b/lib/features/auth/presentation/change_pin_screen.dart
+@@ -5,6 +5,7 @@ import '../../../core/session/app_session_provider.dart';
+ import '../../../core/theme/app_colors.dart';
+ import '../../../core/widgets/app_pin_keypad.dart';
+ import '../data/pin_auth_repository.dart';
++import 'login_screen.dart';
+ import 'pin_auth_controller.dart';
+ import '../domain/pin_auth_state.dart';
+ 
+@@ -16,6 +17,13 @@ enum _ChangePinStage { currentPin, newPin, confirmNewPin }
+ /// out at any point, before or after — per AGENTS.md's "PIN change
+ /// requires no logout" and per [PinAuthRepository.changePin], which
+ /// this screen is a thin UI wrapper around.
++///
++/// If the account is PIN-locked (5 wrong attempts — possibly from
++/// earlier attempts elsewhere), EVERY PIN is rejected, even the right
++/// one, because a locked account skips the PIN check entirely. This
++/// screen therefore checks the lock state up front and says so, and
++/// offers "Lupa PIN saat ini?" (password login → brand-new PIN) instead
++/// of leaving the user guessing against a wall with no explanation.
+ class ChangePinScreen extends ConsumerStatefulWidget {
+   const ChangePinScreen({super.key});
+ 
+@@ -28,16 +36,33 @@ class _ChangePinScreenState extends ConsumerState<ChangePinScreen> {
+   String _currentPinEntry = '';
+   String _newPinFirstEntry = '';
+   String _currentDigits = '';
+-  bool _isError = false;
++  String? _errorText;
+   bool _isSaving = false;
++  bool _isLocked = false;
++
++  @override
++  void initState() {
++    super.initState();
++    _loadLockState();
++  }
++
++  /// Show a locked account as locked from the moment the screen opens,
++  /// rather than only after the user has typed a PIN and been rejected.
++  Future<void> _loadLockState() async {
++    final userId = ref.read(appSessionProvider).userId;
++    if (userId == null) return;
++    final identity = await ref.read(pinAuthRepositoryProvider).loadIdentity(userId);
++    if (!mounted || identity == null) return;
++    if (identity.isLocked) setState(() => _isLocked = true);
++  }
+ 
+   void _handleDigit(String digit) {
+-    if (_isSaving) return;
++    if (_isSaving || _isLocked) return;
+     if (_currentDigits.length >= PinAuthState.pinLength) return;
+ 
+     setState(() {
+       _currentDigits += digit;
+-      _isError = false;
++      _errorText = null;
+     });
+ 
+     if (_currentDigits.length == PinAuthState.pinLength) {
+@@ -46,10 +71,10 @@ class _ChangePinScreenState extends ConsumerState<ChangePinScreen> {
+   }
+ 
+   void _handleBackspace() {
+-    if (_isSaving || _currentDigits.isEmpty) return;
++    if (_isSaving || _isLocked || _currentDigits.isEmpty) return;
+     setState(() {
+       _currentDigits = _currentDigits.substring(0, _currentDigits.length - 1);
+-      _isError = false;
++      _errorText = null;
+     });
+   }
+ 
+@@ -76,13 +101,25 @@ class _ChangePinScreenState extends ConsumerState<ChangePinScreen> {
+     final result = await ref.read(pinAuthRepositoryProvider).verifyPin(userId, _currentDigits);
+     if (!mounted) return;
+ 
+-    if (result != PinVerifyResult.correct) {
+-      setState(() {
+-        _isSaving = false;
+-        _isError = true;
+-        _currentDigits = '';
+-      });
+-      return;
++    switch (result) {
++      case PinVerifyResult.correct:
++        break;
++      case PinVerifyResult.incorrect:
++        setState(() {
++          _isSaving = false;
++          _errorText = 'PIN saat ini salah, coba lagi';
++          _currentDigits = '';
++        });
++        return;
++      case PinVerifyResult.justLocked:
++      case PinVerifyResult.alreadyLocked:
++        setState(() {
++          _isSaving = false;
++          _isLocked = true;
++          _errorText = null;
++          _currentDigits = '';
++        });
++        return;
+     }
+ 
+     setState(() {
+@@ -96,7 +133,7 @@ class _ChangePinScreenState extends ConsumerState<ChangePinScreen> {
+   Future<void> _confirmAndSave() async {
+     if (_currentDigits != _newPinFirstEntry) {
+       setState(() {
+-        _isError = true;
++        _errorText = 'PIN baru tidak cocok, ulangi';
+         _currentDigits = '';
+         _newPinFirstEntry = '';
+         _stage = _ChangePinStage.newPin;
+@@ -123,7 +160,7 @@ class _ChangePinScreenState extends ConsumerState<ChangePinScreen> {
+       // silently proceeding.
+       setState(() {
+         _isSaving = false;
+-        _isError = true;
++        _errorText = 'Gagal mengganti PIN, ulangi dari awal';
+         _currentDigits = '';
+         _currentPinEntry = '';
+         _newPinFirstEntry = '';
+@@ -139,6 +176,29 @@ class _ChangePinScreenState extends ConsumerState<ChangePinScreen> {
+     );
+   }
+ 
++  /// "Lupa PIN saat ini?" — leaves this screen for a password login that
++  /// ends in a NEW PIN (LoginScreen.resetPinAfterLogin). Confirmed first,
++  /// since it takes the user out of the app flow they're in.
++  Future<void> _forgotPin() async {
++    final confirmed = await showDialog<bool>(
++      context: context,
++      builder: (dialogContext) => AlertDialog(
++        title: const Text('Lupa PIN?'),
++        content: const Text('Kamu akan login ulang dengan username dan password, lalu membuat PIN baru.'),
++        actions: [
++          TextButton(onPressed: () => Navigator.of(dialogContext).pop(false), child: const Text('Batal')),
++          TextButton(onPressed: () => Navigator.of(dialogContext).pop(true), child: const Text('Lanjut')),
++        ],
++      ),
++    );
++    if (confirmed != true || !mounted) return;
++
++    Navigator.of(context).pushAndRemoveUntil(
++      MaterialPageRoute(builder: (_) => const LoginScreen(resetPinAfterLogin: true)),
++      (route) => false,
++    );
++  }
++
+   @override
+   Widget build(BuildContext context) {
+     final (title, subtitle) = switch (_stage) {
+@@ -172,19 +232,38 @@ class _ChangePinScreenState extends ConsumerState<ChangePinScreen> {
+               Text(title, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
+               const SizedBox(height: 6),
+               Text(
+-                _isError ? 'PIN salah atau tidak cocok, coba lagi' : subtitle,
++                _isLocked
++                    ? 'Akun terkunci — terlalu banyak percobaan salah. Ketuk "Lupa PIN saat ini?" untuk login dengan password dan membuat PIN baru.'
++                    : (_errorText ?? subtitle),
+                 textAlign: TextAlign.center,
+                 style: TextStyle(
+                   fontSize: 13,
+                   fontWeight: FontWeight.w500,
+-                  color: _isError ? AppColors.danger : AppColors.textSecondary,
++                  color: (_isLocked || _errorText != null) ? AppColors.danger : AppColors.textSecondary,
+                 ),
+               ),
+               const SizedBox(height: 28),
+-              AppPinDots(length: PinAuthState.pinLength, filledCount: _currentDigits.length, isError: _isError),
++              AppPinDots(
++                length: PinAuthState.pinLength,
++                filledCount: _currentDigits.length,
++                isError: _isLocked || _errorText != null,
++              ),
+               const Spacer(flex: 2),
+-              AppPinKeypad(disabled: _isSaving, onDigit: _handleDigit, onBackspace: _handleBackspace),
+-              const SizedBox(height: 28),
++              AppPinKeypad(disabled: _isSaving || _isLocked, onDigit: _handleDigit, onBackspace: _handleBackspace),
++              // Only relevant while the CURRENT PIN is what's being asked
++              // for (or the account is locked) — once past that step the
++              // user has proven they know it.
++              if (_stage == _ChangePinStage.currentPin || _isLocked)
++                TextButton(
++                  onPressed: _isSaving ? null : _forgotPin,
++                  child: const Text(
++                    'Lupa PIN saat ini?',
++                    style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.w600, fontSize: 13),
++                  ),
++                )
++              else
++                const SizedBox(height: 48),
++              const SizedBox(height: 12),
+             ],
+           ),
+         ),
+diff --git a/lib/features/auth/presentation/login_screen.dart b/lib/features/auth/presentation/login_screen.dart
+index 37dacb4..514e35c 100644
+--- a/lib/features/auth/presentation/login_screen.dart
++++ b/lib/features/auth/presentation/login_screen.dart
+@@ -21,7 +21,16 @@ import 'pin_login_screen.dart';
+ /// [AuthRepository.verifyCredentials] does internally, not this
+ /// screen's structure.
+ class LoginScreen extends ConsumerStatefulWidget {
+-  const LoginScreen({super.key});
++  /// True when reached via "Lupa PIN?": after the password checks out,
++  /// go straight to [SetPinScreen] to create a NEW PIN instead of asking
++  /// for the old one (which the user, by definition, doesn't remember —
++  /// or which is locked). A successful password login already clears any
++  /// PIN lockout (see AuthRepository.verifyCredentials); SetPinScreen's
++  /// save then replaces the PIN hash and stamps last_pin_at, so the
++  /// 3-day rule starts fresh too.
++  final bool resetPinAfterLogin;
++
++  const LoginScreen({super.key, this.resetPinAfterLogin = false});
+ 
+   @override
+   ConsumerState<LoginScreen> createState() => _LoginScreenState();
+@@ -92,9 +101,11 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
+ 
+     setState(() => _isSubmitting = false);
+ 
++    final needsNewPin = widget.resetPinAfterLogin || !hasPinAlready;
++
+     Navigator.of(context).pushAndRemoveUntil(
+       MaterialPageRoute(
+-        builder: (_) => hasPinAlready ? const PinLoginScreen() : const SetPinScreen(),
++        builder: (_) => needsNewPin ? const SetPinScreen() : const PinLoginScreen(),
+       ),
+       (route) => false,
+     );
+@@ -148,10 +159,12 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
+                 style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
+               ),
+               const SizedBox(height: 6),
+-              const Text(
+-                'Masukkan username dan password akun kamu',
++              Text(
++                widget.resetPinAfterLogin
++                    ? 'Login dengan password untuk membuat PIN baru'
++                    : 'Masukkan username dan password akun kamu',
+                 textAlign: TextAlign.center,
+-                style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
++                style: const TextStyle(fontSize: 13, color: AppColors.textSecondary),
+               ),
+               const SizedBox(height: 32),
+               const Text('Username', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+diff --git a/lib/features/auth/presentation/pin_auth_controller.dart b/lib/features/auth/presentation/pin_auth_controller.dart
+index 67eb11c..a0dc6ad 100644
+--- a/lib/features/auth/presentation/pin_auth_controller.dart
++++ b/lib/features/auth/presentation/pin_auth_controller.dart
+@@ -38,19 +38,26 @@ class PinAuthController extends StateNotifier<PinAuthState> {
+   }
+ 
+   void addDigit(String digit) {
+-    if (state.isLocked) return;
++    // Ignore input while locked, while a check is in flight, or once
++    // already verified — otherwise a 5th tap during the async check
++    // could start a second verification for the same entry.
++    if (state.isLocked || state.isVerifying || state.isVerified) return;
+     if (state.enteredDigits.length >= PinAuthState.pinLength) return;
+ 
+     final next = state.enteredDigits + digit;
+-    state = state.copyWith(enteredDigits: next, isError: false);
++    final isComplete = next.length == PinAuthState.pinLength;
++    // isVerifying goes true in the SAME state update that fills the 4th
++    // digit, so there is never a moment where "4 digits, no error, not
++    // locked" is visible without also saying "still checking".
++    state = state.copyWith(enteredDigits: next, isError: false, isVerifying: isComplete);
+ 
+-    if (next.length == PinAuthState.pinLength) {
++    if (isComplete) {
+       _verify(next);
+     }
+   }
+ 
+   void backspace() {
+-    if (state.isLocked) return;
++    if (state.isLocked || state.isVerifying || state.isVerified) return;
+     if (state.enteredDigits.isEmpty) return;
+     state = state.copyWith(
+       enteredDigits: state.enteredDigits.substring(0, state.enteredDigits.length - 1),
+@@ -59,14 +66,30 @@ class PinAuthController extends StateNotifier<PinAuthState> {
+   }
+ 
+   Future<void> _verify(String pin) async {
+-    final result = await _repository.verifyPin(_userId, pin);
++    final PinVerifyResult result;
++    try {
++      result = await _repository.verifyPin(_userId, pin);
++    } catch (_) {
++      // The check itself failed (e.g. database error). That is NOT a
++      // successful PIN — fail closed: show it as a rejected attempt and
++      // let the user try again. Never fall through to "verified".
++      if (!mounted) return;
++      state = state.copyWith(enteredDigits: '', isError: true, isVerifying: false);
++      return;
++    }
+     if (!mounted) return;
+ 
+     switch (result) {
+       case PinVerifyResult.correct:
+-        state = state.copyWith(isError: false, failedAttempts: 0);
++        // The ONLY place isVerified becomes true.
++        state = state.copyWith(isError: false, isVerifying: false, isVerified: true, failedAttempts: 0);
+       case PinVerifyResult.incorrect:
+-        state = state.copyWith(enteredDigits: '', isError: true, failedAttempts: state.failedAttempts + 1);
++        state = state.copyWith(
++          enteredDigits: '',
++          isError: true,
++          isVerifying: false,
++          failedAttempts: state.failedAttempts + 1,
++        );
+       case PinVerifyResult.justLocked:
+       case PinVerifyResult.alreadyLocked:
+         // Both end in the same visible state — the PIN screen doesn't
+@@ -75,7 +98,7 @@ class PinAuthController extends StateNotifier<PinAuthState> {
+         // alreadyLocked: attempts against an already-locked account are
+         // rejected without even checking the PIN, so there is nothing
+         // more specific to tell the user in that case anyway).
+-        state = state.copyWith(enteredDigits: '', isError: true, isLocked: true);
++        state = state.copyWith(enteredDigits: '', isError: true, isVerifying: false, isLocked: true);
+     }
+   }
+ 
+diff --git a/lib/features/auth/presentation/pin_login_screen.dart b/lib/features/auth/presentation/pin_login_screen.dart
+index 6bed0e1..1260054 100644
+--- a/lib/features/auth/presentation/pin_login_screen.dart
++++ b/lib/features/auth/presentation/pin_login_screen.dart
+@@ -59,6 +59,15 @@ class _PinLoginScreenState extends ConsumerState<PinLoginScreen> {
+     );
+   }
+ 
++  /// "Lupa PIN?" — password login that ends in a brand-new PIN instead
++  /// of asking for the old one (see LoginScreen.resetPinAfterLogin).
++  void _goToForgotPin() {
++    Navigator.of(context).pushAndRemoveUntil(
++      MaterialPageRoute(builder: (_) => const LoginScreen(resetPinAfterLogin: true)),
++      (route) => false,
++    );
++  }
++
+   @override
+   Widget build(BuildContext context) {
+     final userId = ref.watch(appSessionProvider.select((s) => s.userId));
+@@ -101,7 +110,11 @@ class _PinLoginScreenState extends ConsumerState<PinLoginScreen> {
+           return const Scaffold(backgroundColor: AppColors.background, body: SizedBox.shrink());
+         }
+ 
+-        return _PinEntryView(identity: identity, onLoginOtherAccount: _goToLogin);
++        return _PinEntryView(
++          identity: identity,
++          onLoginOtherAccount: _goToLogin,
++          onForgotPin: _goToForgotPin,
++        );
+       },
+     );
+   }
+@@ -110,26 +123,24 @@ class _PinLoginScreenState extends ConsumerState<PinLoginScreen> {
+ class _PinEntryView extends ConsumerWidget {
+   final PinUserIdentity identity;
+   final VoidCallback onLoginOtherAccount;
++  final VoidCallback onForgotPin;
+ 
+-  const _PinEntryView({required this.identity, required this.onLoginOtherAccount});
++  const _PinEntryView({
++    required this.identity,
++    required this.onLoginOtherAccount,
++    required this.onForgotPin,
++  });
+ 
+   @override
+   Widget build(BuildContext context, WidgetRef ref) {
+-    // Listen (not just watch) for the exact moment PIN verification
+-    // succeeds — addDigit's underlying _verify is now async (checks the
+-    // real stored PIN via PinAuthRepository.verifyPin), so we can no
+-    // longer just read state synchronously right after calling addDigit
+-    // like the old shell-demo version did; that would race the async
+-    // check and never see the success. A successful verify leaves
+-    // enteredDigits at full length with no error/lock (only a failed
+-    // verify clears enteredDigits back to '') — that combination is
+-    // unambiguous, so we only navigate on the transition into it to
+-    // avoid re-navigating on every rebuild.
++    // Navigate ONLY when the controller says the PIN was explicitly
++    // verified correct (isVerified). Do NOT infer success from the entered
++    // digits: "4 digits, no error, not locked" is also exactly the state
++    // for the instant between typing the 4th digit and the async check
++    // answering, which used to make ANY 4 digits look like a correct PIN.
+     ref.listen<PinAuthState>(pinAuthControllerProvider(identity.userId), (previous, next) {
+-      final succeeded = next.enteredDigits.length == PinAuthState.pinLength && !next.isError && !next.isLocked;
+-      final justSucceeded = succeeded && previous?.enteredDigits != next.enteredDigits;
+-
+-      if (justSucceeded) {
++      final justVerified = next.isVerified && !(previous?.isVerified ?? false);
++      if (justVerified) {
+         Navigator.of(context).pushReplacement(
+           MaterialPageRoute(builder: (_) => const DashboardScreen()),
+         );
+@@ -163,7 +174,7 @@ class _PinEntryView extends ConsumerWidget {
+               const SizedBox(height: 20),
+               Text(
+                 isLocked
+-                    ? 'Akun terkunci — terlalu banyak percobaan salah. Login ulang dengan username dan password untuk membuka.'
++                    ? 'Akun terkunci — terlalu banyak percobaan salah. Ketuk "Lupa PIN?" untuk login dengan password dan membuat PIN baru.'
+                     : state.isError
+                         ? 'PIN salah, coba lagi'
+                         : 'Masukkan 4 digit PIN kamu',
+@@ -178,17 +189,31 @@ class _PinEntryView extends ConsumerWidget {
+               AppPinDots(length: PinAuthState.pinLength, filledCount: state.enteredDigits.length, isError: state.isError),
+               const Spacer(flex: 2),
+               AppPinKeypad(
+-                disabled: isLocked,
++                // Also off while the check is running / after success, so
++                // extra taps can't start a second verification.
++                disabled: isLocked || state.isVerifying || state.isVerified,
+                 onDigit: (d) => ref.read(pinAuthControllerProvider(identity.userId).notifier).addDigit(d),
+                 onBackspace: () => ref.read(pinAuthControllerProvider(identity.userId).notifier).backspace(),
+               ),
+               const SizedBox(height: 12),
+-              TextButton(
+-                onPressed: onLoginOtherAccount,
+-                child: const Text(
+-                  'Bukan kamu? Ganti akun',
+-                  style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.w600, fontSize: 13),
+-                ),
++              Wrap(
++                alignment: WrapAlignment.center,
++                children: [
++                  TextButton(
++                    onPressed: onForgotPin,
++                    child: const Text(
++                      'Lupa PIN?',
++                      style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.w600, fontSize: 13),
++                    ),
++                  ),
++                  TextButton(
++                    onPressed: onLoginOtherAccount,
++                    child: const Text(
++                      'Bukan kamu? Ganti akun',
++                      style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.w600, fontSize: 13),
++                    ),
++                  ),
++                ],
+               ),
+               const SizedBox(height: 16),
+             ],
+diff --git a/test/pin_auth_controller_test.dart b/test/pin_auth_controller_test.dart
+new file mode 100644
+index 0000000..28ce934
+--- /dev/null
++++ b/test/pin_auth_controller_test.dart
+@@ -0,0 +1,218 @@
++// Regression tests for PinAuthController (the PIN screen's state).
++//
++// The bug these guard against: the PIN screen used to treat "4 digits
++// entered, no error, not locked" as SUCCESS — but that is also exactly
++// the state for the instant between typing the 4th digit and the async
++// PIN check answering. So ANY 4 digits looked correct and logged in,
++// while the real check (and its wrong-attempt counting) ran unseen in
++// the background.
++//
++// Pure Dart: the repository is faked, so there is no database, and this
++// runs with plain `flutter test`.
++import 'dart:async';
++
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:mamam_kasir/core/session/app_session.dart';
++import 'package:mamam_kasir/features/auth/data/pin_auth_repository.dart';
++import 'package:mamam_kasir/features/auth/domain/pin_auth_state.dart';
++import 'package:mamam_kasir/features/auth/domain/pin_user_identity.dart';
++import 'package:mamam_kasir/features/auth/presentation/pin_auth_controller.dart';
++
++/// Mimics the real repository's contract: correct PIN -> correct; wrong
++/// PIN -> incorrect, and the 5th wrong one locks (justLocked), after
++/// which everything — even the right PIN — is alreadyLocked.
++class _FakePinAuthRepository extends PinAuthRepository {
++  _FakePinAuthRepository({this.correctPin = '1234', this.startsLocked = false});
++
++  final String correctPin;
++  final bool startsLocked;
++
++  int verifyCalls = 0;
++  int _wrongCount = 0;
++  bool _locked = false;
++
++  /// When set, verifyPin waits on this before answering — lets a test
++  /// look at the state DURING the check.
++  Completer<void>? gate;
++  bool throwOnVerify = false;
++
++  @override
++  Future<PinUserIdentity?> loadIdentity(String userId) async {
++    return PinUserIdentity(userId: userId, displayName: 'Test', role: AppRole.staff, isLocked: startsLocked);
++  }
++
++  @override
++  Future<PinVerifyResult> verifyPin(String userId, String pin) async {
++    verifyCalls++;
++    if (gate != null) await gate!.future;
++    if (throwOnVerify) throw StateError('simulated database failure');
++    if (startsLocked || _locked) return PinVerifyResult.alreadyLocked;
++    if (pin == correctPin) {
++      _wrongCount = 0;
++      return PinVerifyResult.correct;
++    }
++    _wrongCount++;
++    if (_wrongCount >= PinAuthRepository.maxAttempts) {
++      _locked = true;
++      return PinVerifyResult.justLocked;
++    }
++    return PinVerifyResult.incorrect;
++  }
++}
++
++const _userId = 'user-1';
++
++({ProviderContainer container, PinAuthController controller}) _setUp(_FakePinAuthRepository fake) {
++  final container = ProviderContainer(overrides: [pinAuthRepositoryProvider.overrideWithValue(fake)]);
++  addTearDown(container.dispose);
++  // autoDispose provider: hold a listener so it isn't disposed mid-test.
++  container.listen(pinAuthControllerProvider(_userId), (_, __) {});
++  return (container: container, controller: container.read(pinAuthControllerProvider(_userId).notifier));
++}
++
++PinAuthState _state(ProviderContainer c) => c.read(pinAuthControllerProvider(_userId));
++
++void _enter(PinAuthController controller, String digits) {
++  for (final d in digits.split('')) {
++    controller.addDigit(d);
++  }
++}
++
++void main() {
++  group('a PIN is never "verified" before the check answers', () {
++    test('right after the 4th digit: verifying, NOT verified (this was the bug)', () async {
++      final fake = _FakePinAuthRepository()..gate = Completer<void>();
++      final t = _setUp(fake);
++      await pumpEventQueue();
++
++      _enter(t.controller, '9999'); // a wrong PIN, check still pending
++
++      expect(_state(t.container).enteredDigits.length, PinAuthState.pinLength);
++      expect(_state(t.container).isVerifying, isTrue);
++      expect(_state(t.container).isVerified, isFalse, reason: 'must not look like success while the check is still running');
++
++      fake.gate!.complete();
++      await pumpEventQueue();
++
++      expect(_state(t.container).isVerified, isFalse, reason: 'a wrong PIN must never end up verified');
++      expect(_state(t.container).isError, isTrue);
++      expect(_state(t.container).isVerifying, isFalse);
++      expect(_state(t.container).enteredDigits, isEmpty, reason: 'digits are cleared after a wrong PIN');
++    });
++
++    test('the correct PIN becomes verified only once the check has said so', () async {
++      final fake = _FakePinAuthRepository()..gate = Completer<void>();
++      final t = _setUp(fake);
++      await pumpEventQueue();
++
++      _enter(t.controller, '1234');
++      expect(_state(t.container).isVerified, isFalse);
++
++      fake.gate!.complete();
++      await pumpEventQueue();
++
++      expect(_state(t.container).isVerified, isTrue);
++      expect(_state(t.container).isVerifying, isFalse);
++      expect(_state(t.container).isError, isFalse);
++    });
++
++    test('a batch of random wrong PINs: none of them ever verifies', () async {
++      final fake = _FakePinAuthRepository();
++      final t = _setUp(fake);
++      await pumpEventQueue();
++
++      // 4 attempts stays under the 5-attempt lock, so this isolates
++      // "wrong PIN never verifies" from the lock behaviour below.
++      for (final wrong in ['0000', '1111', '4321', '5678']) {
++        _enter(t.controller, wrong);
++        await pumpEventQueue();
++        expect(_state(t.container).isVerified, isFalse, reason: '$wrong must not verify');
++        expect(_state(t.container).isError, isTrue);
++      }
++    });
++  });
++
++  group('input handling', () {
++    test('extra taps while a check is running are ignored (no second verification)', () async {
++      final fake = _FakePinAuthRepository()..gate = Completer<void>();
++      final t = _setUp(fake);
++      await pumpEventQueue();
++
++      _enter(t.controller, '9999');
++      t.controller.addDigit('1'); // tapped while verifying
++      t.controller.addDigit('2');
++      t.controller.backspace();
++
++      expect(_state(t.container).enteredDigits, '9999');
++      expect(fake.verifyCalls, 1);
++
++      fake.gate!.complete();
++      await pumpEventQueue();
++    });
++
++    test('after a wrong PIN the user can simply try again', () async {
++      final fake = _FakePinAuthRepository();
++      final t = _setUp(fake);
++      await pumpEventQueue();
++
++      _enter(t.controller, '0000');
++      await pumpEventQueue();
++      expect(_state(t.container).isVerified, isFalse);
++
++      _enter(t.controller, '1234');
++      await pumpEventQueue();
++      expect(_state(t.container).isVerified, isTrue);
++    });
++  });
++
++  group('lockout', () {
++    test('the 5th wrong PIN locks; after that even the right PIN cannot get in', () async {
++      final fake = _FakePinAuthRepository();
++      final t = _setUp(fake);
++      await pumpEventQueue();
++
++      for (var i = 0; i < PinAuthState.maxAttempts; i++) {
++        _enter(t.controller, '0000');
++        await pumpEventQueue();
++      }
++
++      expect(_state(t.container).isLocked, isTrue);
++      expect(_state(t.container).isVerified, isFalse);
++
++      final callsBefore = fake.verifyCalls;
++      _enter(t.controller, '1234'); // the CORRECT PIN, but locked
++      await pumpEventQueue();
++
++      expect(_state(t.container).isVerified, isFalse);
++      expect(fake.verifyCalls, callsBefore, reason: 'a locked keypad does not even start a check');
++    });
++
++    test('an account that was already locked when the screen opened shows as locked', () async {
++      final fake = _FakePinAuthRepository(startsLocked: true);
++      final t = _setUp(fake);
++      await pumpEventQueue();
++
++      expect(_state(t.container).isLocked, isTrue);
++
++      _enter(t.controller, '1234');
++      await pumpEventQueue();
++      expect(_state(t.container).isVerified, isFalse);
++    });
++  });
++
++  group('failures fail closed', () {
++    test('if the PIN check itself errors, the attempt is rejected — never treated as success', () async {
++      final fake = _FakePinAuthRepository()..throwOnVerify = true;
++      final t = _setUp(fake);
++      await pumpEventQueue();
++
++      _enter(t.controller, '1234');
++      await pumpEventQueue();
++
++      expect(_state(t.container).isVerified, isFalse);
++      expect(_state(t.container).isError, isTrue);
++      expect(_state(t.container).isVerifying, isFalse, reason: 'the keypad must not stay stuck disabled');
++    });
++  });
++}
