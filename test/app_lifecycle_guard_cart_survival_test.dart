@@ -16,6 +16,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:mamam_kasir/core/session/app_lifecycle_guard.dart';
 import 'package:mamam_kasir/core/session/app_session.dart';
 import 'package:mamam_kasir/core/session/app_session_provider.dart';
+import 'package:mamam_kasir/core/session/branch_access_repository.dart';
 import 'package:mamam_kasir/core/utils/app_clock.dart';
 import 'package:mamam_kasir/features/auth/data/pin_auth_repository.dart';
 import 'package:mamam_kasir/features/auth/presentation/pin_auth_controller.dart';
@@ -30,6 +31,16 @@ import 'package:shared_preferences/shared_preferences.dart';
 class _FakeNoDbPinAuthRepository extends PinAuthRepository {
   @override
   Future<bool> requiresPasswordReentry(String userId) async => false;
+}
+
+/// login() now resolves the user's active branch from the database.
+/// This test deliberately has no database, so hand it a fixed answer —
+/// what's being tested here is cart survival, not branch lookup (that is
+/// covered by app_session_controller_branch_test.dart).
+class _FakeNoDbBranchAccessRepository extends BranchAccessRepository {
+  @override
+  Future<List<AccessibleBranch>> accessibleBranches({required String userId, required AppRole role}) async =>
+      const [AccessibleBranch(id: 'branch-test', name: 'Cabang Test')];
 }
 
 void main() {
@@ -49,6 +60,7 @@ void main() {
       ProviderScope(
         overrides: [
           pinAuthRepositoryProvider.overrideWithValue(_FakeNoDbPinAuthRepository()),
+          branchAccessRepositoryProvider.overrideWithValue(_FakeNoDbBranchAccessRepository()),
         ],
         child: AppLifecycleGuard(
           navigatorKey: navigatorKey,

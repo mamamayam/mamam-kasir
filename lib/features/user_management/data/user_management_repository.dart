@@ -1,6 +1,8 @@
+import 'package:sqflite_sqlcipher/sqflite.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../../core/data/app_database.dart';
+import '../../../core/data/branch_defaults.dart';
 import '../../../core/data/password_hasher.dart';
 import '../../../core/session/app_session.dart';
 import '../domain/managed_user.dart';
@@ -153,7 +155,39 @@ class UserManagementRepository {
       'created_at': now,
     });
 
+    // A non-Owner account with no branch access can't operate anywhere
+    // (see BranchAccessRepository's fail-closed rule), so a new one gets
+    // the default branch right away. Choosing a specific branch per
+    // account is a future feature — there is no branch field on the form.
+    if (role != AppRole.owner) {
+      await _ensureBranchAccess(db, userId, now);
+    }
+
     return userId;
+  }
+
+  /// Gives [userId] access to the default branch, but ONLY if they have
+  /// no branch access at all yet — never overrides or adds to a
+  /// hand-assigned set of branches.
+  Future<void> _ensureBranchAccess(Database db, String userId, String now) async {
+    final existing = await db.query(
+      'user_branch_access',
+      columns: ['id'],
+      where: 'user_id = ?',
+      whereArgs: [userId],
+      limit: 1,
+    );
+    if (existing.isNotEmpty) return;
+
+    final branchId = await pickDefaultBranchId(db);
+    if (branchId == null) return;
+
+    await db.insert('user_branch_access', {
+      'id': _uuid.v4(),
+      'user_id': userId,
+      'branch_id': branchId,
+      'created_at': now,
+    });
   }
 
   /// Updates an existing account's username/displayName/role, and
@@ -207,6 +241,13 @@ class UserManagementRepository {
       'role_id': roleRow.first['id'],
       'created_at': now,
     });
+
+    // Covers the case where an account gains a branch-scoped role it
+    // didn't have before (e.g. the Owner being changed to Manager): it
+    // would otherwise have no branch rows at all.
+    if (role != AppRole.owner) {
+      await _ensureBranchAccess(db, userId, now);
+    }
   }
 
   /// Soft-deletes (deactivates) an account — see this class's doc

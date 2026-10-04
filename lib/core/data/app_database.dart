@@ -7,6 +7,7 @@ import '../permissions/permission_defaults.dart';
 import '../permissions/permission_key.dart';
 import '../permissions/permission_mode.dart';
 import '../session/app_session.dart';
+import 'branch_defaults.dart';
 import 'password_hasher.dart';
 
 /// App-wide encrypted local database.
@@ -119,7 +120,16 @@ class AppDatabase {
   // (login/logout/PIN wrong/lock/PIN changed/permission changed/
   // auto-lock) — see AuditEventType's doc comment. Transaction/Dompet
   // audit trails are Tahap B, not part of this table's job yet.
-  static const _dbVersion = 12;
+  // v13: seeds `user_branch_access` (the table has existed since v10 but
+  // was never populated). Gives every existing non-Owner account access
+  // to the default branch (see pickDefaultBranchId) so the session can
+  // resolve an active branch for them — without this, "no rows = no
+  // branches" (BranchAccessRepository's fail-closed rule) would leave
+  // the already-seeded Manager/Staff accounts with nowhere to operate.
+  // Owner gets no rows by design (Owner is unrestricted). Additive-only
+  // and idempotent: only accounts that have NO access rows yet are
+  // touched, nothing is deleted or rewritten.
+  static const _dbVersion = 13;
 
   // TODO(security-foundation): replace with a key generated once and
   // stored via flutter_secure_storage, per AGENTS.md.
@@ -493,6 +503,7 @@ class AppDatabase {
     await _seedDemoData(db);
     await _seedAuthData(db);
     await _seedPermissionsData(db);
+    await _seedBranchAccessData(db);
   }
 
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
@@ -510,6 +521,9 @@ class AppDatabase {
     }
     if (oldVersion < 12) {
       await _createAuditTable(db);
+    }
+    if (oldVersion < 13) {
+      await _seedBranchAccessData(db);
     }
     // Future migrations get added here as further `if (oldVersion < N)`
     // blocks, each additive-only like the one above.
@@ -766,6 +780,40 @@ class AppDatabase {
           'updated_at': now,
         });
       }
+    }
+  }
+
+  /// Grants every non-Owner account that has no branch access yet access
+  /// to the default branch (v13 — see _dbVersion's doc comment). Called
+  /// from both _onCreate (fresh install: the seeded Manager/Staff) and
+  /// _onUpgrade (existing devices crossing v13). Idempotent: accounts
+  /// that already have any `user_branch_access` row are left alone, so
+  /// running it twice — or after an Owner has hand-assigned branches —
+  /// never adds or changes anything unexpected.
+  Future<void> _seedBranchAccessData(Database db) async {
+    final branchId = await pickDefaultBranchId(db);
+    if (branchId == null) return; // No branches at all — nothing to grant.
+
+    final accountsWithoutAccess = await db.rawQuery('''
+      SELECT users.id AS id
+      FROM users
+      JOIN user_roles ON user_roles.user_id = users.id
+      JOIN roles ON roles.id = user_roles.role_id
+      WHERE roles.name != 'owner'
+        AND NOT EXISTS (
+          SELECT 1 FROM user_branch_access WHERE user_branch_access.user_id = users.id
+        )
+    ''');
+
+    final now = DateTime.now().toIso8601String();
+    const uuid = Uuid();
+    for (final row in accountsWithoutAccess) {
+      await db.insert('user_branch_access', {
+        'id': uuid.v4(),
+        'user_id': row['id'],
+        'branch_id': branchId,
+        'created_at': now,
+      });
     }
   }
 
