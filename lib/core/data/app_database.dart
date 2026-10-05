@@ -4,10 +4,8 @@ import 'package:sqflite_sqlcipher/sqflite.dart';
 import 'package:uuid/uuid.dart';
 
 import '../permissions/permission_defaults.dart';
-import '../permissions/permission_key.dart';
-import '../permissions/permission_mode.dart';
-import '../session/app_session.dart';
 import 'branch_defaults.dart';
+import 'branch_scope_migration.dart';
 import 'password_hasher.dart';
 
 /// App-wide encrypted local database.
@@ -75,7 +73,8 @@ class AppDatabase {
   // cash_movements / menu prices. Branch-scoped data is specified in the
   // PRD but wiring it retroactively changes how every existing report
   // and balance is computed — that belongs in its own phase, not in a
-  // change that adds a management screen.
+  // change that adds a management screen. (Superseded: v14 below is that
+  // phase.)
   // v10: added users/roles/permissions/user_roles/user_branch_access —
   // Tahap A (auth/permission foundation), per docs/handoff/04_DATABASE_
   // CONTRACT.md's logical model. THIS IS THE FIRST REAL MIGRATION in
@@ -129,7 +128,17 @@ class AppDatabase {
   // Owner gets no rows by design (Owner is unrestricted). Additive-only
   // and idempotent: only accounts that have NO access rows yet are
   // touched, nothing is deleted or rewritten.
-  static const _dbVersion = 13;
+  // v14: Tahap B / B2 — `branch_id` (FK -> branches) on transactions,
+  // cash_expenses, cash_movements, dompet_closings, cash_locations and
+  // stock_opname_sessions, plus `created_by` (FK -> users) on
+  // transactions, which never had one. Every pre-v14 row is attributed
+  // to 'branch-cibarusah' (the only branch that ever existed);
+  // pre-existing `created_by` values stay NULL. Additive-only,
+  // idempotent and atomic — see BranchScopeMigration. NOT touched on
+  // purpose: kasbon/kasbon_repayments (out of Tahap B scope), global
+  // masters (menu, customers, ingredients, vouchers), menu_branch_prices
+  // (deferred). `PRAGMA foreign_keys` stays off, as before.
+  static const _dbVersion = 14;
 
   // TODO(security-foundation): replace with a key generated once and
   // stored via flutter_secure_storage, per AGENTS.md.
@@ -279,7 +288,11 @@ class AppDatabase {
         created_at TEXT NOT NULL,
         paid_at TEXT,
         canceled_at TEXT,
-        cancel_reason TEXT
+        cancel_reason TEXT,
+        created_by TEXT, -- users.id of the cashier who created it (v14); NULL on pre-v14 rows
+        branch_id TEXT, -- branches.id the sale belongs to (v14)
+        FOREIGN KEY (created_by) REFERENCES users (id),
+        FOREIGN KEY (branch_id) REFERENCES branches (id)
       )
     ''');
 
@@ -314,7 +327,9 @@ class AppDatabase {
         staff_id TEXT, -- NULL until the Staff module exists; reserved for backfill
         is_active INTEGER NOT NULL DEFAULT 1,
         created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
+        updated_at TEXT NOT NULL,
+        branch_id TEXT, -- branches.id the cash location belongs to (v14)
+        FOREIGN KEY (branch_id) REFERENCES branches (id)
       )
     ''');
 
@@ -336,9 +351,11 @@ class AppDatabase {
         reason TEXT,
         created_at TEXT NOT NULL,
         created_by TEXT, -- NULL until Auth exists; reserved for the acting user's id/name
+        branch_id TEXT, -- branches.id the movement belongs to (v14)
         FOREIGN KEY (from_location_id) REFERENCES cash_locations (id),
         FOREIGN KEY (to_location_id) REFERENCES cash_locations (id),
-        FOREIGN KEY (reference_transaction_id) REFERENCES transactions (id)
+        FOREIGN KEY (reference_transaction_id) REFERENCES transactions (id),
+        FOREIGN KEY (branch_id) REFERENCES branches (id)
       )
     ''');
 
@@ -399,7 +416,9 @@ class AppDatabase {
         status TEXT NOT NULL, -- 'closed' | 'overdue_closing'
         note TEXT,
         created_at TEXT NOT NULL,
-        created_by TEXT
+        created_by TEXT,
+        branch_id TEXT, -- branches.id the closing belongs to (v14)
+        FOREIGN KEY (branch_id) REFERENCES branches (id)
       )
     ''');
 
@@ -423,8 +442,10 @@ class AppDatabase {
         cash_movement_id TEXT, -- NULL for non_cash rows
         created_at TEXT NOT NULL,
         created_by TEXT,
+        branch_id TEXT, -- branches.id the entry belongs to (v14)
         FOREIGN KEY (source_location_id) REFERENCES cash_locations (id),
-        FOREIGN KEY (cash_movement_id) REFERENCES cash_movements (id)
+        FOREIGN KEY (cash_movement_id) REFERENCES cash_movements (id),
+        FOREIGN KEY (branch_id) REFERENCES branches (id)
       )
     ''');
 
@@ -459,7 +480,9 @@ class AppDatabase {
         status TEXT NOT NULL DEFAULT 'draft',
         created_at TEXT NOT NULL,
         completed_at TEXT,
-        created_by TEXT
+        created_by TEXT,
+        branch_id TEXT, -- branches.id the opname session belongs to (v14)
+        FOREIGN KEY (branch_id) REFERENCES branches (id)
       )
     ''');
 
@@ -504,6 +527,11 @@ class AppDatabase {
     await _seedAuthData(db);
     await _seedPermissionsData(db);
     await _seedBranchAccessData(db);
+
+    // Seeded demo rows (sample transactions, cash locations) are
+    // attributed to the seeded branch, exactly like legacy rows on upgrade.
+    await BranchScopeMigration.backfillLegacyBranch(db);
+    await BranchScopeMigration.createIndexes(db);
   }
 
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
@@ -524,6 +552,9 @@ class AppDatabase {
     }
     if (oldVersion < 13) {
       await _seedBranchAccessData(db);
+    }
+    if (oldVersion < 14) {
+      await BranchScopeMigration.migrate(db);
     }
     // Future migrations get added here as further `if (oldVersion < N)`
     // blocks, each additive-only like the one above.

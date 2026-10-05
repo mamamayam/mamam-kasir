@@ -21,7 +21,16 @@ import 'pin_login_screen.dart';
 /// [AuthRepository.verifyCredentials] does internally, not this
 /// screen's structure.
 class LoginScreen extends ConsumerStatefulWidget {
-  const LoginScreen({super.key});
+  /// True when reached via "Lupa PIN?": after the password checks out,
+  /// go straight to [SetPinScreen] to create a NEW PIN instead of asking
+  /// for the old one (which the user, by definition, doesn't remember —
+  /// or which is locked). A successful password login already clears any
+  /// PIN lockout (see AuthRepository.verifyCredentials); SetPinScreen's
+  /// save then replaces the PIN hash and stamps last_pin_at, so the
+  /// 3-day rule starts fresh too.
+  final bool resetPinAfterLogin;
+
+  const LoginScreen({super.key, this.resetPinAfterLogin = false});
 
   @override
   ConsumerState<LoginScreen> createState() => _LoginScreenState();
@@ -92,9 +101,11 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
 
     setState(() => _isSubmitting = false);
 
+    final needsNewPin = widget.resetPinAfterLogin || !hasPinAlready;
+
     Navigator.of(context).pushAndRemoveUntil(
       MaterialPageRoute(
-        builder: (_) => hasPinAlready ? const PinLoginScreen() : const SetPinScreen(),
+        builder: (_) => needsNewPin ? const SetPinScreen() : const PinLoginScreen(),
       ),
       (route) => false,
     );
@@ -148,10 +159,12 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                 style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: AppColors.textPrimary),
               ),
               const SizedBox(height: 6),
-              const Text(
-                'Masukkan username dan password akun kamu',
+              Text(
+                widget.resetPinAfterLogin
+                    ? 'Login dengan password untuk membuat PIN baru'
+                    : 'Masukkan username dan password akun kamu',
                 textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
+                style: const TextStyle(fontSize: 13, color: AppColors.textSecondary),
               ),
               const SizedBox(height: 32),
               const Text('Username', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),

@@ -1,0 +1,46 @@
+From de14746df7797a7c0e11dd658181f449ac4a9ef1 Mon Sep 17 00:00:00 2001
+From: Mamam Dev <dev@mamam.local>
+Date: Mon, 5 Oct 2026 04:34:09 +0000
+Subject: [PATCH] fix(test,db): _FakePathProvider pakai
+ MockPlatformInterfaceMixin (test B2 tidak compile); hapus 3 import tak
+ terpakai di app_database.dart
+
+---
+ lib/core/data/app_database.dart          | 3 ---
+ test/app_database_branch_scope_test.dart | 5 ++---
+ 2 files changed, 2 insertions(+), 6 deletions(-)
+
+diff --git a/lib/core/data/app_database.dart b/lib/core/data/app_database.dart
+index 93ea80d..95d3c3a 100644
+--- a/lib/core/data/app_database.dart
++++ b/lib/core/data/app_database.dart
+@@ -4,9 +4,6 @@ import 'package:sqflite_sqlcipher/sqflite.dart';
+ import 'package:uuid/uuid.dart';
+ 
+ import '../permissions/permission_defaults.dart';
+-import '../permissions/permission_key.dart';
+-import '../permissions/permission_mode.dart';
+-import '../session/app_session.dart';
+ import 'branch_defaults.dart';
+ import 'branch_scope_migration.dart';
+ import 'password_hasher.dart';
+diff --git a/test/app_database_branch_scope_test.dart b/test/app_database_branch_scope_test.dart
+index daa32cc..cb38d62 100644
+--- a/test/app_database_branch_scope_test.dart
++++ b/test/app_database_branch_scope_test.dart
+@@ -175,10 +175,9 @@ const _moneyColumns = <String, String>{
+   'dompet_closings': 'counted_cash',
+ };
+ 
+-class _FakePathProvider extends PlatformInterface implements PathProviderPlatform {
+-  static final Object _token = Object();
++class _FakePathProvider extends PathProviderPlatform with MockPlatformInterfaceMixin {
+   final String tempDirPath;
+-  _FakePathProvider.withPath(this.tempDirPath) : super(token: _token);
++  _FakePathProvider.withPath(this.tempDirPath);
+ 
+   @override
+   Future<String?> getApplicationDocumentsPath() async => tempDirPath;
+-- 
+2.43.0
+
