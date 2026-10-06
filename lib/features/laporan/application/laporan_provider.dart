@@ -1,10 +1,11 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/session/operational_context.dart';
 import '../domain/laporan_models.dart';
 import 'laporan_dummy_data.dart';
 import 'laporan_repository.dart';
 
-final laporanRepositoryProvider = Provider<LaporanRepository>((ref) => LaporanRepository());
+final laporanRepositoryProvider = Provider<LaporanRepository>((ref) => LaporanRepository(context: ref.watch(operationalContextReaderProvider)));
 
 class LaporanState {
   final ReportType reportType;

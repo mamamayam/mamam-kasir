@@ -1,0 +1,897 @@
+From 6635f19a87e508026f42e102297eacf4637b5874 Mon Sep 17 00:00:00 2001
+From: Mamam Dev <dev@mamam.local>
+Date: Tue, 6 Oct 2026 03:22:34 +0000
+Subject: [PATCH] feat(ui): pilih cabang aktif (pill + sheet di header
+ Dashboard), semua layar data-cabang reload saat ganti
+
+- BranchSwitcherPill/Sheet: label biasa bila hanya 1 cabang; chevron + sheet bila >1
+- activeBranchIdProvider: Dashboard, Riwayat, Arus Kas, Dompet (3 provider), Stok Opname rebuild saat cabang diganti
+- AppSessionController.refreshActiveBranch(): sesi pindah dari cabang yang dinonaktifkan di Manajemen Cabang
+- DashboardController: guard mounted saat provider di-rebuild di tengah load
+- test: branch_switcher_test (widget + sesi, tanpa DB); test B3 memakai addListener, bukan state yang protected
+Laporan per cabang belum: menu Laporan masih placeholder.
+---
+ lib/core/session/app_session_provider.dart    |  19 ++
+ lib/core/session/branch_providers.dart        |  28 +++
+ lib/core/widgets/branch_switcher.dart         | 207 +++++++++++++++
+ .../application/arus_kas_provider.dart        |   3 +
+ .../cabang/application/cabang_provider.dart   |  22 +-
+ .../application/dashboard_provider.dart       |   8 +
+ .../presentation/dashboard_screen.dart        |  83 ++++---
+ .../dompet/application/dompet_provider.dart   |   7 +
+ .../history/application/history_provider.dart |   3 +
+ .../application/hpp_opname_provider.dart      |   3 +
+ test/branch_switcher_test.dart                | 235 ++++++++++++++++++
+ test/operational_context_test.dart            |  18 +-
+ 12 files changed, 594 insertions(+), 42 deletions(-)
+ create mode 100644 lib/core/session/branch_providers.dart
+ create mode 100644 lib/core/widgets/branch_switcher.dart
+ create mode 100644 test/branch_switcher_test.dart
+
+diff --git a/lib/core/session/app_session_provider.dart b/lib/core/session/app_session_provider.dart
+index d266c02..c7e8d34 100644
+--- a/lib/core/session/app_session_provider.dart
++++ b/lib/core/session/app_session_provider.dart
+@@ -156,6 +156,25 @@ class AppSessionController extends StateNotifier<AppSession> {
+     return true;
+   }
+ 
++  /// Re-validates the active branch against what the user can access
++  /// right now. Call after branches change (e.g. the active branch was
++  /// switched off in Manajemen Cabang): the session then moves to the
++  /// next accessible branch — or to none — instead of staying on a
++  /// branch it can no longer operate in. No-op when signed out or when
++  /// the active branch is still valid.
++  Future<void> refreshActiveBranch() async {
++    final userId = state.userId;
++    final role = state.role;
++    if (userId == null || role == null) return;
++
++    final branchId = await _resolveBranch(userId, role, state.branchId);
++    if (branchId == state.branchId) return;
++
++    final prefs = await SharedPreferences.getInstance();
++    await _persistBranch(prefs, branchId);
++    state = AppSession(userId: userId, username: state.username, role: role, branchId: branchId);
++  }
++
+   /// Clears the session (identity) but deliberately leaves the user's
+   /// PIN in place (now stored per-user in the DB, not touched by this
+   /// method at all) — logging out doesn't require re-registering a PIN
+diff --git a/lib/core/session/branch_providers.dart b/lib/core/session/branch_providers.dart
+new file mode 100644
+index 0000000..212db31
+--- /dev/null
++++ b/lib/core/session/branch_providers.dart
+@@ -0,0 +1,28 @@
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import 'app_session_provider.dart';
++import 'branch_access_repository.dart';
++
++/// Branches the signed-in user may switch between (Owner: every active
++/// branch; Manager/Staff: their granted, active branches — see
++/// [BranchAccessRepository]). Empty when nobody is signed in.
++///
++/// Re-reads when the signed-in user changes. Anything that edits the
++/// branch list (Manajemen Cabang) invalidates this provider so pickers
++/// never show a stale name or a switched-off branch.
++final accessibleBranchesProvider = FutureProvider.autoDispose<List<AccessibleBranch>>((ref) async {
++  final userId = ref.watch(appSessionProvider.select((s) => s.userId));
++  final role = ref.watch(appSessionProvider.select((s) => s.role));
++  if (userId == null || role == null) return const <AccessibleBranch>[];
++
++  return ref.watch(branchAccessRepositoryProvider).accessibleBranches(userId: userId, role: role);
++});
++
++/// The active branch id. Every provider that holds branch-scoped data
++/// (Dashboard, Riwayat, Arus Kas, Dompet, Stok Opname) watches this, so
++/// switching branches rebuilds it and it reloads from the new branch.
++/// The repositories themselves read the live session on every call
++/// (OperationalContext) — this only tells the *controllers* to reload.
++final activeBranchIdProvider = Provider<String?>((ref) {
++  return ref.watch(appSessionProvider.select((s) => s.branchId));
++});
+diff --git a/lib/core/widgets/branch_switcher.dart b/lib/core/widgets/branch_switcher.dart
+new file mode 100644
+index 0000000..a0debd1
+--- /dev/null
++++ b/lib/core/widgets/branch_switcher.dart
+@@ -0,0 +1,207 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import '../navigation/app_nav.dart';
++import '../session/app_session_provider.dart';
++import '../session/branch_access_repository.dart';
++import '../session/branch_providers.dart';
++import '../theme/app_colors.dart';
++import '../theme/app_spacing.dart';
++import 'app_sheet_header.dart';
++
++/// Pill showing the active branch; tapping it opens [BranchSwitcherSheet]
++/// to switch. Reusable anywhere a screen should show (and let the user
++/// change) which branch its numbers belong to.
++///
++/// With zero or one accessible branch there is nothing to switch to, so
++/// the pill is a plain label: no chevron, not tappable.
++class BranchSwitcherPill extends ConsumerWidget {
++  const BranchSwitcherPill({super.key});
++
++  @override
++  Widget build(BuildContext context, WidgetRef ref) {
++    final activeBranchId = ref.watch(appSessionProvider.select((s) => s.branchId));
++    final branchesAsync = ref.watch(accessibleBranchesProvider);
++    final branches = branchesAsync.valueOrNull ?? const <AccessibleBranch>[];
++
++    final active = branches.where((b) => b.id == activeBranchId).firstOrNull;
++    final canSwitch = branches.length > 1;
++
++    final String label;
++    if (active != null) {
++      label = active.name;
++    } else if (branchesAsync.isLoading) {
++      label = 'Memuat cabang...';
++    } else if (branches.isEmpty) {
++      label = 'Tanpa cabang';
++    } else {
++      label = 'Pilih cabang';
++    }
++
++    final content = Container(
++      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: 6),
++      decoration: BoxDecoration(
++        color: AppColors.surface,
++        borderRadius: BorderRadius.circular(AppRadius.pill),
++        border: Border.all(color: AppColors.border),
++      ),
++      child: Row(
++        mainAxisSize: MainAxisSize.min,
++        children: [
++          const Icon(Icons.storefront_outlined, size: 15, color: AppColors.textSecondary),
++          const SizedBox(width: 6),
++          Flexible(
++            child: Text(
++              label,
++              maxLines: 1,
++              overflow: TextOverflow.ellipsis,
++              style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: AppColors.textPrimary),
++            ),
++          ),
++          if (canSwitch) ...[
++            const SizedBox(width: 2),
++            const Icon(Icons.keyboard_arrow_down_rounded, size: 18, color: AppColors.textMuted),
++          ],
++        ],
++      ),
++    );
++
++    if (!canSwitch) return content;
++
++    return InkWell(
++      borderRadius: BorderRadius.circular(AppRadius.pill),
++      onTap: () {
++        // Fresh list every time the sheet opens, so a branch renamed or
++        // switched off in Manajemen Cabang is reflected immediately.
++        ref.invalidate(accessibleBranchesProvider);
++        AppNav.showModal(context, isScrollControlled: false, builder: (_) => const BranchSwitcherSheet());
++      },
++      child: content,
++    );
++  }
++}
++
++/// "Pilih Cabang" bottom sheet: one row per accessible branch, a check on
++/// the active one. Picking a row switches the session's active branch via
++/// [AppSessionController.setActiveBranch] — which re-validates access —
++/// and every branch-scoped screen reloads from the new session value.
++class BranchSwitcherSheet extends ConsumerWidget {
++  const BranchSwitcherSheet({super.key});
++
++  @override
++  Widget build(BuildContext context, WidgetRef ref) {
++    final activeBranchId = ref.watch(appSessionProvider.select((s) => s.branchId));
++    final branchesAsync = ref.watch(accessibleBranchesProvider);
++
++    return SafeArea(
++      top: false,
++      child: Container(
++        constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.85),
++        decoration: const BoxDecoration(
++          color: AppColors.surface,
++          borderRadius: BorderRadius.vertical(top: Radius.circular(AppRadius.xl)),
++        ),
++        child: Column(
++          mainAxisSize: MainAxisSize.min,
++          children: [
++            const Padding(
++              padding: EdgeInsets.only(top: AppSpacing.sm),
++              child: AppSheetHeader(title: 'Pilih Cabang'),
++            ),
++            Flexible(
++              child: branchesAsync.when(
++                loading: () => const Padding(
++                  padding: EdgeInsets.all(AppSpacing.xxl),
++                  child: Center(child: CircularProgressIndicator(color: AppColors.brand)),
++                ),
++                error: (error, _) => Padding(
++                  padding: const EdgeInsets.all(AppSpacing.xxl),
++                  child: Text(
++                    'Gagal memuat daftar cabang: $error',
++                    textAlign: TextAlign.center,
++                    style: const TextStyle(fontSize: 13, color: AppColors.textSecondary),
++                  ),
++                ),
++                data: (branches) => ListView(
++                  shrinkWrap: true,
++                  padding: EdgeInsets.zero,
++                  children: [
++                    for (final branch in branches)
++                      _BranchRow(
++                        branch: branch,
++                        isActive: branch.id == activeBranchId,
++                        onTap: () => _select(context, ref, branch, activeBranchId),
++                      ),
++                  ],
++                ),
++              ),
++            ),
++            const SizedBox(height: AppSpacing.sm),
++          ],
++        ),
++      ),
++    );
++  }
++
++  Future<void> _select(BuildContext context, WidgetRef ref, AccessibleBranch branch, String? activeBranchId) async {
++    if (branch.id == activeBranchId) {
++      Navigator.of(context).pop();
++      return;
++    }
++
++    final switched = await ref.read(appSessionProvider.notifier).setActiveBranch(branch.id);
++    if (!context.mounted) return;
++
++    Navigator.of(context).pop();
++    ScaffoldMessenger.of(context)
++      ..hideCurrentSnackBar()
++      ..showSnackBar(
++        SnackBar(
++          content: Text(switched ? 'Cabang aktif: ${branch.name}' : 'Tidak bisa pindah ke ${branch.name}'),
++          backgroundColor: switched ? null : AppColors.danger,
++        ),
++      );
++  }
++}
++
++class _BranchRow extends StatelessWidget {
++  final AccessibleBranch branch;
++  final bool isActive;
++  final VoidCallback onTap;
++
++  const _BranchRow({required this.branch, required this.isActive, required this.onTap});
++
++  @override
++  Widget build(BuildContext context) {
++    return InkWell(
++      onTap: onTap,
++      child: Container(
++        decoration: const BoxDecoration(border: Border(top: BorderSide(color: AppColors.border))),
++        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.lg),
++        child: Row(
++          children: [
++            Container(
++              width: 40,
++              height: 40,
++              decoration: BoxDecoration(
++                color: isActive ? AppColors.brand.withValues(alpha: 0.12) : AppColors.background,
++                shape: BoxShape.circle,
++              ),
++              child: Icon(Icons.storefront_outlined, size: 19, color: isActive ? AppColors.brand : AppColors.textSecondary),
++            ),
++            const SizedBox(width: AppSpacing.md),
++            Expanded(
++              child: Text(
++                branch.name,
++                maxLines: 1,
++                overflow: TextOverflow.ellipsis,
++                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: AppColors.textPrimary),
++              ),
++            ),
++            if (isActive) const Icon(Icons.check_rounded, size: 18, color: AppColors.textPrimary),
++          ],
++        ),
++      ),
++    );
++  }
++}
+diff --git a/lib/features/arus_kas/application/arus_kas_provider.dart b/lib/features/arus_kas/application/arus_kas_provider.dart
+index 24cea28..76cc1e9 100644
+--- a/lib/features/arus_kas/application/arus_kas_provider.dart
++++ b/lib/features/arus_kas/application/arus_kas_provider.dart
+@@ -1,5 +1,6 @@
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
++import '../../../core/session/branch_providers.dart';
+ import '../../../core/session/operational_context.dart';
+ import '../../dompet/application/dompet_provider.dart';
+ import '../domain/arus_kas_models.dart';
+@@ -77,6 +78,8 @@ class ArusKasState {
+ }
+ 
+ final arusKasProvider = StateNotifierProvider.autoDispose<ArusKasController, ArusKasState>((ref) {
++  // Reload when the active branch is switched (see activeBranchIdProvider).
++  ref.watch(activeBranchIdProvider);
+   return ArusKasController(ref.watch(arusKasRepositoryProvider));
+ });
+ 
+diff --git a/lib/features/cabang/application/cabang_provider.dart b/lib/features/cabang/application/cabang_provider.dart
+index ac61771..2bb4391 100644
+--- a/lib/features/cabang/application/cabang_provider.dart
++++ b/lib/features/cabang/application/cabang_provider.dart
+@@ -1,5 +1,7 @@
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
++import '../../../core/session/app_session_provider.dart';
++import '../../../core/session/branch_providers.dart';
+ import '../domain/cabang_models.dart';
+ import 'cabang_repository.dart';
+ 
+@@ -37,13 +39,28 @@ class CabangState {
+ }
+ 
+ final cabangProvider = StateNotifierProvider.autoDispose<CabangController, CabangState>((ref) {
+-  return CabangController(ref.watch(cabangRepositoryProvider));
++  // The container outlives this autoDispose provider, so the callback
++  // below stays safe even if the screen is closed mid-toggle.
++  final container = ref.container;
++
++  return CabangController(
++    ref.watch(cabangRepositoryProvider),
++    // The branch picker (and the session's active branch) must follow
++    // any change made on this screen — e.g. switching a branch off.
++    onBranchesChanged: () {
++      container.invalidate(accessibleBranchesProvider);
++      container.read(appSessionProvider.notifier).refreshActiveBranch();
++    },
++  );
+ });
+ 
+ class CabangController extends StateNotifier<CabangState> {
+   final CabangRepository _repository;
++  final void Function()? _onBranchesChanged;
+ 
+-  CabangController(this._repository) : super(const CabangState()) {
++  CabangController(this._repository, {void Function()? onBranchesChanged})
++      : _onBranchesChanged = onBranchesChanged,
++        super(const CabangState()) {
+     load();
+   }
+ 
+@@ -63,6 +80,7 @@ class CabangController extends StateNotifier<CabangState> {
+   Future<void> toggleActive(Cabang branch) async {
+     try {
+       await _repository.setActive(branch.id, !branch.isActive);
++      _onBranchesChanged?.call();
+       await load();
+     } catch (e) {
+       if (!mounted) return;
+diff --git a/lib/features/dashboard/application/dashboard_provider.dart b/lib/features/dashboard/application/dashboard_provider.dart
+index da4cc2a..f99bb62 100644
+--- a/lib/features/dashboard/application/dashboard_provider.dart
++++ b/lib/features/dashboard/application/dashboard_provider.dart
+@@ -4,6 +4,7 @@ import '../../../core/permissions/permission_key.dart';
+ import '../../../core/permissions/permission_providers.dart';
+ import '../../../core/session/app_session.dart';
+ import '../../../core/session/app_session_provider.dart';
++import '../../../core/session/branch_providers.dart';
+ import '../../../core/session/operational_context.dart';
+ import '../domain/dashboard_models.dart';
+ import 'dashboard_repository.dart';
+@@ -60,6 +61,8 @@ class DashboardState {
+ }
+ 
+ final dashboardProvider = StateNotifierProvider.autoDispose<DashboardController, DashboardState>((ref) {
++  // Reload when the active branch is switched (see activeBranchIdProvider).
++  ref.watch(activeBranchIdProvider);
+   final controller = DashboardController(ref.watch(dashboardRepositoryProvider));
+ 
+   // Keep DashboardState.user in sync with the real logged-in session
+@@ -111,12 +114,17 @@ class DashboardController extends StateNotifier<DashboardState> {
+       final metrics = await _repository.getMetrics();
+       final trend = await _repository.getSalesTrend();
+ 
++      // Switching branches rebuilds this provider and disposes this
++      // controller while a load may still be in flight — don't write
++      // state into a disposed notifier.
++      if (!mounted) return;
+       state = state.copyWith(
+         metrics: metrics,
+         trend: trend,
+         isLoading: false,
+       );
+     } catch (e) {
++      if (!mounted) return;
+       state = state.copyWith(isLoading: false, errorMessage: 'Gagal memuat data Dashboard: $e');
+     }
+   }
+diff --git a/lib/features/dashboard/presentation/dashboard_screen.dart b/lib/features/dashboard/presentation/dashboard_screen.dart
+index 4d3ce6a..97948cc 100644
+--- a/lib/features/dashboard/presentation/dashboard_screen.dart
++++ b/lib/features/dashboard/presentation/dashboard_screen.dart
+@@ -5,6 +5,7 @@ import '../../../core/navigation/app_nav.dart';
+ import '../../../core/theme/app_colors.dart';
+ import '../../../core/theme/app_spacing.dart';
+ import '../../../core/utils/currency.dart';
++import '../../../core/widgets/branch_switcher.dart';
+ import '../../menu_shell/presentation/menu_bottom_sheet.dart';
+ import '../../menu_shell/presentation/swipe_up_trigger.dart';
+ import '../../history/presentation/history_screen.dart';
+@@ -226,45 +227,55 @@ class _DashboardHeader extends StatelessWidget {
+         color: AppColors.background,
+         border: Border(bottom: BorderSide(color: AppColors.border)),
+       ),
+-      child: Row(
++      child: Column(
++        crossAxisAlignment: CrossAxisAlignment.start,
++        mainAxisSize: MainAxisSize.min,
+         children: [
+-          Container(
+-            width: 40,
+-            height: 40,
+-            decoration: BoxDecoration(color: AppColors.brand, borderRadius: BorderRadius.circular(AppRadius.pill)),
+-            child: const Icon(Icons.storefront_rounded, size: 20, color: Colors.white),
+-          ),
+-          const SizedBox(width: AppSpacing.sm),
+-          Expanded(
+-            child: Column(
+-              crossAxisAlignment: CrossAxisAlignment.start,
+-              mainAxisSize: MainAxisSize.min,
+-              children: [
+-                const Text(
+-                  'Mamam Kasir',
+-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: AppColors.textPrimary, letterSpacing: -0.3),
++          Row(
++            children: [
++              Container(
++                width: 40,
++                height: 40,
++                decoration: BoxDecoration(color: AppColors.brand, borderRadius: BorderRadius.circular(AppRadius.pill)),
++                child: const Icon(Icons.storefront_rounded, size: 20, color: Colors.white),
++              ),
++              const SizedBox(width: AppSpacing.sm),
++              Expanded(
++                child: Column(
++                  crossAxisAlignment: CrossAxisAlignment.start,
++                  mainAxisSize: MainAxisSize.min,
++                  children: [
++                    const Text(
++                      'Mamam Kasir',
++                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: AppColors.textPrimary, letterSpacing: -0.3),
++                    ),
++                    const SizedBox(height: 2),
++                    SessionMarker(user: user),
++                  ],
+                 ),
+-                const SizedBox(height: 2),
+-                SessionMarker(user: user),
+-              ],
+-            ),
+-          ),
+-          Container(
+-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+-            decoration: BoxDecoration(
+-              color: AppColors.success.withValues(alpha: 0.1),
+-              borderRadius: BorderRadius.circular(AppRadius.pill),
+-              border: Border.all(color: AppColors.success.withValues(alpha: 0.25)),
+-            ),
+-            child: Row(
+-              mainAxisSize: MainAxisSize.min,
+-              children: [
+-                Container(width: 6, height: 6, decoration: const BoxDecoration(color: AppColors.success, shape: BoxShape.circle)),
+-                const SizedBox(width: 5),
+-                const Text('ONLINE', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.success, letterSpacing: 0.4)),
+-              ],
+-            ),
++              ),
++              Container(
++                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
++                decoration: BoxDecoration(
++                  color: AppColors.success.withValues(alpha: 0.1),
++                  borderRadius: BorderRadius.circular(AppRadius.pill),
++                  border: Border.all(color: AppColors.success.withValues(alpha: 0.25)),
++                ),
++                child: Row(
++                  mainAxisSize: MainAxisSize.min,
++                  children: [
++                    Container(width: 6, height: 6, decoration: const BoxDecoration(color: AppColors.success, shape: BoxShape.circle)),
++                    const SizedBox(width: 5),
++                    const Text('ONLINE', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: AppColors.success, letterSpacing: 0.4)),
++                  ],
++                ),
++              ),
++            ],
+           ),
++          // Active branch + switcher. Dashboard, Riwayat, Arus Kas, Dompet
++          // and Stok Opname all follow the branch chosen here.
++          const SizedBox(height: AppSpacing.sm),
++          const BranchSwitcherPill(),
+         ],
+       ),
+     );
+diff --git a/lib/features/dompet/application/dompet_provider.dart b/lib/features/dompet/application/dompet_provider.dart
+index 4633b72..c37eae8 100644
+--- a/lib/features/dompet/application/dompet_provider.dart
++++ b/lib/features/dompet/application/dompet_provider.dart
+@@ -1,5 +1,6 @@
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
++import '../../../core/session/branch_providers.dart';
+ import '../../../core/session/operational_context.dart';
+ import '../domain/dompet_models.dart';
+ import 'dompet_repository.dart';
+@@ -9,6 +10,8 @@ final dompetRepositoryProvider = Provider<DompetRepository>((ref) => DompetRepos
+ /// All active cash locations (Store Cash + couriers) — used by the
+ /// checkout-side [CashLocationPicker] as well as the Dompet page.
+ final cashLocationsProvider = FutureProvider.autoDispose<List<CashLocation>>((ref) async {
++  // Reload when the active branch is switched (see activeBranchIdProvider).
++  ref.watch(activeBranchIdProvider);
+   return ref.watch(dompetRepositoryProvider).getCashLocations();
+ });
+ 
+@@ -52,6 +55,8 @@ class DompetState {
+ }
+ 
+ final dompetProvider = StateNotifierProvider.autoDispose<DompetController, DompetState>((ref) {
++  // Reload when the active branch is switched (see activeBranchIdProvider).
++  ref.watch(activeBranchIdProvider);
+   return DompetController(ref.watch(dompetRepositoryProvider));
+ });
+ 
+@@ -149,6 +154,8 @@ class ClosingState {
+ }
+ 
+ final closingProvider = StateNotifierProvider.autoDispose<ClosingController, ClosingState>((ref) {
++  // Reload when the active branch is switched (see activeBranchIdProvider).
++  ref.watch(activeBranchIdProvider);
+   return ClosingController(ref.watch(dompetRepositoryProvider));
+ });
+ 
+diff --git a/lib/features/history/application/history_provider.dart b/lib/features/history/application/history_provider.dart
+index d22cef3..376ebf3 100644
+--- a/lib/features/history/application/history_provider.dart
++++ b/lib/features/history/application/history_provider.dart
+@@ -1,5 +1,6 @@
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
++import '../../../core/session/branch_providers.dart';
+ import '../../../core/session/operational_context.dart';
+ import '../../pos/domain/order_models.dart';
+ import '../../pos/domain/transaction.dart';
+@@ -166,6 +167,8 @@ class HistoryState {
+ }
+ 
+ final historyProvider = StateNotifierProvider.autoDispose<HistoryController, HistoryState>((ref) {
++  // Reload when the active branch is switched (see activeBranchIdProvider).
++  ref.watch(activeBranchIdProvider);
+   return HistoryController(ref.watch(historyRepositoryProvider));
+ });
+ 
+diff --git a/lib/features/hpp_opname/application/hpp_opname_provider.dart b/lib/features/hpp_opname/application/hpp_opname_provider.dart
+index 2de7206..b1802e1 100644
+--- a/lib/features/hpp_opname/application/hpp_opname_provider.dart
++++ b/lib/features/hpp_opname/application/hpp_opname_provider.dart
+@@ -1,5 +1,6 @@
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
++import '../../../core/session/branch_providers.dart';
+ import '../../../core/session/operational_context.dart';
+ import '../domain/hpp_opname_models.dart';
+ import 'hpp_opname_repository.dart';
+@@ -109,6 +110,8 @@ class HppOpnameState {
+ }
+ 
+ final hppOpnameProvider = StateNotifierProvider.autoDispose<HppOpnameController, HppOpnameState>((ref) {
++  // Reload when the active branch is switched (see activeBranchIdProvider).
++  ref.watch(activeBranchIdProvider);
+   return HppOpnameController(ref.watch(hppOpnameRepositoryProvider));
+ });
+ 
+diff --git a/test/branch_switcher_test.dart b/test/branch_switcher_test.dart
+new file mode 100644
+index 0000000..6854ac7
+--- /dev/null
++++ b/test/branch_switcher_test.dart
+@@ -0,0 +1,235 @@
++// The branch switcher UI (BranchSwitcherPill + BranchSwitcherSheet) and the
++// plumbing that makes every branch-scoped screen reload when it is used.
++//
++// NO database needed: the branch list and the session are driven by fakes,
++// so this runs with a plain `flutter test test/branch_switcher_test.dart`.
++// It also exercises the case the real app cannot show yet — TWO branches —
++// because "Tambah cabang" in Manajemen Cabang is still a disabled stub and
++// the app only seeds one branch.
++import 'package:flutter/material.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:mamam_kasir/core/audit/audit_event_type.dart';
++import 'package:mamam_kasir/core/audit/audit_repository.dart';
++import 'package:mamam_kasir/core/session/app_session.dart';
++import 'package:mamam_kasir/core/session/app_session_provider.dart';
++import 'package:mamam_kasir/core/session/branch_access_repository.dart';
++import 'package:mamam_kasir/core/session/branch_providers.dart';
++import 'package:mamam_kasir/core/widgets/branch_switcher.dart';
++import 'package:shared_preferences/shared_preferences.dart';
++
++class _FakeAudit extends AuditRepository {
++  @override
++  Future<void> record({
++    required AuditEventType eventType,
++    String? actorUserId,
++    String? metadata,
++  }) async {}
++}
++
++/// Branch access backed by a list the test can change.
++class _FakeBranchAccess extends BranchAccessRepository {
++  final List<AccessibleBranch> branches;
++
++  _FakeBranchAccess(this.branches);
++
++  @override
++  Future<List<AccessibleBranch>> accessibleBranches({
++    required String userId,
++    required AppRole role,
++  }) async {
++    return List.of(branches);
++  }
++
++  @override
++  Future<String?> resolveActiveBranchId({
++    required String userId,
++    required AppRole role,
++    String? preferredBranchId,
++  }) async {
++    final ids = branches.map((b) => b.id).toList();
++    if (preferredBranchId != null && ids.contains(preferredBranchId)) return preferredBranchId;
++    return ids.isEmpty ? null : ids.first;
++  }
++}
++
++const _cibarusah = AccessibleBranch(id: 'branch-1', name: 'Mamam Ayam Cibarusah');
++const _bekasi = AccessibleBranch(id: 'branch-2', name: 'Mamam Ayam Bekasi');
++
++Future<AppSessionController> _signedIn(_FakeBranchAccess access) async {
++  SharedPreferences.setMockInitialValues({});
++  final session = AppSessionController(audit: _FakeAudit(), branchAccess: access);
++  await session.login(userId: 'user-a', username: 'a', role: AppRole.owner);
++  return session;
++}
++
++Widget _app(AppSessionController session, List<AccessibleBranch> branches) {
++  return ProviderScope(
++    overrides: [
++      appSessionProvider.overrideWith((ref) => session),
++      accessibleBranchesProvider.overrideWith((ref) async => branches),
++    ],
++    child: const MaterialApp(
++      home: Scaffold(body: Center(child: BranchSwitcherPill())),
++    ),
++  );
++}
++
++/// The controller's current state, read through the public listener API
++/// (`state` is protected and `debugState` is deprecated). The listener fires
++/// once, synchronously, with the current value.
++AppSession _stateOf(AppSessionController controller) {
++  late AppSession current;
++  final remove = controller.addListener((state) => current = state);
++  remove();
++  return current;
++}
++
++void main() {
++  TestWidgetsFlutterBinding.ensureInitialized();
++
++  group('BranchSwitcherPill', () {
++    testWidgets('one branch: a plain label, no chevron, nothing to open', (tester) async {
++      final session = await _signedIn(_FakeBranchAccess([_cibarusah]));
++      await tester.pumpWidget(_app(session, [_cibarusah]));
++      await tester.pumpAndSettle();
++
++      expect(find.text('Mamam Ayam Cibarusah'), findsOneWidget);
++      expect(find.byIcon(Icons.keyboard_arrow_down_rounded), findsNothing);
++
++      await tester.tap(find.text('Mamam Ayam Cibarusah'));
++      await tester.pumpAndSettle();
++      expect(find.text('Pilih Cabang'), findsNothing);
++    });
++
++    testWidgets('no accessible branch: says so', (tester) async {
++      final session = await _signedIn(_FakeBranchAccess([]));
++      await tester.pumpWidget(_app(session, const []));
++      await tester.pumpAndSettle();
++
++      expect(find.text('Tanpa cabang'), findsOneWidget);
++    });
++
++    testWidgets('two branches: shows the active one with a chevron; tapping lists both', (tester) async {
++      final session = await _signedIn(_FakeBranchAccess([_cibarusah, _bekasi]));
++      await tester.pumpWidget(_app(session, [_cibarusah, _bekasi]));
++      await tester.pumpAndSettle();
++
++      expect(find.text('Mamam Ayam Cibarusah'), findsOneWidget);
++      expect(find.byIcon(Icons.keyboard_arrow_down_rounded), findsOneWidget);
++
++      await tester.tap(find.byType(BranchSwitcherPill));
++      await tester.pumpAndSettle();
++
++      expect(find.text('Pilih Cabang'), findsOneWidget);
++      expect(find.text('Mamam Ayam Bekasi'), findsOneWidget);
++      // Active branch appears in the pill AND in the sheet, with a check.
++      expect(find.text('Mamam Ayam Cibarusah'), findsNWidgets(2));
++      expect(find.byIcon(Icons.check_rounded), findsOneWidget);
++    });
++
++    testWidgets('picking the other branch switches the session, closes the sheet and confirms', (tester) async {
++      final session = await _signedIn(_FakeBranchAccess([_cibarusah, _bekasi]));
++      await tester.pumpWidget(_app(session, [_cibarusah, _bekasi]));
++      await tester.pumpAndSettle();
++      expect(_stateOf(session).branchId, 'branch-1');
++
++      await tester.tap(find.byType(BranchSwitcherPill));
++      await tester.pumpAndSettle();
++      await tester.tap(find.text('Mamam Ayam Bekasi'));
++      await tester.pumpAndSettle();
++
++      expect(_stateOf(session).branchId, 'branch-2');
++      expect(find.text('Pilih Cabang'), findsNothing);
++      expect(find.text('Cabang aktif: Mamam Ayam Bekasi'), findsOneWidget);
++      // The pill now shows the new branch.
++      expect(find.text('Mamam Ayam Bekasi'), findsOneWidget);
++    });
++
++    testWidgets('picking the already-active branch just closes the sheet', (tester) async {
++      final session = await _signedIn(_FakeBranchAccess([_cibarusah, _bekasi]));
++      await tester.pumpWidget(_app(session, [_cibarusah, _bekasi]));
++      await tester.pumpAndSettle();
++
++      await tester.tap(find.byType(BranchSwitcherPill));
++      await tester.pumpAndSettle();
++      // Two matches: the pill and the sheet row. The row is the last one.
++      await tester.tap(find.text('Mamam Ayam Cibarusah').last);
++      await tester.pumpAndSettle();
++
++      expect(_stateOf(session).branchId, 'branch-1');
++      expect(find.text('Pilih Cabang'), findsNothing);
++    });
++  });
++
++  group('the session side of switching', () {
++    test('activeBranchIdProvider notifies exactly when the branch changes', () async {
++      final session = await _signedIn(_FakeBranchAccess([_cibarusah, _bekasi]));
++      final container = ProviderContainer(overrides: [
++        appSessionProvider.overrideWith((ref) => session),
++      ]);
++      addTearDown(container.dispose);
++
++      final seen = <String?>[];
++      container.listen<String?>(activeBranchIdProvider, (_, next) => seen.add(next), fireImmediately: true);
++
++      await session.setActiveBranch('branch-2');
++      await session.setActiveBranch('branch-2'); // same branch again: no new notification
++
++      expect(seen, ['branch-1', 'branch-2']);
++    });
++
++    test('a branch the user cannot access is refused and the session stays put', () async {
++      final session = await _signedIn(_FakeBranchAccess([_cibarusah]));
++
++      final switched = await session.setActiveBranch('branch-2');
++
++      expect(switched, isFalse);
++      expect(_stateOf(session).branchId, 'branch-1');
++    });
++
++    test('refreshActiveBranch moves off a branch that is no longer accessible', () async {
++      final access = _FakeBranchAccess([_cibarusah, _bekasi]);
++      final session = await _signedIn(access);
++      await session.setActiveBranch('branch-2');
++      expect(_stateOf(session).branchId, 'branch-2');
++
++      // Bekasi gets switched off in Manajemen Cabang.
++      access.branches.remove(_bekasi);
++      await session.refreshActiveBranch();
++
++      expect(_stateOf(session).branchId, 'branch-1');
++    });
++
++    test('refreshActiveBranch leaves a still-valid branch alone', () async {
++      final access = _FakeBranchAccess([_cibarusah, _bekasi]);
++      final session = await _signedIn(access);
++      await session.setActiveBranch('branch-2');
++      final before = _stateOf(session);
++
++      await session.refreshActiveBranch();
++
++      expect(identical(_stateOf(session), before), isTrue);
++    });
++
++    test('refreshActiveBranch with no branch left leaves the session without one', () async {
++      final access = _FakeBranchAccess([_cibarusah]);
++      final session = await _signedIn(access);
++
++      access.branches.clear();
++      await session.refreshActiveBranch();
++
++      expect(_stateOf(session).branchId, isNull);
++      expect(_stateOf(session).userId, 'user-a');
++    });
++
++    test('refreshActiveBranch is a no-op when signed out', () async {
++      SharedPreferences.setMockInitialValues({});
++      final session = AppSessionController(audit: _FakeAudit(), branchAccess: _FakeBranchAccess([_cibarusah]));
++
++      await session.refreshActiveBranch();
++
++      expect(_stateOf(session).isLoggedIn, isFalse);
++    });
++  });
++}
+diff --git a/test/operational_context_test.dart b/test/operational_context_test.dart
+index f8dc401..5359283 100644
+--- a/test/operational_context_test.dart
++++ b/test/operational_context_test.dart
+@@ -78,6 +78,16 @@ AppSessionController _newSession() {
+   );
+ }
+ 
++/// The controller's current state, read through the public listener API
++/// (`state` is protected and `debugState` is deprecated). The listener fires
++/// once, synchronously, with the current value.
++AppSession _stateOf(AppSessionController controller) {
++  late AppSession current;
++  final remove = controller.addListener((state) => current = state);
++  remove();
++  return current;
++}
++
+ void main() {
+   TestWidgetsFlutterBinding.ensureInitialized();
+ 
+@@ -108,7 +118,7 @@ void main() {
+   group('the actor follows the live session', () {
+     late AppSessionController session;
+ 
+-    OperationalContext read() => OperationalContext.fromSession(session.state);
++    OperationalContext read() => OperationalContext.fromSession(_stateOf(session));
+ 
+     setUp(() {
+       SharedPreferences.setMockInitialValues({});
+@@ -118,12 +128,12 @@ void main() {
+     test('auto-lock then unlock: the actor is still the same user', () async {
+       await session.login(userId: 'user-a', username: 'a', role: AppRole.manager);
+       final before = read();
+-      final sessionBefore = session.state;
++      final sessionBefore = _stateOf(session);
+ 
+       // Auto-lock and unlock never write the session, so there is nothing
+       // to do here — which is the property being asserted: the same
+       // session object is still in place and yields the same actor.
+-      expect(identical(session.state, sessionBefore), isTrue);
++      expect(identical(_stateOf(session), sessionBefore), isTrue);
+       expect(read().userId, before.userId);
+       expect(read().branchId, before.branchId);
+ 
+@@ -131,7 +141,7 @@ void main() {
+       // the same identity from storage.
+       final afterColdStart = _newSession();
+       await afterColdStart.restore();
+-      final restored = OperationalContext.fromSession(afterColdStart.state);
++      final restored = OperationalContext.fromSession(_stateOf(afterColdStart));
+       expect(restored.userId, 'user-a');
+       expect(restored.branchId, 'branch-1');
+     });
+-- 
+2.43.0
+

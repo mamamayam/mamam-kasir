@@ -2,6 +2,7 @@ import 'package:sqflite_sqlcipher/sqflite.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../../core/data/app_database.dart';
+import '../../../core/session/operational_context.dart';
 import '../domain/hpp_opname_models.dart';
 
 /// CRUD access for HPP (ingredients/cost basis) and Stok Opname (monthly
@@ -11,6 +12,9 @@ import '../domain/hpp_opname_models.dart';
 /// [AppDatabase] directly.
 class HppOpnameRepository {
   final _uuid = const Uuid();
+  final OperationalContextReader _context;
+
+  HppOpnameRepository({required OperationalContextReader context}) : _context = context;
 
   Future<Database> get _db => AppDatabase.instance.database;
 
@@ -77,6 +81,7 @@ class HppOpnameRepository {
   // --- Stok Opname: sessions ---
 
   Future<List<StockOpnameSession>> getSessions() async {
+    final branchId = _context().branchId;
     final db = await _db;
     final rows = await db.rawQuery('''
       SELECT
@@ -85,9 +90,10 @@ class HppOpnameRepository {
         COALESCE(SUM(i.qty * i.price_used), 0) as total_value
       FROM stock_opname_sessions s
       LEFT JOIN stock_opname_items i ON i.session_id = s.id
+      WHERE s.branch_id = ?
       GROUP BY s.id
       ORDER BY s.created_at DESC
-    ''');
+    ''', [branchId]);
 
     return rows.map((row) {
       return StockOpnameSession(
@@ -109,6 +115,7 @@ class HppOpnameRepository {
     required List<StockOpnameItem> items,
     required bool asDraft,
   }) async {
+    final ctx = _context();
     final db = await _db;
     final now = DateTime.now().toIso8601String();
     final sessionId = _uuid.v4();
@@ -118,7 +125,8 @@ class HppOpnameRepository {
       'status': asDraft ? StockOpnameStatus.draft.dbValue : StockOpnameStatus.selesai.dbValue,
       'created_at': now,
       'completed_at': asDraft ? null : now,
-      'created_by': null, // no Staff/Auth module yet — see docs/06 phase 3
+      'created_by': ctx.userId,
+      'branch_id': ctx.branchId,
     });
 
     for (final item in items) {

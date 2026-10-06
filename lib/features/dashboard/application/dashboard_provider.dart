@@ -4,10 +4,12 @@ import '../../../core/permissions/permission_key.dart';
 import '../../../core/permissions/permission_providers.dart';
 import '../../../core/session/app_session.dart';
 import '../../../core/session/app_session_provider.dart';
+import '../../../core/session/branch_providers.dart';
+import '../../../core/session/operational_context.dart';
 import '../domain/dashboard_models.dart';
 import 'dashboard_repository.dart';
 
-final dashboardRepositoryProvider = Provider<DashboardRepository>((ref) => DashboardRepository());
+final dashboardRepositoryProvider = Provider<DashboardRepository>((ref) => DashboardRepository(context: ref.watch(operationalContextReaderProvider)));
 
 /// Dashboard page state: metrics + trend, loaded together (same pattern
 /// as DompetState) so the page has one loading/error surface instead of
@@ -59,6 +61,8 @@ class DashboardState {
 }
 
 final dashboardProvider = StateNotifierProvider.autoDispose<DashboardController, DashboardState>((ref) {
+  // Reload when the active branch is switched (see activeBranchIdProvider).
+  ref.watch(activeBranchIdProvider);
   final controller = DashboardController(ref.watch(dashboardRepositoryProvider));
 
   // Keep DashboardState.user in sync with the real logged-in session
@@ -110,12 +114,17 @@ class DashboardController extends StateNotifier<DashboardState> {
       final metrics = await _repository.getMetrics();
       final trend = await _repository.getSalesTrend();
 
+      // Switching branches rebuilds this provider and disposes this
+      // controller while a load may still be in flight — don't write
+      // state into a disposed notifier.
+      if (!mounted) return;
       state = state.copyWith(
         metrics: metrics,
         trend: trend,
         isLoading: false,
       );
     } catch (e) {
+      if (!mounted) return;
       state = state.copyWith(isLoading: false, errorMessage: 'Gagal memuat data Dashboard: $e');
     }
   }

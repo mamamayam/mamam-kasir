@@ -1,5 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/session/app_session_provider.dart';
+import '../../../core/session/branch_providers.dart';
 import '../domain/cabang_models.dart';
 import 'cabang_repository.dart';
 
@@ -37,13 +39,28 @@ class CabangState {
 }
 
 final cabangProvider = StateNotifierProvider.autoDispose<CabangController, CabangState>((ref) {
-  return CabangController(ref.watch(cabangRepositoryProvider));
+  // The container outlives this autoDispose provider, so the callback
+  // below stays safe even if the screen is closed mid-toggle.
+  final container = ref.container;
+
+  return CabangController(
+    ref.watch(cabangRepositoryProvider),
+    // The branch picker (and the session's active branch) must follow
+    // any change made on this screen — e.g. switching a branch off.
+    onBranchesChanged: () {
+      container.invalidate(accessibleBranchesProvider);
+      container.read(appSessionProvider.notifier).refreshActiveBranch();
+    },
+  );
 });
 
 class CabangController extends StateNotifier<CabangState> {
   final CabangRepository _repository;
+  final void Function()? _onBranchesChanged;
 
-  CabangController(this._repository) : super(const CabangState()) {
+  CabangController(this._repository, {void Function()? onBranchesChanged})
+      : _onBranchesChanged = onBranchesChanged,
+        super(const CabangState()) {
     load();
   }
 
@@ -63,6 +80,7 @@ class CabangController extends StateNotifier<CabangState> {
   Future<void> toggleActive(Cabang branch) async {
     try {
       await _repository.setActive(branch.id, !branch.isActive);
+      _onBranchesChanged?.call();
       await load();
     } catch (e) {
       if (!mounted) return;

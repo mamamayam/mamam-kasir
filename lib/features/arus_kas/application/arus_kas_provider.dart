@@ -1,11 +1,13 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/session/branch_providers.dart';
+import '../../../core/session/operational_context.dart';
 import '../../dompet/application/dompet_provider.dart';
 import '../domain/arus_kas_models.dart';
 import 'arus_kas_repository.dart';
 
 final arusKasRepositoryProvider = Provider<ArusKasRepository>((ref) {
-  return ArusKasRepository(ref.watch(dompetRepositoryProvider));
+  return ArusKasRepository(ref.watch(dompetRepositoryProvider), context: ref.watch(operationalContextReaderProvider));
 });
 
 DateTime _startOfDay(DateTime d) => DateTime(d.year, d.month, d.day);
@@ -76,6 +78,8 @@ class ArusKasState {
 }
 
 final arusKasProvider = StateNotifierProvider.autoDispose<ArusKasController, ArusKasState>((ref) {
+  // Reload when the active branch is switched (see activeBranchIdProvider).
+  ref.watch(activeBranchIdProvider);
   return ArusKasController(ref.watch(arusKasRepositoryProvider));
 });
 

@@ -1,0 +1,1585 @@
+From 5584dc669b83e024381260021e435a7cfb380c6a Mon Sep 17 00:00:00 2001
+From: Mamam Dev <dev@mamam.local>
+Date: Mon, 5 Oct 2026 22:26:25 +0000
+Subject: [PATCH] feat(b3): aktor + cabang dari sesi (OperationalContext) untuk
+ semua tulis/baca operasional
+
+- OperationalContext dibaca dari sesi hidup SAAT panggilan; widget tidak lagi mengoper user/cabang
+- tulis ber-aktor: checkout POS, Arus Kas (+ movement), Dompet (sale/setoran/expense/income/kasbon-leg/closing), Stok Opname
+  -> branch_id + created_by dari sesi; tanpa sesi/cabang ditolak (fail closed) sebelum menyentuh DB
+- baca difilter cabang: Riwayat, Dashboard, Arus Kas, Dompet (lokasi/movement/saldo/closing), Stok Opname, Laporan
+- delete Arus Kas / cash movement hanya untuk cabang sendiri
+- kasbon/kasbon_repayments tidak disentuh (di luar scope Tahap B)
+- test: operational_context_test (tanpa DB, bisa flutter test), operational_scope_db_test (butuh device)
+LOCAL-ONLY ENFORCEMENT: penegakan server-side menunggu Tahap E.
+---
+ lib/core/session/operational_context.dart     |  80 +++++
+ .../application/arus_kas_provider.dart        |   3 +-
+ .../application/arus_kas_repository.dart      |  34 +-
+ .../application/dashboard_provider.dart       |   3 +-
+ .../application/dashboard_repository.dart     |  41 ++-
+ .../dompet/application/dompet_provider.dart   |   3 +-
+ .../dompet/application/dompet_repository.dart |  82 +++--
+ .../history/application/history_provider.dart |   3 +-
+ .../application/history_repository.dart       |  16 +-
+ .../application/hpp_opname_provider.dart      |   3 +-
+ .../application/hpp_opname_repository.dart    |  12 +-
+ .../laporan/application/laporan_provider.dart |   3 +-
+ .../application/laporan_repository.dart       |  38 ++-
+ .../pos/application/cart_provider.dart        |   3 +-
+ .../pos/application/pos_repository.dart       |  13 +-
+ test/operational_context_test.dart            | 286 +++++++++++++++++
+ test/operational_scope_db_test.dart           | 297 ++++++++++++++++++
+ 17 files changed, 850 insertions(+), 70 deletions(-)
+ create mode 100644 lib/core/session/operational_context.dart
+ create mode 100644 test/operational_context_test.dart
+ create mode 100644 test/operational_scope_db_test.dart
+
+diff --git a/lib/core/session/operational_context.dart b/lib/core/session/operational_context.dart
+new file mode 100644
+index 0000000..dd69b5a
+--- /dev/null
++++ b/lib/core/session/operational_context.dart
+@@ -0,0 +1,80 @@
++import 'package:flutter_riverpod/flutter_riverpod.dart';
++
++import 'app_session.dart';
++import 'app_session_provider.dart';
++
++/// WHO is acting and in WHICH branch, at the moment of a write or a read
++/// (Tahap B / B3).
++///
++/// Every operational repository (POS checkout, Arus Kas, Dompet, Stok
++/// Opname, Dashboard, Riwayat, Laporan) obtains this itself, from the
++/// live session, at the time of the call. Widgets and controllers never
++/// pass a user id or a branch id into a repository, so a screen cannot
++/// attribute a row to somebody else or read another branch's numbers by
++/// passing a different id.
++///
++/// Read at call time, never cached:
++/// * after auto-lock -> unlock the session is untouched, so the actor is
++///   still the same user (the lock flow never writes [AppSession]);
++/// * after "Ganti akun" the new user's `login()` replaces the session, so
++///   the very next write is attributed to the new user and their branch;
++/// * after logout there is no session, so the next call is refused
++///   instead of being attributed to the previous user.
++///
++/// LOCAL-ONLY ENFORCEMENT: this guards the local app layer only. Server
++/// side enforcement (RLS / Supabase) is Tahap E and does not exist yet —
++/// anyone with direct access to the device database is not stopped by it.
++class OperationalContext {
++  final String userId;
++  final String branchId;
++
++  const OperationalContext({required this.userId, required this.branchId});
++
++  /// Builds the context from [session], or throws
++  /// [NoOperationalContextException] when there is no authenticated user
++  /// or no active branch. Failing closed is deliberate: a row written
++  /// with a missing actor or branch can never be attributed afterwards.
++  factory OperationalContext.fromSession(AppSession session) {
++    final userId = session.userId;
++    if (!session.isLoggedIn || userId == null) {
++      throw const NoOperationalContextException(
++        'Tidak ada pengguna yang sedang login, jadi data operasional tidak bisa dibaca atau disimpan.',
++      );
++    }
++
++    final branchId = session.branchId;
++    if (branchId == null) {
++      throw const NoOperationalContextException(
++        'Belum ada cabang aktif untuk akun ini, jadi data operasional tidak bisa dibaca atau disimpan. '
++        'Minta Owner memberi akses ke sebuah cabang.',
++      );
++    }
++
++    return OperationalContext(userId: userId, branchId: branchId);
++  }
++}
++
++/// Thrown instead of reading/writing operational data without a
++/// authenticated user or an active branch.
++class NoOperationalContextException implements Exception {
++  final String message;
++
++  const NoOperationalContextException(this.message);
++
++  /// The message itself, so screens that show `error.toString()` show
++  /// something a person can act on.
++  @override
++  String toString() => message;
++}
++
++/// Returns the current [OperationalContext] (throwing
++/// [NoOperationalContextException] when there is none). Repositories hold
++/// one of these and call it at the start of every read and write.
++typedef OperationalContextReader = OperationalContext Function();
++
++/// A stable reader over the live session. Reading the session inside the
++/// closure (rather than watching it) means repositories are not rebuilt on
++/// login/logout and can never act on a stale user.
++final operationalContextReaderProvider = Provider<OperationalContextReader>((ref) {
++  return () => OperationalContext.fromSession(ref.read(appSessionProvider));
++});
+diff --git a/lib/features/arus_kas/application/arus_kas_provider.dart b/lib/features/arus_kas/application/arus_kas_provider.dart
+index 06e15fe..24cea28 100644
+--- a/lib/features/arus_kas/application/arus_kas_provider.dart
++++ b/lib/features/arus_kas/application/arus_kas_provider.dart
+@@ -1,11 +1,12 @@
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
++import '../../../core/session/operational_context.dart';
+ import '../../dompet/application/dompet_provider.dart';
+ import '../domain/arus_kas_models.dart';
+ import 'arus_kas_repository.dart';
+ 
+ final arusKasRepositoryProvider = Provider<ArusKasRepository>((ref) {
+-  return ArusKasRepository(ref.watch(dompetRepositoryProvider));
++  return ArusKasRepository(ref.watch(dompetRepositoryProvider), context: ref.watch(operationalContextReaderProvider));
+ });
+ 
+ DateTime _startOfDay(DateTime d) => DateTime(d.year, d.month, d.day);
+diff --git a/lib/features/arus_kas/application/arus_kas_repository.dart b/lib/features/arus_kas/application/arus_kas_repository.dart
+index 3cc5077..93ac07d 100644
+--- a/lib/features/arus_kas/application/arus_kas_repository.dart
++++ b/lib/features/arus_kas/application/arus_kas_repository.dart
+@@ -2,24 +2,27 @@ import 'package:sqflite_sqlcipher/sqflite.dart';
+ import 'package:uuid/uuid.dart';
+ 
+ import '../../../core/data/app_database.dart';
++import '../../../core/session/operational_context.dart';
+ import '../../dompet/application/dompet_repository.dart';
+ import '../domain/arus_kas_models.dart';
+ 
+ class ArusKasRepository {
+   final _uuid = const Uuid();
+   final DompetRepository _dompetRepository;
++  final OperationalContextReader _context;
+ 
+-  ArusKasRepository(this._dompetRepository);
++  ArusKasRepository(this._dompetRepository, {required OperationalContextReader context}) : _context = context;
+ 
+   Future<Database> get _db => AppDatabase.instance.database;
+ 
+   /// Distinct categories used so far, per direction — feeds the
+   /// editable Kategori combobox (pick existing or type new).
+   Future<List<String>> getCategories(ArusKasDirection direction) async {
++    final branchId = _context().branchId;
+     final db = await _db;
+     final rows = await db.rawQuery(
+-      'SELECT DISTINCT category FROM cash_expenses WHERE direction = ? ORDER BY category ASC',
+-      [direction.dbValue],
++      'SELECT DISTINCT category FROM cash_expenses WHERE direction = ? AND branch_id = ? ORDER BY category ASC',
++      [direction.dbValue, branchId],
+     );
+     return rows.map((r) => r['category'] as String).toList();
+   }
+@@ -29,9 +32,10 @@ class ArusKasRepository {
+     DateTime? from,
+     DateTime? to,
+   }) async {
++    final branchId = _context().branchId;
+     final db = await _db;
+-    final where = StringBuffer('direction = ?');
+-    final args = <Object?>[direction.dbValue];
++    final where = StringBuffer('direction = ? AND branch_id = ?');
++    final args = <Object?>[direction.dbValue, branchId];
+ 
+     if (from != null) {
+       where.write(' AND transaction_date >= ?');
+@@ -46,7 +50,7 @@ class ArusKasRepository {
+ 
+     // Join cash_locations for display names in one pass rather than
+     // per-row, since the location set is small.
+-    final locationRows = await db.query('cash_locations');
++    final locationRows = await db.query('cash_locations', where: 'branch_id = ?', whereArgs: [branchId]);
+     final locationNames = {for (final l in locationRows) l['id'] as String: l['name'] as String};
+ 
+     return rows.map((row) => _entryFromRow(row, locationNames)).toList();
+@@ -87,6 +91,10 @@ class ArusKasRepository {
+     String? storeOrSupplierName,
+     String? detail,
+   }) async {
++    // Acting user + branch from the live session, taken before anything
++    // is written (the matching cash movement below takes its own).
++    final ctx = _context();
++
+     if (fundingSource == ArusKasFundingSource.cashLocation && sourceLocationId == null) {
+       throw ArgumentError('sourceLocationId is required when fundingSource is cashLocation');
+     }
+@@ -120,7 +128,8 @@ class ArusKasRepository {
+       'detail': detail,
+       'cash_movement_id': cashMovementId,
+       'created_at': DateTime.now().toIso8601String(),
+-      'created_by': null,
++      'created_by': ctx.userId,
++      'branch_id': ctx.branchId,
+     });
+   }
+ 
+@@ -129,21 +138,24 @@ class ArusKasRepository {
+   /// is a user-facing "remove this entry" action, distinct from the
+   /// ledger's general immutability (see DompetRepository.deleteCashMovement).
+   Future<void> deleteEntry(String id) async {
++    final branchId = _context().branchId;
+     final db = await _db;
+-    final rows = await db.query('cash_expenses', where: 'id = ?', whereArgs: [id], limit: 1);
++    // Only an entry of the acting branch can be removed.
++    final rows = await db.query('cash_expenses', where: 'id = ? AND branch_id = ?', whereArgs: [id, branchId], limit: 1);
+     if (rows.isEmpty) return;
+ 
+     final cashMovementId = rows.first['cash_movement_id'] as String?;
+     if (cashMovementId != null) {
+       await _dompetRepository.deleteCashMovement(cashMovementId);
+     }
+-    await db.delete('cash_expenses', where: 'id = ?', whereArgs: [id]);
++    await db.delete('cash_expenses', where: 'id = ? AND branch_id = ?', whereArgs: [id, branchId]);
+   }
+ 
+   Future<int> getTotal({required ArusKasDirection direction, DateTime? from, DateTime? to}) async {
++    final branchId = _context().branchId;
+     final db = await _db;
+-    final where = StringBuffer('direction = ?');
+-    final args = <Object?>[direction.dbValue];
++    final where = StringBuffer('direction = ? AND branch_id = ?');
++    final args = <Object?>[direction.dbValue, branchId];
+     if (from != null) {
+       where.write(' AND transaction_date >= ?');
+       args.add(from.toIso8601String());
+diff --git a/lib/features/dashboard/application/dashboard_provider.dart b/lib/features/dashboard/application/dashboard_provider.dart
+index 81dbed4..da4cc2a 100644
+--- a/lib/features/dashboard/application/dashboard_provider.dart
++++ b/lib/features/dashboard/application/dashboard_provider.dart
+@@ -4,10 +4,11 @@ import '../../../core/permissions/permission_key.dart';
+ import '../../../core/permissions/permission_providers.dart';
+ import '../../../core/session/app_session.dart';
+ import '../../../core/session/app_session_provider.dart';
++import '../../../core/session/operational_context.dart';
+ import '../domain/dashboard_models.dart';
+ import 'dashboard_repository.dart';
+ 
+-final dashboardRepositoryProvider = Provider<DashboardRepository>((ref) => DashboardRepository());
++final dashboardRepositoryProvider = Provider<DashboardRepository>((ref) => DashboardRepository(context: ref.watch(operationalContextReaderProvider)));
+ 
+ /// Dashboard page state: metrics + trend, loaded together (same pattern
+ /// as DompetState) so the page has one loading/error surface instead of
+diff --git a/lib/features/dashboard/application/dashboard_repository.dart b/lib/features/dashboard/application/dashboard_repository.dart
+index a43f608..c0a66cc 100644
+--- a/lib/features/dashboard/application/dashboard_repository.dart
++++ b/lib/features/dashboard/application/dashboard_repository.dart
+@@ -1,22 +1,31 @@
+ import 'package:sqflite_sqlcipher/sqflite.dart';
+ 
+ import '../../../core/data/app_database.dart';
++import '../../../core/session/operational_context.dart';
+ import '../domain/dashboard_models.dart';
+ 
+ /// Reads dashboard figures from the same `transactions` / `cash_movements`
+ /// tables every other feature writes to — no separate "dashboard data"
+ /// store. Mirrors the query style already used in DompetRepository
+ /// (raw SQL against sqflite, computed on read rather than cached).
++///
++/// Every figure is limited to the active branch ([OperationalContext],
++/// read at the moment of the call).
+ class DashboardRepository {
++  final OperationalContextReader _context;
++
++  DashboardRepository({required OperationalContextReader context}) : _context = context;
++
+   Future<Database> get _db => AppDatabase.instance.database;
+ 
+   Future<DashboardMetrics> getMetrics() async {
++    final branchId = _context().branchId;
+     final db = await _db;
+ 
+-    final todayOmzet = await _sumPaidTotalForDate(db, _today());
+-    final yesterdayOmzet = await _sumPaidTotalForDate(db, _today().subtract(const Duration(days: 1)));
+-    final todayExpense = await _sumExpenseForDate(db, _today());
+-    final todayOrderCount = await _countPaidOrdersForDate(db, _today());
++    final todayOmzet = await _sumPaidTotalForDate(db, _today(), branchId);
++    final yesterdayOmzet = await _sumPaidTotalForDate(db, _today().subtract(const Duration(days: 1)), branchId);
++    final todayExpense = await _sumExpenseForDate(db, _today(), branchId);
++    final todayOrderCount = await _countPaidOrdersForDate(db, _today(), branchId);
+ 
+     final labaKotor = todayOmzet - todayExpense;
+     final rataRata = todayOrderCount == 0 ? 0 : (todayOmzet / todayOrderCount).round();
+@@ -38,12 +47,13 @@ class DashboardRepository {
+   /// calendar day, 0 for days with no paid transactions (not omitted,
+   /// so the chart's x-axis stays continuous).
+   Future<List<SalesTrendPoint>> getSalesTrend({int days = 31}) async {
++    final branchId = _context().branchId;
+     final db = await _db;
+     final points = <SalesTrendPoint>[];
+ 
+     for (var i = days - 1; i >= 0; i--) {
+       final date = _today().subtract(Duration(days: i));
+-      final total = await _sumPaidTotalForDate(db, date);
++      final total = await _sumPaidTotalForDate(db, date, branchId);
+       final isWeekend = date.weekday == DateTime.saturday || date.weekday == DateTime.sunday;
+       points.add(SalesTrendPoint(date: date, value: total, isWeekend: isWeekend));
+     }
+@@ -59,18 +69,20 @@ class DashboardRepository {
+   String _dateOnly(DateTime date) =>
+       '${date.year.toString().padLeft(4, '0')}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
+ 
+-  Future<int> _sumPaidTotalForDate(Database db, DateTime date) async {
++  Future<int> _sumPaidTotalForDate(Database db, DateTime date, String branchId) async {
+     final result = await db.rawQuery(
+-      "SELECT COALESCE(SUM(total), 0) as total FROM transactions WHERE status = 'paid' AND date(paid_at) = ?",
+-      [_dateOnly(date)],
++      "SELECT COALESCE(SUM(total), 0) as total FROM transactions "
++      "WHERE status = 'paid' AND date(paid_at) = ? AND branch_id = ?",
++      [_dateOnly(date), branchId],
+     );
+     return result.first['total'] as int;
+   }
+ 
+-  Future<int> _countPaidOrdersForDate(Database db, DateTime date) async {
++  Future<int> _countPaidOrdersForDate(Database db, DateTime date, String branchId) async {
+     final result = await db.rawQuery(
+-      "SELECT COUNT(*) as cnt FROM transactions WHERE status = 'paid' AND date(paid_at) = ?",
+-      [_dateOnly(date)],
++      "SELECT COUNT(*) as cnt FROM transactions "
++      "WHERE status = 'paid' AND date(paid_at) = ? AND branch_id = ?",
++      [_dateOnly(date), branchId],
+     );
+     return result.first['cnt'] as int;
+   }
+@@ -79,10 +91,11 @@ class DashboardRepository {
+   /// the business" rows that exist today are `cash_movements` of type
+   /// 'expense' (per the Dompet ledger schema). Once a dedicated Expenses
+   /// module exists this should read from it instead/in addition.
+-  Future<int> _sumExpenseForDate(Database db, DateTime date) async {
++  Future<int> _sumExpenseForDate(Database db, DateTime date, String branchId) async {
+     final result = await db.rawQuery(
+-      "SELECT COALESCE(SUM(amount), 0) as total FROM cash_movements WHERE type = 'expense' AND date(created_at) = ?",
+-      [_dateOnly(date)],
++      "SELECT COALESCE(SUM(amount), 0) as total FROM cash_movements "
++      "WHERE type = 'expense' AND date(created_at) = ? AND branch_id = ?",
++      [_dateOnly(date), branchId],
+     );
+     return result.first['total'] as int;
+   }
+diff --git a/lib/features/dompet/application/dompet_provider.dart b/lib/features/dompet/application/dompet_provider.dart
+index 2586cce..4633b72 100644
+--- a/lib/features/dompet/application/dompet_provider.dart
++++ b/lib/features/dompet/application/dompet_provider.dart
+@@ -1,9 +1,10 @@
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
++import '../../../core/session/operational_context.dart';
+ import '../domain/dompet_models.dart';
+ import 'dompet_repository.dart';
+ 
+-final dompetRepositoryProvider = Provider<DompetRepository>((ref) => DompetRepository());
++final dompetRepositoryProvider = Provider<DompetRepository>((ref) => DompetRepository(context: ref.watch(operationalContextReaderProvider)));
+ 
+ /// All active cash locations (Store Cash + couriers) — used by the
+ /// checkout-side [CashLocationPicker] as well as the Dompet page.
+diff --git a/lib/features/dompet/application/dompet_repository.dart b/lib/features/dompet/application/dompet_repository.dart
+index 42012e7..bfc1392 100644
+--- a/lib/features/dompet/application/dompet_repository.dart
++++ b/lib/features/dompet/application/dompet_repository.dart
+@@ -2,29 +2,43 @@ import 'package:sqflite_sqlcipher/sqflite.dart';
+ import 'package:uuid/uuid.dart';
+ 
+ import '../../../core/data/app_database.dart';
++import '../../../core/session/operational_context.dart';
+ import '../domain/dompet_models.dart';
+ 
++/// Cash ledger (Dompet). Every movement and closing is attributed to the
++/// acting user and the active branch, both taken from [OperationalContext]
++/// at the moment of the write; every read is limited to the active branch.
++///
++/// KNOWN LIMITATION (not changed here): the store cash location is still
++/// the single hard-coded id 'loc-store' (also in dompet_screen.dart and
++/// cash_movement_tile.dart). That is correct while there is one branch;
++/// a second branch needs its own store location and a way to resolve it.
+ class DompetRepository {
+   final _uuid = const Uuid();
++  final OperationalContextReader _context;
++
++  DompetRepository({required OperationalContextReader context}) : _context = context;
+ 
+   Future<Database> get _db => AppDatabase.instance.database;
+ 
+   // --- Cash locations ---
+ 
+   Future<List<CashLocation>> getCashLocations({CashLocationType? type}) async {
++    final branchId = _context().branchId;
+     final db = await _db;
+     final rows = await db.query(
+       'cash_locations',
+-      where: type == null ? 'is_active = 1' : 'is_active = 1 AND type = ?',
+-      whereArgs: type == null ? null : [type.name],
++      where: type == null ? 'is_active = 1 AND branch_id = ?' : 'is_active = 1 AND type = ? AND branch_id = ?',
++      whereArgs: type == null ? [branchId] : [type.name, branchId],
+       orderBy: 'created_at ASC',
+     );
+     return rows.map(_locationFromRow).toList();
+   }
+ 
+   Future<CashLocation?> getCashLocation(String id) async {
++    final branchId = _context().branchId;
+     final db = await _db;
+-    final rows = await db.query('cash_locations', where: 'id = ?', whereArgs: [id], limit: 1);
++    final rows = await db.query('cash_locations', where: 'id = ? AND branch_id = ?', whereArgs: [id, branchId], limit: 1);
+     if (rows.isEmpty) return null;
+     return _locationFromRow(rows.first);
+   }
+@@ -45,15 +59,16 @@ class DompetRepository {
+   /// requires (§26: "Jangan membuat modul Dompet sebagai sistem saldo
+   /// sederhana... balance += cash").
+   Future<int> getLocationBalance(String locationId) async {
++    final branchId = _context().branchId;
+     final db = await _db;
+ 
+     final inResult = await db.rawQuery(
+-      'SELECT COALESCE(SUM(amount), 0) as total FROM cash_movements WHERE to_location_id = ?',
+-      [locationId],
++      'SELECT COALESCE(SUM(amount), 0) as total FROM cash_movements WHERE to_location_id = ? AND branch_id = ?',
++      [locationId, branchId],
+     );
+     final outResult = await db.rawQuery(
+-      'SELECT COALESCE(SUM(amount), 0) as total FROM cash_movements WHERE from_location_id = ?',
+-      [locationId],
++      'SELECT COALESCE(SUM(amount), 0) as total FROM cash_movements WHERE from_location_id = ? AND branch_id = ?',
++      [locationId, branchId],
+     );
+ 
+     final inTotal = inResult.first['total'] as int;
+@@ -90,11 +105,12 @@ class DompetRepository {
+   // --- Cash movements ---
+ 
+   Future<List<CashMovement>> getMovements({String? locationId, int limit = 100}) async {
++    final branchId = _context().branchId;
+     final db = await _db;
+     final rows = await db.query(
+       'cash_movements',
+-      where: locationId == null ? null : 'from_location_id = ? OR to_location_id = ?',
+-      whereArgs: locationId == null ? null : [locationId, locationId],
++      where: locationId == null ? 'branch_id = ?' : '(from_location_id = ? OR to_location_id = ?) AND branch_id = ?',
++      whereArgs: locationId == null ? [branchId] : [locationId, locationId, branchId],
+       orderBy: 'created_at DESC',
+       limit: limit,
+     );
+@@ -127,6 +143,7 @@ class DompetRepository {
+     required int amount,
+     required String transactionId,
+   }) async {
++    final ctx = _context();
+     final db = await _db;
+     await db.insert('cash_movements', {
+       'id': _uuid.v4(),
+@@ -138,7 +155,8 @@ class DompetRepository {
+       'reference_kasbon_id': null,
+       'reason': null,
+       'created_at': DateTime.now().toIso8601String(),
+-      'created_by': null,
++      'branch_id': ctx.branchId,
++      'created_by': ctx.userId,
+     });
+   }
+ 
+@@ -150,6 +168,7 @@ class DompetRepository {
+     required String courierLocationId,
+     required int amount,
+   }) async {
++    final ctx = _context();
+     final db = await _db;
+     await db.insert('cash_movements', {
+       'id': _uuid.v4(),
+@@ -161,7 +180,8 @@ class DompetRepository {
+       'reference_kasbon_id': null,
+       'reason': 'Setoran kurir',
+       'created_at': DateTime.now().toIso8601String(),
+-      'created_by': null,
++      'branch_id': ctx.branchId,
++      'created_by': ctx.userId,
+     });
+   }
+ 
+@@ -177,6 +197,7 @@ class DompetRepository {
+     required int amount,
+     String? reason,
+   }) async {
++    final ctx = _context();
+     final db = await _db;
+     final id = _uuid.v4();
+     await db.insert('cash_movements', {
+@@ -189,7 +210,8 @@ class DompetRepository {
+       'reference_kasbon_id': null,
+       'reason': reason,
+       'created_at': DateTime.now().toIso8601String(),
+-      'created_by': null,
++      'branch_id': ctx.branchId,
++      'created_by': ctx.userId,
+     });
+     return id;
+   }
+@@ -204,6 +226,7 @@ class DompetRepository {
+     required int amount,
+     String? reason,
+   }) async {
++    final ctx = _context();
+     final db = await _db;
+     final id = _uuid.v4();
+     await db.insert('cash_movements', {
+@@ -216,7 +239,8 @@ class DompetRepository {
+       'reference_kasbon_id': null,
+       'reason': reason ?? 'Pemasukan non-penjualan',
+       'created_at': DateTime.now().toIso8601String(),
+-      'created_by': null,
++      'branch_id': ctx.branchId,
++      'created_by': ctx.userId,
+     });
+     return id;
+   }
+@@ -227,8 +251,9 @@ class DompetRepository {
+   /// exception, scoped to Arus Kas entry deletion which is itself a
+   /// user-facing "undo this entry" action, not a correction-in-place.
+   Future<void> deleteCashMovement(String movementId) async {
++    final branchId = _context().branchId;
+     final db = await _db;
+-    await db.delete('cash_movements', where: 'id = ?', whereArgs: [movementId]);
++    await db.delete('cash_movements', where: 'id = ? AND branch_id = ?', whereArgs: [movementId, branchId]);
+   }
+ 
+   // --- Kasbon ---
+@@ -293,6 +318,7 @@ class DompetRepository {
+     required String courierName,
+     required int amount,
+   }) async {
++    final ctx = _context();
+     final db = await _db;
+     final kasbonId = _uuid.v4();
+     final now = DateTime.now().toIso8601String();
+@@ -320,7 +346,8 @@ class DompetRepository {
+       'reference_kasbon_id': kasbonId,
+       'reason': 'Konversi outstanding kurir menjadi kasbon',
+       'created_at': now,
+-      'created_by': null,
++      'branch_id': ctx.branchId,
++      'created_by': ctx.userId,
+     });
+ 
+     return (await getKasbonList()).firstWhere((k) => k.id == kasbonId);
+@@ -365,14 +392,22 @@ class DompetRepository {
+   // --- Tutup Dompet (closing) ---
+ 
+   Future<List<DompetClosing>> getClosings({int limit = 50}) async {
++    final branchId = _context().branchId;
+     final db = await _db;
+-    final rows = await db.query('dompet_closings', orderBy: 'period_end DESC', limit: limit);
++    final rows = await db.query(
++      'dompet_closings',
++      where: 'branch_id = ?',
++      whereArgs: [branchId],
++      orderBy: 'period_end DESC',
++      limit: limit,
++    );
+     return rows.map(_closingFromRow).toList();
+   }
+ 
+   Future<DompetClosing?> getLastClosing() async {
++    final branchId = _context().branchId;
+     final db = await _db;
+-    final rows = await db.query('dompet_closings', orderBy: 'period_end DESC', limit: 1);
++    final rows = await db.query('dompet_closings', where: 'branch_id = ?', whereArgs: [branchId], orderBy: 'period_end DESC', limit: 1);
+     if (rows.isEmpty) return null;
+     return _closingFromRow(rows.first);
+   }
+@@ -402,6 +437,7 @@ class DompetRepository {
+   /// Opening + Cash Sales + Courier Deposits - Cash Expenses, and
+   /// closing must be blocked while any courier holds outstanding cash.
+   Future<DompetClosingPreview> buildClosingPreview() async {
++    final branchId = _context().branchId;
+     final db = await _db;
+     final lastClosing = await getLastClosing();
+     final periodStart = lastClosing?.periodEnd ?? DateTime.fromMillisecondsSinceEpoch(0);
+@@ -411,8 +447,8 @@ class DompetRepository {
+       final column = asIncoming ? 'to_location_id' : 'from_location_id';
+       final result = await db.rawQuery(
+         'SELECT COALESCE(SUM(amount), 0) as total FROM cash_movements '
+-        'WHERE type = ? AND $column = ? AND created_at > ?',
+-        [type.dbValue, 'loc-store', periodStart.toIso8601String()],
++        'WHERE type = ? AND $column = ? AND created_at > ? AND branch_id = ?',
++        [type.dbValue, 'loc-store', periodStart.toIso8601String(), branchId],
+       );
+       return result.first['total'] as int;
+     }
+@@ -452,6 +488,8 @@ class DompetRepository {
+     DompetClosingStatus status = DompetClosingStatus.closed,
+     String? note,
+   }) async {
++    final ctx = _context();
++
+     if (!preview.canClose) {
+       throw StateError('Tidak bisa tutup dompet: masih ada uang kurir yang belum diselesaikan.');
+     }
+@@ -475,7 +513,8 @@ class DompetRepository {
+       'status': status.dbValue,
+       'note': note,
+       'created_at': now.toIso8601String(),
+-      'created_by': null,
++      'branch_id': ctx.branchId,
++      'created_by': ctx.userId,
+     });
+ 
+     if (discrepancy != 0) {
+@@ -492,7 +531,8 @@ class DompetRepository {
+         'reference_kasbon_id': null,
+         'reason': 'Selisih Tutup Dompet',
+         'created_at': now.toIso8601String(),
+-        'created_by': null,
++        'branch_id': ctx.branchId,
++        'created_by': ctx.userId,
+       });
+     }
+ 
+diff --git a/lib/features/history/application/history_provider.dart b/lib/features/history/application/history_provider.dart
+index 0fbfcc7..d22cef3 100644
+--- a/lib/features/history/application/history_provider.dart
++++ b/lib/features/history/application/history_provider.dart
+@@ -1,11 +1,12 @@
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
++import '../../../core/session/operational_context.dart';
+ import '../../pos/domain/order_models.dart';
+ import '../../pos/domain/transaction.dart';
+ import '../domain/history_models.dart';
+ import 'history_repository.dart';
+ 
+-final historyRepositoryProvider = Provider<HistoryRepository>((ref) => HistoryRepository());
++final historyRepositoryProvider = Provider<HistoryRepository>((ref) => HistoryRepository(context: ref.watch(operationalContextReaderProvider)));
+ 
+ class HistoryState {
+   final List<Transaction> transactions;
+diff --git a/lib/features/history/application/history_repository.dart b/lib/features/history/application/history_repository.dart
+index 8b5b614..9103d46 100644
+--- a/lib/features/history/application/history_repository.dart
++++ b/lib/features/history/application/history_repository.dart
+@@ -4,6 +4,7 @@ import 'package:sqflite_sqlcipher/sqflite.dart';
+ import 'package:uuid/uuid.dart';
+ 
+ import '../../../core/data/app_database.dart';
++import '../../../core/session/operational_context.dart';
+ import '../../dompet/application/dompet_repository.dart';
+ import '../../pos/domain/cart_item.dart';
+ import '../../pos/domain/order_models.dart';
+@@ -14,13 +15,24 @@ import '../../pos/domain/transaction.dart' as txn;
+ /// permission is explicitly UNSPECIFIED there, so no delete method
+ /// exists here at all, not even a disabled one.
+ class HistoryRepository {
+-  final DompetRepository _dompetRepository = DompetRepository();
++  final DompetRepository _dompetRepository;
++  final OperationalContextReader _context;
++
++  HistoryRepository({required OperationalContextReader context})
++      : _context = context,
++        _dompetRepository = DompetRepository(context: context);
+ 
+   Future<Database> get _db => AppDatabase.instance.database;
+ 
+   Future<List<txn.Transaction>> getTransactions() async {
++    final branchId = _context().branchId;
+     final db = await _db;
+-    final rows = await db.query('transactions', orderBy: 'created_at DESC');
++    final rows = await db.query(
++      'transactions',
++      where: 'branch_id = ?',
++      whereArgs: [branchId],
++      orderBy: 'created_at DESC',
++    );
+ 
+     final transactions = <txn.Transaction>[];
+     for (final row in rows) {
+diff --git a/lib/features/hpp_opname/application/hpp_opname_provider.dart b/lib/features/hpp_opname/application/hpp_opname_provider.dart
+index 0553ab7..2de7206 100644
+--- a/lib/features/hpp_opname/application/hpp_opname_provider.dart
++++ b/lib/features/hpp_opname/application/hpp_opname_provider.dart
+@@ -1,9 +1,10 @@
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
++import '../../../core/session/operational_context.dart';
+ import '../domain/hpp_opname_models.dart';
+ import 'hpp_opname_repository.dart';
+ 
+-final hppOpnameRepositoryProvider = Provider<HppOpnameRepository>((ref) => HppOpnameRepository());
++final hppOpnameRepositoryProvider = Provider<HppOpnameRepository>((ref) => HppOpnameRepository(context: ref.watch(operationalContextReaderProvider)));
+ 
+ /// One in-progress line in the Stok Opname input form — qty/price start
+ /// null/unset until the user types something, so "not yet counted" is
+diff --git a/lib/features/hpp_opname/application/hpp_opname_repository.dart b/lib/features/hpp_opname/application/hpp_opname_repository.dart
+index 2c243e7..982e3ea 100644
+--- a/lib/features/hpp_opname/application/hpp_opname_repository.dart
++++ b/lib/features/hpp_opname/application/hpp_opname_repository.dart
+@@ -2,6 +2,7 @@ import 'package:sqflite_sqlcipher/sqflite.dart';
+ import 'package:uuid/uuid.dart';
+ 
+ import '../../../core/data/app_database.dart';
++import '../../../core/session/operational_context.dart';
+ import '../domain/hpp_opname_models.dart';
+ 
+ /// CRUD access for HPP (ingredients/cost basis) and Stok Opname (monthly
+@@ -11,6 +12,9 @@ import '../domain/hpp_opname_models.dart';
+ /// [AppDatabase] directly.
+ class HppOpnameRepository {
+   final _uuid = const Uuid();
++  final OperationalContextReader _context;
++
++  HppOpnameRepository({required OperationalContextReader context}) : _context = context;
+ 
+   Future<Database> get _db => AppDatabase.instance.database;
+ 
+@@ -77,6 +81,7 @@ class HppOpnameRepository {
+   // --- Stok Opname: sessions ---
+ 
+   Future<List<StockOpnameSession>> getSessions() async {
++    final branchId = _context().branchId;
+     final db = await _db;
+     final rows = await db.rawQuery('''
+       SELECT
+@@ -85,9 +90,10 @@ class HppOpnameRepository {
+         COALESCE(SUM(i.qty * i.price_used), 0) as total_value
+       FROM stock_opname_sessions s
+       LEFT JOIN stock_opname_items i ON i.session_id = s.id
++      WHERE s.branch_id = ?
+       GROUP BY s.id
+       ORDER BY s.created_at DESC
+-    ''');
++    ''', [branchId]);
+ 
+     return rows.map((row) {
+       return StockOpnameSession(
+@@ -109,6 +115,7 @@ class HppOpnameRepository {
+     required List<StockOpnameItem> items,
+     required bool asDraft,
+   }) async {
++    final ctx = _context();
+     final db = await _db;
+     final now = DateTime.now().toIso8601String();
+     final sessionId = _uuid.v4();
+@@ -118,7 +125,8 @@ class HppOpnameRepository {
+       'status': asDraft ? StockOpnameStatus.draft.dbValue : StockOpnameStatus.selesai.dbValue,
+       'created_at': now,
+       'completed_at': asDraft ? null : now,
+-      'created_by': null, // no Staff/Auth module yet — see docs/06 phase 3
++      'created_by': ctx.userId,
++      'branch_id': ctx.branchId,
+     });
+ 
+     for (final item in items) {
+diff --git a/lib/features/laporan/application/laporan_provider.dart b/lib/features/laporan/application/laporan_provider.dart
+index 06b101e..3df074c 100644
+--- a/lib/features/laporan/application/laporan_provider.dart
++++ b/lib/features/laporan/application/laporan_provider.dart
+@@ -1,10 +1,11 @@
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
++import '../../../core/session/operational_context.dart';
+ import '../domain/laporan_models.dart';
+ import 'laporan_dummy_data.dart';
+ import 'laporan_repository.dart';
+ 
+-final laporanRepositoryProvider = Provider<LaporanRepository>((ref) => LaporanRepository());
++final laporanRepositoryProvider = Provider<LaporanRepository>((ref) => LaporanRepository(context: ref.watch(operationalContextReaderProvider)));
+ 
+ class LaporanState {
+   final ReportType reportType;
+diff --git a/lib/features/laporan/application/laporan_repository.dart b/lib/features/laporan/application/laporan_repository.dart
+index 5617e83..9469a84 100644
+--- a/lib/features/laporan/application/laporan_repository.dart
++++ b/lib/features/laporan/application/laporan_repository.dart
+@@ -1,6 +1,7 @@
+ import 'package:sqflite_sqlcipher/sqflite.dart';
+ 
+ import '../../../core/data/app_database.dart';
++import '../../../core/session/operational_context.dart';
+ import '../domain/laporan_models.dart';
+ 
+ /// NOT CURRENTLY CALLED: LaporanController routes to LaporanDummyData
+@@ -32,9 +33,14 @@ import '../domain/laporan_models.dart';
+ /// Ini". Fixing that touches Dashboard's own numbers and should be its
+ /// own change.
+ class LaporanRepository {
++  final OperationalContextReader _context;
++
++  LaporanRepository({required OperationalContextReader context}) : _context = context;
++
+   Future<Database> get _db => AppDatabase.instance.database;
+ 
+   Future<ReportData> getPendapatanReport(DateTime month) async {
++    final branchId = _context().branchId;
+     final db = await _db;
+     final daysInMonth = DateTime(month.year, month.month + 1, 0).day;
+ 
+@@ -47,6 +53,7 @@ class LaporanRepository {
+       year: month.year,
+       month: month.month,
+       daysInMonth: daysInMonth,
++      branchId: branchId,
+     );
+ 
+     final totalValue = trend.fold<int>(0, (sum, p) => sum + p.value);
+@@ -57,13 +64,15 @@ class LaporanRepository {
+       filter: "status = 'paid'",
+       year: month.year,
+       month: month.month,
++      branchId: branchId,
+     );
+-    final rows = await _getPendapatanRows(db, month.year, month.month);
++    final rows = await _getPendapatanRows(db, month.year, month.month, branchId);
+ 
+     return _build(totalValue: totalValue, txCount: txCount, daysInMonth: daysInMonth, trend: trend, rows: rows);
+   }
+ 
+   Future<ReportData> getPengeluaranReport(DateTime month) async {
++    final branchId = _context().branchId;
+     final db = await _db;
+     final daysInMonth = DateTime(month.year, month.month + 1, 0).day;
+ 
+@@ -76,6 +85,7 @@ class LaporanRepository {
+       year: month.year,
+       month: month.month,
+       daysInMonth: daysInMonth,
++      branchId: branchId,
+     );
+ 
+     final totalValue = trend.fold<int>(0, (sum, p) => sum + p.value);
+@@ -86,8 +96,9 @@ class LaporanRepository {
+       filter: "direction = 'pengeluaran'",
+       year: month.year,
+       month: month.month,
++      branchId: branchId,
+     );
+-    final rows = await _getPengeluaranRows(db, month.year, month.month);
++    final rows = await _getPengeluaranRows(db, month.year, month.month, branchId);
+ 
+     return _build(totalValue: totalValue, txCount: txCount, daysInMonth: daysInMonth, trend: trend, rows: rows);
+   }
+@@ -136,14 +147,15 @@ class LaporanRepository {
+     required int year,
+     required int month,
+     required int daysInMonth,
++    required String branchId,
+   }) async {
+     final result = await db.rawQuery(
+       "SELECT CAST(strftime('%d', $dateColumn) AS INTEGER) AS day, "
+       "COALESCE(SUM($amountColumn), 0) AS total "
+       "FROM $table "
+-      "WHERE $filter AND strftime('%Y-%m', $dateColumn) = ? "
++      "WHERE $filter AND strftime('%Y-%m', $dateColumn) = ? AND branch_id = ? "
+       "GROUP BY day",
+-      [_monthPrefix(year, month)],
++      [_monthPrefix(year, month), branchId],
+     );
+ 
+     final byDay = <int, int>{
+@@ -162,20 +174,22 @@ class LaporanRepository {
+     required String filter,
+     required int year,
+     required int month,
++    required String branchId,
+   }) async {
+     final result = await db.rawQuery(
+-      "SELECT COUNT(*) as cnt FROM $table WHERE $filter AND strftime('%Y-%m', $dateColumn) = ?",
+-      [_monthPrefix(year, month)],
++      "SELECT COUNT(*) as cnt FROM $table "
++      "WHERE $filter AND strftime('%Y-%m', $dateColumn) = ? AND branch_id = ?",
++      [_monthPrefix(year, month), branchId],
+     );
+     return _asInt(result.first['cnt']);
+   }
+ 
+-  Future<List<ReportRow>> _getPendapatanRows(Database db, int year, int month) async {
++  Future<List<ReportRow>> _getPendapatanRows(Database db, int year, int month, String branchId) async {
+     final rows = await db.rawQuery(
+       "SELECT display_number, customer_name, total, paid_at FROM transactions "
+-      "WHERE status = 'paid' AND strftime('%Y-%m', paid_at) = ? "
++      "WHERE status = 'paid' AND strftime('%Y-%m', paid_at) = ? AND branch_id = ? "
+       "ORDER BY paid_at DESC LIMIT 50",
+-      [_monthPrefix(year, month)],
++      [_monthPrefix(year, month), branchId],
+     );
+ 
+     return rows.map((row) {
+@@ -191,12 +205,12 @@ class LaporanRepository {
+     }).toList();
+   }
+ 
+-  Future<List<ReportRow>> _getPengeluaranRows(Database db, int year, int month) async {
++  Future<List<ReportRow>> _getPengeluaranRows(Database db, int year, int month, String branchId) async {
+     final rows = await db.rawQuery(
+       "SELECT category, store_or_supplier_name, amount, transaction_date FROM cash_expenses "
+-      "WHERE direction = 'pengeluaran' AND strftime('%Y-%m', transaction_date) = ? "
++      "WHERE direction = 'pengeluaran' AND strftime('%Y-%m', transaction_date) = ? AND branch_id = ? "
+       "ORDER BY transaction_date DESC, created_at DESC LIMIT 50",
+-      [_monthPrefix(year, month)],
++      [_monthPrefix(year, month), branchId],
+     );
+ 
+     return rows.map((row) {
+diff --git a/lib/features/pos/application/cart_provider.dart b/lib/features/pos/application/cart_provider.dart
+index 4c7a4fc..bd6fbeb 100644
+--- a/lib/features/pos/application/cart_provider.dart
++++ b/lib/features/pos/application/cart_provider.dart
+@@ -1,5 +1,6 @@
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
++import '../../../core/session/operational_context.dart';
+ import '../../menu_management/domain/menu_management_models.dart';
+ import '../domain/cart_item.dart';
+ import '../domain/cart_state.dart';
+@@ -9,7 +10,7 @@ import '../domain/order_models.dart';
+ import '../domain/transaction.dart';
+ import 'pos_repository.dart';
+ 
+-final posRepositoryProvider = Provider<PosRepository>((ref) => PosRepository());
++final posRepositoryProvider = Provider<PosRepository>((ref) => PosRepository(context: ref.watch(operationalContextReaderProvider)));
+ 
+ /// NOTE: not persisted across app restarts yet (the reference app's
+ /// draft survives via Zustand's `persist` + localStorage). Local
+diff --git a/lib/features/pos/application/pos_repository.dart b/lib/features/pos/application/pos_repository.dart
+index b4cdc65..74f3d47 100644
+--- a/lib/features/pos/application/pos_repository.dart
++++ b/lib/features/pos/application/pos_repository.dart
+@@ -4,6 +4,7 @@ import 'package:sqflite_sqlcipher/sqflite.dart';
+ import 'package:uuid/uuid.dart';
+ 
+ import '../../../core/data/app_database.dart';
++import '../../../core/session/operational_context.dart';
+ import '../../dompet/application/dompet_repository.dart';
+ import '../../menu_management/application/menu_management_repository.dart';
+ import '../../menu_management/domain/menu_management_models.dart';
+@@ -16,7 +17,12 @@ import '../domain/voucher.dart';
+ class PosRepository {
+   final _uuid = const Uuid();
+   final MenuManagementRepository _menuRepository = MenuManagementRepository();
+-  final DompetRepository _dompetRepository = DompetRepository();
++  final DompetRepository _dompetRepository;
++  final OperationalContextReader _context;
++
++  PosRepository({required OperationalContextReader context})
++      : _context = context,
++        _dompetRepository = DompetRepository(context: context);
+ 
+   Future<Database> get _db => AppDatabase.instance.database;
+ 
+@@ -119,6 +125,9 @@ class PosRepository {
+     List<SplitPaymentEntry> splitPayments = const [],
+     String? cashLocationId,
+   }) async {
++    // Acting user + branch come from the live session, never from the
++    // caller. Taken first so a missing session fails before anything is written.
++    final ctx = _context();
+     final db = await _db;
+     final now = DateTime.now();
+     final id = _uuid.v4();
+@@ -156,6 +165,8 @@ class PosRepository {
+           : jsonEncode(splitPayments.map((p) => {'method': p.method.label, 'amount': p.amount}).toList()),
+       'created_at': now.toIso8601String(),
+       'paid_at': status == txn.TransactionStatus.paid ? now.toIso8601String() : null,
++      'created_by': ctx.userId,
++      'branch_id': ctx.branchId,
+     });
+ 
+     for (final item in items) {
+diff --git a/test/operational_context_test.dart b/test/operational_context_test.dart
+new file mode 100644
+index 0000000..f8dc401
+--- /dev/null
++++ b/test/operational_context_test.dart
+@@ -0,0 +1,286 @@
++// Tahap B / B3 — WHO acts and in WHICH branch.
++//
++// These tests need NO database, so unlike the DB tests they run with a
++// plain `flutter test test/operational_context_test.dart`. They cover:
++//   * the actor/branch is read from the LIVE session at the time of the
++//     call (auto-lock -> unlock keeps the same user; "Ganti akun" and
++//     logout take effect on the very next call),
++//   * every operational write and read refuses to run without a session,
++//     and does so BEFORE touching the database.
++//
++// What they do not cover: the lock-screen UI flow itself
++// (AppLifecycleGuard -> PinLoginScreen). By reading the code, that flow
++// never writes AppSession (only login/logout/restore/setActiveBranch do),
++// which is what the auto-lock test below relies on; driving the real
++// widgets needs a widget/integration test.
++import 'package:flutter_test/flutter_test.dart';
++import 'package:mamam_kasir/core/audit/audit_event_type.dart';
++import 'package:mamam_kasir/core/audit/audit_repository.dart';
++import 'package:mamam_kasir/core/session/app_session.dart';
++import 'package:mamam_kasir/core/session/app_session_provider.dart';
++import 'package:mamam_kasir/core/session/branch_access_repository.dart';
++import 'package:mamam_kasir/core/session/operational_context.dart';
++import 'package:mamam_kasir/features/arus_kas/application/arus_kas_repository.dart';
++import 'package:mamam_kasir/features/arus_kas/domain/arus_kas_models.dart';
++import 'package:mamam_kasir/features/dashboard/application/dashboard_repository.dart';
++import 'package:mamam_kasir/features/dompet/application/dompet_repository.dart';
++import 'package:mamam_kasir/features/dompet/domain/dompet_models.dart';
++import 'package:mamam_kasir/features/history/application/history_repository.dart';
++import 'package:mamam_kasir/features/hpp_opname/application/hpp_opname_repository.dart';
++import 'package:mamam_kasir/features/pos/application/pos_repository.dart';
++import 'package:mamam_kasir/features/pos/domain/order_models.dart';
++import 'package:mamam_kasir/features/pos/domain/transaction.dart' as txn;
++import 'package:shared_preferences/shared_preferences.dart';
++
++class _FakeAudit extends AuditRepository {
++  @override
++  Future<void> record({
++    required AuditEventType eventType,
++    String? actorUserId,
++    String? metadata,
++  }) async {}
++}
++
++/// Stands in for the database-backed branch lookup: a user's default
++/// branch is whatever the test says it is.
++class _FakeBranchAccess extends BranchAccessRepository {
++  final Map<String, String?> defaultBranchByUser;
++
++  _FakeBranchAccess(this.defaultBranchByUser);
++
++  @override
++  Future<List<AccessibleBranch>> accessibleBranches({
++    required String userId,
++    required AppRole role,
++  }) async {
++    return const <AccessibleBranch>[];
++  }
++
++  @override
++  Future<String?> resolveActiveBranchId({
++    required String userId,
++    required AppRole role,
++    String? preferredBranchId,
++  }) async {
++    return preferredBranchId ?? defaultBranchByUser[userId];
++  }
++}
++
++/// A reader for "nobody is signed in".
++OperationalContext _noSession() {
++  throw const NoOperationalContextException('tidak ada sesi');
++}
++
++AppSessionController _newSession() {
++  return AppSessionController(
++    audit: _FakeAudit(),
++    branchAccess: _FakeBranchAccess({'user-a': 'branch-1', 'user-b': 'branch-2'}),
++  );
++}
++
++void main() {
++  TestWidgetsFlutterBinding.ensureInitialized();
++
++  group('OperationalContext.fromSession', () {
++    test('no signed-in user is refused', () {
++      expect(
++        () => OperationalContext.fromSession(AppSession.empty),
++        throwsA(isA<NoOperationalContextException>()),
++      );
++    });
++
++    test('a signed-in user without an active branch is refused', () {
++      const session = AppSession(userId: 'user-c', username: 'c', role: AppRole.manager);
++      expect(
++        () => OperationalContext.fromSession(session),
++        throwsA(isA<NoOperationalContextException>()),
++      );
++    });
++
++    test('user + active branch become the context', () {
++      const session = AppSession(userId: 'user-a', username: 'a', role: AppRole.manager, branchId: 'branch-1');
++      final context = OperationalContext.fromSession(session);
++      expect(context.userId, 'user-a');
++      expect(context.branchId, 'branch-1');
++    });
++  });
++
++  group('the actor follows the live session', () {
++    late AppSessionController session;
++
++    OperationalContext read() => OperationalContext.fromSession(session.state);
++
++    setUp(() {
++      SharedPreferences.setMockInitialValues({});
++      session = _newSession();
++    });
++
++    test('auto-lock then unlock: the actor is still the same user', () async {
++      await session.login(userId: 'user-a', username: 'a', role: AppRole.manager);
++      final before = read();
++      final sessionBefore = session.state;
++
++      // Auto-lock and unlock never write the session, so there is nothing
++      // to do here — which is the property being asserted: the same
++      // session object is still in place and yields the same actor.
++      expect(identical(session.state, sessionBefore), isTrue);
++      expect(read().userId, before.userId);
++      expect(read().branchId, before.branchId);
++
++      // The app may also be killed while locked. A cold start restores
++      // the same identity from storage.
++      final afterColdStart = _newSession();
++      await afterColdStart.restore();
++      final restored = OperationalContext.fromSession(afterColdStart.state);
++      expect(restored.userId, 'user-a');
++      expect(restored.branchId, 'branch-1');
++    });
++
++    test('"Ganti akun": the next call is attributed to the new user and their branch', () async {
++      await session.login(userId: 'user-a', username: 'a', role: AppRole.manager);
++      expect(read().userId, 'user-a');
++      expect(read().branchId, 'branch-1');
++
++      await session.login(userId: 'user-b', username: 'b', role: AppRole.staff);
++
++      expect(read().userId, 'user-b');
++      expect(read().branchId, 'branch-2');
++    });
++
++    test('logout leaves no stale actor behind', () async {
++      await session.login(userId: 'user-a', username: 'a', role: AppRole.manager);
++      expect(read().userId, 'user-a');
++
++      await session.logout();
++
++      expect(read, throwsA(isA<NoOperationalContextException>()));
++    });
++  });
++
++  group('writes without a session are refused before touching the database', () {
++    final dompet = DompetRepository(context: _noSession);
++
++    test('Dompet: cash sale', () {
++      expect(
++        dompet.recordCashSale(toLocationId: 'loc', amount: 1000, transactionId: 't1'),
++        throwsA(isA<NoOperationalContextException>()),
++      );
++    });
++
++    test('Dompet: courier deposit', () {
++      expect(
++        dompet.recordCourierDeposit(courierLocationId: 'courier', amount: 1000),
++        throwsA(isA<NoOperationalContextException>()),
++      );
++    });
++
++    test('Dompet: cash expense', () {
++      expect(
++        dompet.recordCashExpense(fromLocationId: 'loc', amount: 1000),
++        throwsA(isA<NoOperationalContextException>()),
++      );
++    });
++
++    test('Dompet: cash income', () {
++      expect(
++        dompet.recordCashIncome(toLocationId: 'loc', amount: 1000),
++        throwsA(isA<NoOperationalContextException>()),
++      );
++    });
++
++    test('Dompet: convert to kasbon (its cash movement leg)', () {
++      expect(
++        dompet.convertToKasbon(courierLocationId: 'courier', courierName: 'Budi', amount: 1000),
++        throwsA(isA<NoOperationalContextException>()),
++      );
++    });
++
++    test('Dompet: closing', () {
++      final preview = DompetClosingPreview(
++        periodStart: DateTime(2026, 1, 1),
++        openingBalance: 0,
++        cashSalesTotal: 0,
++        courierDepositsTotal: 0,
++        cashExpensesTotal: 0,
++        expectedCash: 0,
++        outstandingCouriers: const [],
++      );
++      expect(
++        dompet.closeDompet(preview: preview, countedCash: 0),
++        throwsA(isA<NoOperationalContextException>()),
++      );
++    });
++
++    test('Arus Kas: new entry', () {
++      final arusKas = ArusKasRepository(dompet, context: _noSession);
++      expect(
++        arusKas.addEntry(
++          direction: ArusKasDirection.pengeluaran,
++          category: 'Belanja',
++          amount: 1000,
++          transactionDate: DateTime(2026, 1, 1),
++          fundingSource: ArusKasFundingSource.nonCash,
++        ),
++        throwsA(isA<NoOperationalContextException>()),
++      );
++    });
++
++    test('Stok Opname: new session', () {
++      final opname = HppOpnameRepository(context: _noSession);
++      expect(
++        opname.submitSession(items: const [], asDraft: true),
++        throwsA(isA<NoOperationalContextException>()),
++      );
++    });
++
++    test('POS: checkout', () {
++      final pos = PosRepository(context: _noSession);
++      expect(
++        pos.saveTransaction(
++          status: txn.TransactionStatus.paid,
++          orderType: OrderType.takeaway,
++          items: const [],
++          subtotal: 0,
++          voucherDiscount: 0,
++          manualDiscountAmount: 0,
++          taxAmount: 0,
++          serviceAmount: 0,
++          deliveryFee: 0,
++          roundingAdjustment: 0,
++          total: 0,
++        ),
++        throwsA(isA<NoOperationalContextException>()),
++      );
++    });
++  });
++
++  group('reads without a session are refused too (never "all branches")', () {
++    final dompet = DompetRepository(context: _noSession);
++
++    test('Riwayat', () {
++      expect(HistoryRepository(context: _noSession).getTransactions(), throwsA(isA<NoOperationalContextException>()));
++    });
++
++    test('Dashboard', () {
++      expect(DashboardRepository(context: _noSession).getMetrics(), throwsA(isA<NoOperationalContextException>()));
++      expect(DashboardRepository(context: _noSession).getSalesTrend(), throwsA(isA<NoOperationalContextException>()));
++    });
++
++    test('Arus Kas', () {
++      final arusKas = ArusKasRepository(dompet, context: _noSession);
++      expect(arusKas.getEntries(direction: ArusKasDirection.pengeluaran), throwsA(isA<NoOperationalContextException>()));
++      expect(arusKas.getTotal(direction: ArusKasDirection.pengeluaran), throwsA(isA<NoOperationalContextException>()));
++    });
++
++    test('Dompet', () {
++      expect(dompet.getMovements(), throwsA(isA<NoOperationalContextException>()));
++      expect(dompet.getLocationBalance('loc'), throwsA(isA<NoOperationalContextException>()));
++      expect(dompet.getClosings(), throwsA(isA<NoOperationalContextException>()));
++      expect(dompet.getLastClosing(), throwsA(isA<NoOperationalContextException>()));
++    });
++
++    test('Stok Opname', () {
++      expect(HppOpnameRepository(context: _noSession).getSessions(), throwsA(isA<NoOperationalContextException>()));
++    });
++  });
++}
+diff --git a/test/operational_scope_db_test.dart b/test/operational_scope_db_test.dart
+new file mode 100644
+index 0000000..4397f1d
+--- /dev/null
++++ b/test/operational_scope_db_test.dart
+@@ -0,0 +1,297 @@
++// Tahap B / B3 — branch scoping of operational data, against the real
++// (encrypted) database schema: a second branch's rows must be invisible
++// to the first branch, every write must be stamped with the acting user
++// and branch, and one branch cannot delete another branch's entry.
++//
++// IMPORTANT — like test/app_database_auth_test.dart and
++// test/app_database_branch_scope_test.dart, this needs a real device or
++// emulator (sqflite_sqlcipher has no host-side test mode). It has been
++// written and syntax-checked but NOT run; the host-runnable part of B3 is
++// test/operational_context_test.dart.
++import 'dart:io';
++
++import 'package:flutter_test/flutter_test.dart';
++import 'package:mamam_kasir/core/data/app_database.dart';
++import 'package:mamam_kasir/core/session/operational_context.dart';
++import 'package:mamam_kasir/features/arus_kas/application/arus_kas_repository.dart';
++import 'package:mamam_kasir/features/arus_kas/domain/arus_kas_models.dart';
++import 'package:mamam_kasir/features/dashboard/application/dashboard_repository.dart';
++import 'package:mamam_kasir/features/dompet/application/dompet_repository.dart';
++import 'package:mamam_kasir/features/history/application/history_repository.dart';
++import 'package:mamam_kasir/features/hpp_opname/application/hpp_opname_repository.dart';
++import 'package:mamam_kasir/features/pos/application/pos_repository.dart';
++import 'package:mamam_kasir/features/pos/domain/order_models.dart';
++import 'package:mamam_kasir/features/pos/domain/transaction.dart' as txn;
++import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
++import 'package:plugin_platform_interface/plugin_platform_interface.dart';
++import 'package:sqflite_sqlcipher/sqflite.dart';
++
++class _FakePathProvider extends PathProviderPlatform with MockPlatformInterfaceMixin {
++  final String tempDirPath;
++  _FakePathProvider.withPath(this.tempDirPath);
++
++  @override
++  Future<String?> getApplicationDocumentsPath() async => tempDirPath;
++}
++
++/// The branch the fresh database is seeded with (all demo rows belong to it).
++const _branch1 = 'branch-cibarusah';
++const _branch2 = 'branch-2';
++
++OperationalContextReader _as(String userId, String branchId) {
++  return () => OperationalContext(userId: userId, branchId: branchId);
++}
++
++/// Everything the app shows for one branch, boiled down to comparable values.
++Future<Map<String, Object?>> _viewOf(OperationalContextReader context) async {
++  final history = HistoryRepository(context: context);
++  final dashboard = DashboardRepository(context: context);
++  final dompet = DompetRepository(context: context);
++  final arusKas = ArusKasRepository(dompet, context: context);
++  final opname = HppOpnameRepository(context: context);
++
++  final metrics = await dashboard.getMetrics();
++  return {
++    'transactions': (await history.getTransactions()).map((t) => t.id).toList(),
++    'omzetHariIni': metrics.omzetHariIni,
++    'totalPesanan': metrics.totalPesanan,
++    'totalPengeluaran': metrics.totalPengeluaran,
++    'arusKasOut': await arusKas.getTotal(direction: ArusKasDirection.pengeluaran),
++    'arusKasEntries': (await arusKas.getEntries(direction: ArusKasDirection.pengeluaran)).map((e) => e.id).toList(),
++    'movements': (await dompet.getMovements()).map((m) => m.id).toList(),
++    'locations': (await dompet.getCashLocations()).map((l) => l.id).toList(),
++    'storeBalance': await dompet.getLocationBalance('loc-store'),
++    'closings': (await dompet.getClosings()).map((c) => c.id).toList(),
++    'opname': (await opname.getSessions()).map((s) => s.id).toList(),
++  };
++}
++
++/// One row of each operational kind, all belonging to branch 2.
++Future<void> _seedBranch2(Database db) async {
++  final now = DateTime.now().toIso8601String();
++  final today = DateTime.now().toIso8601String();
++
++  await db.insert('branches', {
++    'id': _branch2,
++    'name': 'Cabang 2',
++    'is_active': 1,
++    'sort_order': 1,
++    'created_at': now,
++    'updated_at': now,
++  });
++  await db.insert('transactions', {
++    'id': 'b2-t1',
++    'display_number': '#B2-1',
++    'status': 'paid',
++    'order_type': 'Takeaway',
++    'subtotal': 777000,
++    'voucher_discount': 0,
++    'manual_discount_amount': 0,
++    'tax_amount': 0,
++    'service_amount': 0,
++    'delivery_fee': 0,
++    'rounding_adjustment': 0,
++    'total': 777000,
++    'created_at': now,
++    'paid_at': today,
++    'created_by': 'user-2',
++    'branch_id': _branch2,
++  });
++  await db.insert('cash_locations', {
++    'id': 'loc-b2',
++    'type': 'courier',
++    'name': 'Kurir Cabang 2',
++    'is_active': 1,
++    'created_at': now,
++    'updated_at': now,
++    'branch_id': _branch2,
++  });
++  await db.insert('cash_movements', {
++    'id': 'b2-m1',
++    'type': 'expense',
++    'from_location_id': 'loc-b2',
++    'amount': 5000,
++    'reason': 'Belanja',
++    'created_at': now,
++    'created_by': 'user-2',
++    'branch_id': _branch2,
++  });
++  await db.insert('cash_expenses', {
++    'id': 'b2-e1',
++    'direction': 'pengeluaran',
++    'category': 'Belanja',
++    'amount': 5000,
++    'transaction_date': today,
++    'source_location_id': 'loc-b2',
++    'funding_source': 'cash_location',
++    'cash_movement_id': 'b2-m1',
++    'created_at': now,
++    'created_by': 'user-2',
++    'branch_id': _branch2,
++  });
++  await db.insert('dompet_closings', {
++    'id': 'b2-c1',
++    'period_start': now,
++    'period_end': now,
++    'opening_balance': 0,
++    'cash_sales_total': 0,
++    'courier_deposits_total': 0,
++    'cash_expenses_total': 5000,
++    'expected_cash': -5000,
++    'counted_cash': -5000,
++    'discrepancy': 0,
++    'status': 'closed',
++    'created_at': now,
++    'created_by': 'user-2',
++    'branch_id': _branch2,
++  });
++  await db.insert('stock_opname_sessions', {
++    'id': 'b2-o1',
++    'status': 'completed',
++    'created_at': now,
++    'completed_at': now,
++    'created_by': 'user-2',
++    'branch_id': _branch2,
++  });
++}
++
++void main() {
++  TestWidgetsFlutterBinding.ensureInitialized();
++
++  late Directory tempDir;
++  late Database db;
++
++  setUp(() async {
++    tempDir = await Directory.systemTemp.createTemp('mamam_kasir_scope_test_');
++    PathProviderPlatform.instance = _FakePathProvider.withPath(tempDir.path);
++    db = await AppDatabase.instance.database;
++  });
++
++  tearDown(() async {
++    if (await tempDir.exists()) {
++      await tempDir.delete(recursive: true);
++    }
++  });
++
++  final branch1 = _as('user-1', _branch1);
++  final branch2 = _as('user-2', _branch2);
++
++  group('reads are limited to the acting branch', () {
++    test("another branch's rows never change what branch 1 sees", () async {
++      final before = await _viewOf(branch1);
++
++      await _seedBranch2(db);
++
++      expect(await _viewOf(branch1), equals(before));
++    });
++
++    test('branch 2 sees exactly its own rows', () async {
++      await _seedBranch2(db);
++
++      final view = await _viewOf(branch2);
++
++      expect(view['transactions'], ['b2-t1']);
++      expect(view['omzetHariIni'], 777000);
++      expect(view['totalPesanan'], 1);
++      expect(view['totalPengeluaran'], 5000);
++      expect(view['arusKasOut'], 5000);
++      expect(view['arusKasEntries'], ['b2-e1']);
++      expect(view['movements'], ['b2-m1']);
++      expect(view['locations'], ['loc-b2']);
++      expect(view['storeBalance'], 0, reason: "branch 1's store drawer is not branch 2's cash");
++      expect(view['closings'], ['b2-c1']);
++      expect(view['opname'], ['b2-o1']);
++    });
++  });
++
++  group('writes are stamped with the acting user and branch', () {
++    Future<Map<String, Object?>> newest(String table, String orderBy) async {
++      final rows = await db.query(table, orderBy: '$orderBy DESC', limit: 1);
++      return rows.first;
++    }
++
++    test('Arus Kas entry (non-cash) and its cash movement (cash location)', () async {
++      await _seedBranch2(db);
++      final dompet = DompetRepository(context: branch2);
++      final arusKas = ArusKasRepository(dompet, context: branch2);
++
++      await arusKas.addEntry(
++        direction: ArusKasDirection.pengeluaran,
++        category: 'Stamp non-cash',
++        amount: 1000,
++        transactionDate: DateTime.now(),
++        fundingSource: ArusKasFundingSource.nonCash,
++      );
++      await arusKas.addEntry(
++        direction: ArusKasDirection.pengeluaran,
++        category: 'Stamp cash',
++        amount: 2000,
++        transactionDate: DateTime.now(),
++        fundingSource: ArusKasFundingSource.cashLocation,
++        sourceLocationId: 'loc-b2',
++      );
++
++      for (final category in ['Stamp non-cash', 'Stamp cash']) {
++        final entry = await db.query('cash_expenses', where: 'category = ?', whereArgs: [category]);
++        expect(entry.single['branch_id'], _branch2, reason: category);
++        expect(entry.single['created_by'], 'user-2', reason: category);
++      }
++      final movement = await db.query('cash_movements', where: 'reason = ?', whereArgs: ['Stamp cash']);
++      expect(movement.single['branch_id'], _branch2);
++      expect(movement.single['created_by'], 'user-2');
++    });
++
++    test('Dompet cash sale', () async {
++      await _seedBranch2(db);
++
++      await DompetRepository(context: branch2).recordCashSale(toLocationId: 'loc-b2', amount: 1000, transactionId: 'x');
++
++      final row = await newest('cash_movements', 'created_at');
++      expect(row['type'], 'cash_sale');
++      expect(row['branch_id'], _branch2);
++      expect(row['created_by'], 'user-2');
++    });
++
++    test('Stok Opname session', () async {
++      await _seedBranch2(db);
++
++      await HppOpnameRepository(context: branch2).submitSession(items: const [], asDraft: true);
++
++      final row = await newest('stock_opname_sessions', 'created_at');
++      expect(row['branch_id'], _branch2);
++      expect(row['created_by'], 'user-2');
++    });
++
++    test('POS checkout', () async {
++      await _seedBranch2(db);
++
++      final saved = await PosRepository(context: branch2).saveTransaction(
++        status: txn.TransactionStatus.paid,
++        orderType: OrderType.takeaway,
++        items: const [],
++        subtotal: 0,
++        voucherDiscount: 0,
++        manualDiscountAmount: 0,
++        taxAmount: 0,
++        serviceAmount: 0,
++        deliveryFee: 0,
++        roundingAdjustment: 0,
++        total: 0,
++      );
++
++      final row = (await db.query('transactions', where: 'id = ?', whereArgs: [saved.id])).single;
++      expect(row['branch_id'], _branch2);
++      expect(row['created_by'], 'user-2');
++    });
++  });
++
++  test("one branch cannot delete another branch's Arus Kas entry", () async {
++    await _seedBranch2(db);
++    final dompet = DompetRepository(context: branch1);
++
++    await ArusKasRepository(dompet, context: branch1).deleteEntry('b2-e1');
++
++    expect(await db.query('cash_expenses', where: 'id = ?', whereArgs: ['b2-e1']), hasLength(1));
++    expect(await db.query('cash_movements', where: 'id = ?', whereArgs: ['b2-m1']), hasLength(1));
++  });
++}
+-- 
+2.43.0
+

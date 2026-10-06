@@ -4,6 +4,7 @@ import 'package:sqflite_sqlcipher/sqflite.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../../core/data/app_database.dart';
+import '../../../core/session/operational_context.dart';
 import '../../dompet/application/dompet_repository.dart';
 import '../../pos/domain/cart_item.dart';
 import '../../pos/domain/order_models.dart';
@@ -14,13 +15,24 @@ import '../../pos/domain/transaction.dart' as txn;
 /// permission is explicitly UNSPECIFIED there, so no delete method
 /// exists here at all, not even a disabled one.
 class HistoryRepository {
-  final DompetRepository _dompetRepository = DompetRepository();
+  final DompetRepository _dompetRepository;
+  final OperationalContextReader _context;
+
+  HistoryRepository({required OperationalContextReader context})
+      : _context = context,
+        _dompetRepository = DompetRepository(context: context);
 
   Future<Database> get _db => AppDatabase.instance.database;
 
   Future<List<txn.Transaction>> getTransactions() async {
+    final branchId = _context().branchId;
     final db = await _db;
-    final rows = await db.query('transactions', orderBy: 'created_at DESC');
+    final rows = await db.query(
+      'transactions',
+      where: 'branch_id = ?',
+      whereArgs: [branchId],
+      orderBy: 'created_at DESC',
+    );
 
     final transactions = <txn.Transaction>[];
     for (final row in rows) {

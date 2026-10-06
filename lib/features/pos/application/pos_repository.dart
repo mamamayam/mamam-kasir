@@ -4,6 +4,7 @@ import 'package:sqflite_sqlcipher/sqflite.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../../core/data/app_database.dart';
+import '../../../core/session/operational_context.dart';
 import '../../dompet/application/dompet_repository.dart';
 import '../../menu_management/application/menu_management_repository.dart';
 import '../../menu_management/domain/menu_management_models.dart';
@@ -16,7 +17,12 @@ import '../domain/voucher.dart';
 class PosRepository {
   final _uuid = const Uuid();
   final MenuManagementRepository _menuRepository = MenuManagementRepository();
-  final DompetRepository _dompetRepository = DompetRepository();
+  final DompetRepository _dompetRepository;
+  final OperationalContextReader _context;
+
+  PosRepository({required OperationalContextReader context})
+      : _context = context,
+        _dompetRepository = DompetRepository(context: context);
 
   Future<Database> get _db => AppDatabase.instance.database;
 
@@ -119,6 +125,9 @@ class PosRepository {
     List<SplitPaymentEntry> splitPayments = const [],
     String? cashLocationId,
   }) async {
+    // Acting user + branch come from the live session, never from the
+    // caller. Taken first so a missing session fails before anything is written.
+    final ctx = _context();
     final db = await _db;
     final now = DateTime.now();
     final id = _uuid.v4();
@@ -156,6 +165,8 @@ class PosRepository {
           : jsonEncode(splitPayments.map((p) => {'method': p.method.label, 'amount': p.amount}).toList()),
       'created_at': now.toIso8601String(),
       'paid_at': status == txn.TransactionStatus.paid ? now.toIso8601String() : null,
+      'created_by': ctx.userId,
+      'branch_id': ctx.branchId,
     });
 
     for (final item in items) {

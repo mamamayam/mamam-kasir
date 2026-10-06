@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/session/operational_context.dart';
 import '../../menu_management/domain/menu_management_models.dart';
 import '../domain/cart_item.dart';
 import '../domain/cart_state.dart';
@@ -9,7 +10,7 @@ import '../domain/order_models.dart';
 import '../domain/transaction.dart';
 import 'pos_repository.dart';
 
-final posRepositoryProvider = Provider<PosRepository>((ref) => PosRepository());
+final posRepositoryProvider = Provider<PosRepository>((ref) => PosRepository(context: ref.watch(operationalContextReaderProvider)));
 
 /// NOTE: not persisted across app restarts yet (the reference app's
 /// draft survives via Zustand's `persist` + localStorage). Local

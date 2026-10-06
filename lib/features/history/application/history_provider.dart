@@ -1,11 +1,13 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/session/branch_providers.dart';
+import '../../../core/session/operational_context.dart';
 import '../../pos/domain/order_models.dart';
 import '../../pos/domain/transaction.dart';
 import '../domain/history_models.dart';
 import 'history_repository.dart';
 
-final historyRepositoryProvider = Provider<HistoryRepository>((ref) => HistoryRepository());
+final historyRepositoryProvider = Provider<HistoryRepository>((ref) => HistoryRepository(context: ref.watch(operationalContextReaderProvider)));
 
 class HistoryState {
   final List<Transaction> transactions;
@@ -165,6 +167,8 @@ class HistoryState {
 }
 
 final historyProvider = StateNotifierProvider.autoDispose<HistoryController, HistoryState>((ref) {
+  // Reload when the active branch is switched (see activeBranchIdProvider).
+  ref.watch(activeBranchIdProvider);
   return HistoryController(ref.watch(historyRepositoryProvider));
 });
 

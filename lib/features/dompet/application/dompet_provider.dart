@@ -1,13 +1,17 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/session/branch_providers.dart';
+import '../../../core/session/operational_context.dart';
 import '../domain/dompet_models.dart';
 import 'dompet_repository.dart';
 
-final dompetRepositoryProvider = Provider<DompetRepository>((ref) => DompetRepository());
+final dompetRepositoryProvider = Provider<DompetRepository>((ref) => DompetRepository(context: ref.watch(operationalContextReaderProvider)));
 
 /// All active cash locations (Store Cash + couriers) — used by the
 /// checkout-side [CashLocationPicker] as well as the Dompet page.
 final cashLocationsProvider = FutureProvider.autoDispose<List<CashLocation>>((ref) async {
+  // Reload when the active branch is switched (see activeBranchIdProvider).
+  ref.watch(activeBranchIdProvider);
   return ref.watch(dompetRepositoryProvider).getCashLocations();
 });
 
@@ -51,6 +55,8 @@ class DompetState {
 }
 
 final dompetProvider = StateNotifierProvider.autoDispose<DompetController, DompetState>((ref) {
+  // Reload when the active branch is switched (see activeBranchIdProvider).
+  ref.watch(activeBranchIdProvider);
   return DompetController(ref.watch(dompetRepositoryProvider));
 });
 
@@ -148,6 +154,8 @@ class ClosingState {
 }
 
 final closingProvider = StateNotifierProvider.autoDispose<ClosingController, ClosingState>((ref) {
+  // Reload when the active branch is switched (see activeBranchIdProvider).
+  ref.watch(activeBranchIdProvider);
   return ClosingController(ref.watch(dompetRepositoryProvider));
 });
 

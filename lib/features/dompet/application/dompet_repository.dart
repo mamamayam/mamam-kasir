@@ -2,29 +2,43 @@ import 'package:sqflite_sqlcipher/sqflite.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../../core/data/app_database.dart';
+import '../../../core/session/operational_context.dart';
 import '../domain/dompet_models.dart';
 
+/// Cash ledger (Dompet). Every movement and closing is attributed to the
+/// acting user and the active branch, both taken from [OperationalContext]
+/// at the moment of the write; every read is limited to the active branch.
+///
+/// KNOWN LIMITATION (not changed here): the store cash location is still
+/// the single hard-coded id 'loc-store' (also in dompet_screen.dart and
+/// cash_movement_tile.dart). That is correct while there is one branch;
+/// a second branch needs its own store location and a way to resolve it.
 class DompetRepository {
   final _uuid = const Uuid();
+  final OperationalContextReader _context;
+
+  DompetRepository({required OperationalContextReader context}) : _context = context;
 
   Future<Database> get _db => AppDatabase.instance.database;
 
   // --- Cash locations ---
 
   Future<List<CashLocation>> getCashLocations({CashLocationType? type}) async {
+    final branchId = _context().branchId;
     final db = await _db;
     final rows = await db.query(
       'cash_locations',
-      where: type == null ? 'is_active = 1' : 'is_active = 1 AND type = ?',
-      whereArgs: type == null ? null : [type.name],
+      where: type == null ? 'is_active = 1 AND branch_id = ?' : 'is_active = 1 AND type = ? AND branch_id = ?',
+      whereArgs: type == null ? [branchId] : [type.name, branchId],
       orderBy: 'created_at ASC',
     );
     return rows.map(_locationFromRow).toList();
   }
 
   Future<CashLocation?> getCashLocation(String id) async {
+    final branchId = _context().branchId;
     final db = await _db;
-    final rows = await db.query('cash_locations', where: 'id = ?', whereArgs: [id], limit: 1);
+    final rows = await db.query('cash_locations', where: 'id = ? AND branch_id = ?', whereArgs: [id, branchId], limit: 1);
     if (rows.isEmpty) return null;
     return _locationFromRow(rows.first);
   }
@@ -45,15 +59,16 @@ class DompetRepository {
   /// requires (§26: "Jangan membuat modul Dompet sebagai sistem saldo
   /// sederhana... balance += cash").
   Future<int> getLocationBalance(String locationId) async {
+    final branchId = _context().branchId;
     final db = await _db;
 
     final inResult = await db.rawQuery(
-      'SELECT COALESCE(SUM(amount), 0) as total FROM cash_movements WHERE to_location_id = ?',
-      [locationId],
+      'SELECT COALESCE(SUM(amount), 0) as total FROM cash_movements WHERE to_location_id = ? AND branch_id = ?',
+      [locationId, branchId],
     );
     final outResult = await db.rawQuery(
-      'SELECT COALESCE(SUM(amount), 0) as total FROM cash_movements WHERE from_location_id = ?',
-      [locationId],
+      'SELECT COALESCE(SUM(amount), 0) as total FROM cash_movements WHERE from_location_id = ? AND branch_id = ?',
+      [locationId, branchId],
     );
 
     final inTotal = inResult.first['total'] as int;
@@ -90,11 +105,12 @@ class DompetRepository {
   // --- Cash movements ---
 
   Future<List<CashMovement>> getMovements({String? locationId, int limit = 100}) async {
+    final branchId = _context().branchId;
     final db = await _db;
     final rows = await db.query(
       'cash_movements',
-      where: locationId == null ? null : 'from_location_id = ? OR to_location_id = ?',
-      whereArgs: locationId == null ? null : [locationId, locationId],
+      where: locationId == null ? 'branch_id = ?' : '(from_location_id = ? OR to_location_id = ?) AND branch_id = ?',
+      whereArgs: locationId == null ? [branchId] : [locationId, locationId, branchId],
       orderBy: 'created_at DESC',
       limit: limit,
     );
@@ -127,6 +143,7 @@ class DompetRepository {
     required int amount,
     required String transactionId,
   }) async {
+    final ctx = _context();
     final db = await _db;
     await db.insert('cash_movements', {
       'id': _uuid.v4(),
@@ -138,7 +155,8 @@ class DompetRepository {
       'reference_kasbon_id': null,
       'reason': null,
       'created_at': DateTime.now().toIso8601String(),
-      'created_by': null,
+      'branch_id': ctx.branchId,
+      'created_by': ctx.userId,
     });
   }
 
@@ -150,6 +168,7 @@ class DompetRepository {
     required String courierLocationId,
     required int amount,
   }) async {
+    final ctx = _context();
     final db = await _db;
     await db.insert('cash_movements', {
       'id': _uuid.v4(),
@@ -161,7 +180,8 @@ class DompetRepository {
       'reference_kasbon_id': null,
       'reason': 'Setoran kurir',
       'created_at': DateTime.now().toIso8601String(),
-      'created_by': null,
+      'branch_id': ctx.branchId,
+      'created_by': ctx.userId,
     });
   }
 
@@ -177,6 +197,7 @@ class DompetRepository {
     required int amount,
     String? reason,
   }) async {
+    final ctx = _context();
     final db = await _db;
     final id = _uuid.v4();
     await db.insert('cash_movements', {
@@ -189,7 +210,8 @@ class DompetRepository {
       'reference_kasbon_id': null,
       'reason': reason,
       'created_at': DateTime.now().toIso8601String(),
-      'created_by': null,
+      'branch_id': ctx.branchId,
+      'created_by': ctx.userId,
     });
     return id;
   }
@@ -204,6 +226,7 @@ class DompetRepository {
     required int amount,
     String? reason,
   }) async {
+    final ctx = _context();
     final db = await _db;
     final id = _uuid.v4();
     await db.insert('cash_movements', {
@@ -216,7 +239,8 @@ class DompetRepository {
       'reference_kasbon_id': null,
       'reason': reason ?? 'Pemasukan non-penjualan',
       'created_at': DateTime.now().toIso8601String(),
-      'created_by': null,
+      'branch_id': ctx.branchId,
+      'created_by': ctx.userId,
     });
     return id;
   }
@@ -227,8 +251,9 @@ class DompetRepository {
   /// exception, scoped to Arus Kas entry deletion which is itself a
   /// user-facing "undo this entry" action, not a correction-in-place.
   Future<void> deleteCashMovement(String movementId) async {
+    final branchId = _context().branchId;
     final db = await _db;
-    await db.delete('cash_movements', where: 'id = ?', whereArgs: [movementId]);
+    await db.delete('cash_movements', where: 'id = ? AND branch_id = ?', whereArgs: [movementId, branchId]);
   }
 
   // --- Kasbon ---
@@ -293,6 +318,7 @@ class DompetRepository {
     required String courierName,
     required int amount,
   }) async {
+    final ctx = _context();
     final db = await _db;
     final kasbonId = _uuid.v4();
     final now = DateTime.now().toIso8601String();
@@ -320,7 +346,8 @@ class DompetRepository {
       'reference_kasbon_id': kasbonId,
       'reason': 'Konversi outstanding kurir menjadi kasbon',
       'created_at': now,
-      'created_by': null,
+      'branch_id': ctx.branchId,
+      'created_by': ctx.userId,
     });
 
     return (await getKasbonList()).firstWhere((k) => k.id == kasbonId);
@@ -365,14 +392,22 @@ class DompetRepository {
   // --- Tutup Dompet (closing) ---
 
   Future<List<DompetClosing>> getClosings({int limit = 50}) async {
+    final branchId = _context().branchId;
     final db = await _db;
-    final rows = await db.query('dompet_closings', orderBy: 'period_end DESC', limit: limit);
+    final rows = await db.query(
+      'dompet_closings',
+      where: 'branch_id = ?',
+      whereArgs: [branchId],
+      orderBy: 'period_end DESC',
+      limit: limit,
+    );
     return rows.map(_closingFromRow).toList();
   }
 
   Future<DompetClosing?> getLastClosing() async {
+    final branchId = _context().branchId;
     final db = await _db;
-    final rows = await db.query('dompet_closings', orderBy: 'period_end DESC', limit: 1);
+    final rows = await db.query('dompet_closings', where: 'branch_id = ?', whereArgs: [branchId], orderBy: 'period_end DESC', limit: 1);
     if (rows.isEmpty) return null;
     return _closingFromRow(rows.first);
   }
@@ -402,6 +437,7 @@ class DompetRepository {
   /// Opening + Cash Sales + Courier Deposits - Cash Expenses, and
   /// closing must be blocked while any courier holds outstanding cash.
   Future<DompetClosingPreview> buildClosingPreview() async {
+    final branchId = _context().branchId;
     final db = await _db;
     final lastClosing = await getLastClosing();
     final periodStart = lastClosing?.periodEnd ?? DateTime.fromMillisecondsSinceEpoch(0);
@@ -411,8 +447,8 @@ class DompetRepository {
       final column = asIncoming ? 'to_location_id' : 'from_location_id';
       final result = await db.rawQuery(
         'SELECT COALESCE(SUM(amount), 0) as total FROM cash_movements '
-        'WHERE type = ? AND $column = ? AND created_at > ?',
-        [type.dbValue, 'loc-store', periodStart.toIso8601String()],
+        'WHERE type = ? AND $column = ? AND created_at > ? AND branch_id = ?',
+        [type.dbValue, 'loc-store', periodStart.toIso8601String(), branchId],
       );
       return result.first['total'] as int;
     }
@@ -452,6 +488,8 @@ class DompetRepository {
     DompetClosingStatus status = DompetClosingStatus.closed,
     String? note,
   }) async {
+    final ctx = _context();
+
     if (!preview.canClose) {
       throw StateError('Tidak bisa tutup dompet: masih ada uang kurir yang belum diselesaikan.');
     }
@@ -475,7 +513,8 @@ class DompetRepository {
       'status': status.dbValue,
       'note': note,
       'created_at': now.toIso8601String(),
-      'created_by': null,
+      'branch_id': ctx.branchId,
+      'created_by': ctx.userId,
     });
 
     if (discrepancy != 0) {
@@ -492,7 +531,8 @@ class DompetRepository {
         'reference_kasbon_id': null,
         'reason': 'Selisih Tutup Dompet',
         'created_at': now.toIso8601String(),
-        'created_by': null,
+        'branch_id': ctx.branchId,
+        'created_by': ctx.userId,
       });
     }
 

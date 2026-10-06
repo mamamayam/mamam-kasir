@@ -156,6 +156,25 @@ class AppSessionController extends StateNotifier<AppSession> {
     return true;
   }
 
+  /// Re-validates the active branch against what the user can access
+  /// right now. Call after branches change (e.g. the active branch was
+  /// switched off in Manajemen Cabang): the session then moves to the
+  /// next accessible branch — or to none — instead of staying on a
+  /// branch it can no longer operate in. No-op when signed out or when
+  /// the active branch is still valid.
+  Future<void> refreshActiveBranch() async {
+    final userId = state.userId;
+    final role = state.role;
+    if (userId == null || role == null) return;
+
+    final branchId = await _resolveBranch(userId, role, state.branchId);
+    if (branchId == state.branchId) return;
+
+    final prefs = await SharedPreferences.getInstance();
+    await _persistBranch(prefs, branchId);
+    state = AppSession(userId: userId, username: state.username, role: role, branchId: branchId);
+  }
+
   /// Clears the session (identity) but deliberately leaves the user's
   /// PIN in place (now stored per-user in the DB, not touched by this
   /// method at all) — logging out doesn't require re-registering a PIN

@@ -2,24 +2,27 @@ import 'package:sqflite_sqlcipher/sqflite.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../../core/data/app_database.dart';
+import '../../../core/session/operational_context.dart';
 import '../../dompet/application/dompet_repository.dart';
 import '../domain/arus_kas_models.dart';
 
 class ArusKasRepository {
   final _uuid = const Uuid();
   final DompetRepository _dompetRepository;
+  final OperationalContextReader _context;
 
-  ArusKasRepository(this._dompetRepository);
+  ArusKasRepository(this._dompetRepository, {required OperationalContextReader context}) : _context = context;
 
   Future<Database> get _db => AppDatabase.instance.database;
 
   /// Distinct categories used so far, per direction — feeds the
   /// editable Kategori combobox (pick existing or type new).
   Future<List<String>> getCategories(ArusKasDirection direction) async {
+    final branchId = _context().branchId;
     final db = await _db;
     final rows = await db.rawQuery(
-      'SELECT DISTINCT category FROM cash_expenses WHERE direction = ? ORDER BY category ASC',
-      [direction.dbValue],
+      'SELECT DISTINCT category FROM cash_expenses WHERE direction = ? AND branch_id = ? ORDER BY category ASC',
+      [direction.dbValue, branchId],
     );
     return rows.map((r) => r['category'] as String).toList();
   }
@@ -29,9 +32,10 @@ class ArusKasRepository {
     DateTime? from,
     DateTime? to,
   }) async {
+    final branchId = _context().branchId;
     final db = await _db;
-    final where = StringBuffer('direction = ?');
-    final args = <Object?>[direction.dbValue];
+    final where = StringBuffer('direction = ? AND branch_id = ?');
+    final args = <Object?>[direction.dbValue, branchId];
 
     if (from != null) {
       where.write(' AND transaction_date >= ?');
@@ -46,7 +50,7 @@ class ArusKasRepository {
 
     // Join cash_locations for display names in one pass rather than
     // per-row, since the location set is small.
-    final locationRows = await db.query('cash_locations');
+    final locationRows = await db.query('cash_locations', where: 'branch_id = ?', whereArgs: [branchId]);
     final locationNames = {for (final l in locationRows) l['id'] as String: l['name'] as String};
 
     return rows.map((row) => _entryFromRow(row, locationNames)).toList();
@@ -87,6 +91,10 @@ class ArusKasRepository {
     String? storeOrSupplierName,
     String? detail,
   }) async {
+    // Acting user + branch from the live session, taken before anything
+    // is written (the matching cash movement below takes its own).
+    final ctx = _context();
+
     if (fundingSource == ArusKasFundingSource.cashLocation && sourceLocationId == null) {
       throw ArgumentError('sourceLocationId is required when fundingSource is cashLocation');
     }
@@ -120,7 +128,8 @@ class ArusKasRepository {
       'detail': detail,
       'cash_movement_id': cashMovementId,
       'created_at': DateTime.now().toIso8601String(),
-      'created_by': null,
+      'created_by': ctx.userId,
+      'branch_id': ctx.branchId,
     });
   }
 
@@ -129,21 +138,24 @@ class ArusKasRepository {
   /// is a user-facing "remove this entry" action, distinct from the
   /// ledger's general immutability (see DompetRepository.deleteCashMovement).
   Future<void> deleteEntry(String id) async {
+    final branchId = _context().branchId;
     final db = await _db;
-    final rows = await db.query('cash_expenses', where: 'id = ?', whereArgs: [id], limit: 1);
+    // Only an entry of the acting branch can be removed.
+    final rows = await db.query('cash_expenses', where: 'id = ? AND branch_id = ?', whereArgs: [id, branchId], limit: 1);
     if (rows.isEmpty) return;
 
     final cashMovementId = rows.first['cash_movement_id'] as String?;
     if (cashMovementId != null) {
       await _dompetRepository.deleteCashMovement(cashMovementId);
     }
-    await db.delete('cash_expenses', where: 'id = ?', whereArgs: [id]);
+    await db.delete('cash_expenses', where: 'id = ? AND branch_id = ?', whereArgs: [id, branchId]);
   }
 
   Future<int> getTotal({required ArusKasDirection direction, DateTime? from, DateTime? to}) async {
+    final branchId = _context().branchId;
     final db = await _db;
-    final where = StringBuffer('direction = ?');
-    final args = <Object?>[direction.dbValue];
+    final where = StringBuffer('direction = ? AND branch_id = ?');
+    final args = <Object?>[direction.dbValue, branchId];
     if (from != null) {
       where.write(' AND transaction_date >= ?');
       args.add(from.toIso8601String());

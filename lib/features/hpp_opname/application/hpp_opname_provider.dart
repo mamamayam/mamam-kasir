@@ -1,9 +1,11 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/session/branch_providers.dart';
+import '../../../core/session/operational_context.dart';
 import '../domain/hpp_opname_models.dart';
 import 'hpp_opname_repository.dart';
 
-final hppOpnameRepositoryProvider = Provider<HppOpnameRepository>((ref) => HppOpnameRepository());
+final hppOpnameRepositoryProvider = Provider<HppOpnameRepository>((ref) => HppOpnameRepository(context: ref.watch(operationalContextReaderProvider)));
 
 /// One in-progress line in the Stok Opname input form — qty/price start
 /// null/unset until the user types something, so "not yet counted" is
@@ -108,6 +110,8 @@ class HppOpnameState {
 }
 
 final hppOpnameProvider = StateNotifierProvider.autoDispose<HppOpnameController, HppOpnameState>((ref) {
+  // Reload when the active branch is switched (see activeBranchIdProvider).
+  ref.watch(activeBranchIdProvider);
   return HppOpnameController(ref.watch(hppOpnameRepositoryProvider));
 });
 

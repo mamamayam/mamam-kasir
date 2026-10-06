@@ -1,6 +1,7 @@
 import 'package:sqflite_sqlcipher/sqflite.dart';
 
 import '../../../core/data/app_database.dart';
+import '../../../core/session/operational_context.dart';
 import '../domain/laporan_models.dart';
 
 /// NOT CURRENTLY CALLED: LaporanController routes to LaporanDummyData
@@ -32,9 +33,14 @@ import '../domain/laporan_models.dart';
 /// Ini". Fixing that touches Dashboard's own numbers and should be its
 /// own change.
 class LaporanRepository {
+  final OperationalContextReader _context;
+
+  LaporanRepository({required OperationalContextReader context}) : _context = context;
+
   Future<Database> get _db => AppDatabase.instance.database;
 
   Future<ReportData> getPendapatanReport(DateTime month) async {
+    final branchId = _context().branchId;
     final db = await _db;
     final daysInMonth = DateTime(month.year, month.month + 1, 0).day;
 
@@ -47,6 +53,7 @@ class LaporanRepository {
       year: month.year,
       month: month.month,
       daysInMonth: daysInMonth,
+      branchId: branchId,
     );
 
     final totalValue = trend.fold<int>(0, (sum, p) => sum + p.value);
@@ -57,13 +64,15 @@ class LaporanRepository {
       filter: "status = 'paid'",
       year: month.year,
       month: month.month,
+      branchId: branchId,
     );
-    final rows = await _getPendapatanRows(db, month.year, month.month);
+    final rows = await _getPendapatanRows(db, month.year, month.month, branchId);
 
     return _build(totalValue: totalValue, txCount: txCount, daysInMonth: daysInMonth, trend: trend, rows: rows);
   }
 
   Future<ReportData> getPengeluaranReport(DateTime month) async {
+    final branchId = _context().branchId;
     final db = await _db;
     final daysInMonth = DateTime(month.year, month.month + 1, 0).day;
 
@@ -76,6 +85,7 @@ class LaporanRepository {
       year: month.year,
       month: month.month,
       daysInMonth: daysInMonth,
+      branchId: branchId,
     );
 
     final totalValue = trend.fold<int>(0, (sum, p) => sum + p.value);
@@ -86,8 +96,9 @@ class LaporanRepository {
       filter: "direction = 'pengeluaran'",
       year: month.year,
       month: month.month,
+      branchId: branchId,
     );
-    final rows = await _getPengeluaranRows(db, month.year, month.month);
+    final rows = await _getPengeluaranRows(db, month.year, month.month, branchId);
 
     return _build(totalValue: totalValue, txCount: txCount, daysInMonth: daysInMonth, trend: trend, rows: rows);
   }
@@ -136,14 +147,15 @@ class LaporanRepository {
     required int year,
     required int month,
     required int daysInMonth,
+    required String branchId,
   }) async {
     final result = await db.rawQuery(
       "SELECT CAST(strftime('%d', $dateColumn) AS INTEGER) AS day, "
       "COALESCE(SUM($amountColumn), 0) AS total "
       "FROM $table "
-      "WHERE $filter AND strftime('%Y-%m', $dateColumn) = ? "
+      "WHERE $filter AND strftime('%Y-%m', $dateColumn) = ? AND branch_id = ? "
       "GROUP BY day",
-      [_monthPrefix(year, month)],
+      [_monthPrefix(year, month), branchId],
     );
 
     final byDay = <int, int>{
@@ -162,20 +174,22 @@ class LaporanRepository {
     required String filter,
     required int year,
     required int month,
+    required String branchId,
   }) async {
     final result = await db.rawQuery(
-      "SELECT COUNT(*) as cnt FROM $table WHERE $filter AND strftime('%Y-%m', $dateColumn) = ?",
-      [_monthPrefix(year, month)],
+      "SELECT COUNT(*) as cnt FROM $table "
+      "WHERE $filter AND strftime('%Y-%m', $dateColumn) = ? AND branch_id = ?",
+      [_monthPrefix(year, month), branchId],
     );
     return _asInt(result.first['cnt']);
   }
 
-  Future<List<ReportRow>> _getPendapatanRows(Database db, int year, int month) async {
+  Future<List<ReportRow>> _getPendapatanRows(Database db, int year, int month, String branchId) async {
     final rows = await db.rawQuery(
       "SELECT display_number, customer_name, total, paid_at FROM transactions "
-      "WHERE status = 'paid' AND strftime('%Y-%m', paid_at) = ? "
+      "WHERE status = 'paid' AND strftime('%Y-%m', paid_at) = ? AND branch_id = ? "
       "ORDER BY paid_at DESC LIMIT 50",
-      [_monthPrefix(year, month)],
+      [_monthPrefix(year, month), branchId],
     );
 
     return rows.map((row) {
@@ -191,12 +205,12 @@ class LaporanRepository {
     }).toList();
   }
 
-  Future<List<ReportRow>> _getPengeluaranRows(Database db, int year, int month) async {
+  Future<List<ReportRow>> _getPengeluaranRows(Database db, int year, int month, String branchId) async {
     final rows = await db.rawQuery(
       "SELECT category, store_or_supplier_name, amount, transaction_date FROM cash_expenses "
-      "WHERE direction = 'pengeluaran' AND strftime('%Y-%m', transaction_date) = ? "
+      "WHERE direction = 'pengeluaran' AND strftime('%Y-%m', transaction_date) = ? AND branch_id = ? "
       "ORDER BY transaction_date DESC, created_at DESC LIMIT 50",
-      [_monthPrefix(year, month)],
+      [_monthPrefix(year, month), branchId],
     );
 
     return rows.map((row) {
